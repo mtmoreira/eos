@@ -1,0 +1,319 @@
+# EOS structure registry: layers and modules, enforced by
+# tools/check_layers.py in CI. This file is structural: it changes
+# only with Matheus approval (see the EOS Code Structure document).
+
+layers:
+  - id: L0
+    level: 0
+    name: foundation
+    roots: [src/foundation]
+  - id: L1
+    level: 1
+    name: io
+    roots: [src/io]
+  - id: L2
+    level: 2
+    name: design-data
+    roots: [src/db, src/tech]
+  - id: L3
+    level: 3
+    name: analysis
+    roots: [src/analysis]
+  - id: L4
+    level: 4
+    name: engines
+    roots: [src/synth, src/pd, src/pv, src/eco]
+  - id: L5
+    level: 5
+    name: session
+    roots: [src/session]
+  - id: L6
+    level: 6
+    name: interface
+    roots: [src/ui]
+modules:
+  - name: types
+    layer: L0
+    path: src/foundation/types
+    target: eda_foundation_types
+    adopted: false
+  - name: ids
+    layer: L0
+    path: src/foundation/ids
+    target: eda_foundation_ids
+    adopted: false
+  - name: geom
+    layer: L0
+    path: src/foundation/geom
+    target: eda_foundation_geom
+    adopted: false
+  - name: strings
+    layer: L0
+    path: src/foundation/strings
+    target: eda_foundation_strings
+    adopted: false
+  - name: mem
+    layer: L0
+    path: src/foundation/mem
+    target: eda_foundation_mem
+    adopted: false
+  - name: containers
+    layer: L0
+    path: src/foundation/containers
+    target: eda_foundation_containers
+    adopted: false
+  - name: jobs
+    layer: L0
+    path: src/foundation/jobs
+    target: eda_foundation_jobs
+    adopted: false
+  - name: log
+    layer: L0
+    path: src/foundation/log
+    target: eda_foundation_log
+    adopted: false
+  - name: errors
+    layer: L0
+    path: src/foundation/errors
+    target: eda_foundation_errors
+    adopted: false
+  - name: liberty
+    layer: L1
+    path: src/io/liberty
+    target: eda_io_liberty
+    adopted: false
+  - name: lef
+    layer: L1
+    path: src/io/lef
+    target: eda_io_lef
+    adopted: false
+  - name: def
+    layer: L1
+    path: src/io/def
+    target: eda_io_def
+    adopted: false
+  - name: sdc
+    layer: L1
+    path: src/io/sdc
+    target: eda_io_sdc
+    adopted: false
+  - name: spef
+    layer: L1
+    path: src/io/spef
+    target: eda_io_spef
+    adopted: false
+  - name: verilog
+    layer: L1
+    path: src/io/verilog
+    target: eda_io_verilog
+    adopted: false
+  - name: spice
+    layer: L1
+    path: src/io/spice
+    target: eda_io_spice
+    adopted: false
+  - name: gds
+    layer: L1
+    path: src/io/gds
+    target: eda_io_gds
+    adopted: false
+  - name: design
+    layer: L2
+    path: src/db/design
+    target: eda_db_design
+    adopted: false
+  - name: odb
+    layer: L2
+    path: src/db/odb
+    target: eda_db_odb
+    adopted: true
+    upstream: OpenDB
+  - name: sourcemap
+    layer: L2
+    path: src/db/sourcemap
+    target: eda_db_sourcemap
+    adopted: false
+  - name: scenarios
+    layer: L2
+    path: src/db/scenarios
+    target: eda_db_scenarios
+    adopted: false
+  - name: constraints
+    layer: L2
+    path: src/db/constraints
+    target: eda_db_constraints
+    adopted: false
+  - name: checkpoint
+    layer: L2
+    path: src/db/checkpoint
+    target: eda_db_checkpoint
+    adopted: false
+  - name: package
+    layer: L2
+    path: src/tech/package
+    target: eda_tech_package
+    adopted: false
+  - name: timing
+    layer: L3
+    path: src/analysis/timing
+    target: eda_analysis_timing
+    adopted: false
+  - name: sta
+    layer: L3
+    path: src/analysis/timing/sta
+    target: eda_analysis_sta
+    adopted: true
+    upstream: OpenSTA
+  - name: parasitics
+    layer: L3
+    path: src/analysis/parasitics
+    target: eda_analysis_parasitics
+    adopted: false
+  - name: power
+    layer: L3
+    path: src/analysis/power
+    target: eda_analysis_power
+    adopted: false
+  - name: geomq
+    layer: L3
+    path: src/analysis/geomq
+    target: eda_analysis_geomq
+    adopted: false
+  - name: frontend
+    layer: L4
+    path: src/synth/frontend
+    target: eda_synth_frontend
+    adopted: false
+  - name: yosys
+    layer: L4
+    path: src/synth/yosys
+    target: eda_synth_yosys
+    adopted: true
+    upstream: Yosys
+  - name: abc
+    layer: L4
+    path: src/synth/abc
+    target: eda_synth_abc
+    adopted: true
+    upstream: ABC
+  - name: openroad-syn
+    layer: L4
+    path: src/synth/openroad-syn
+    target: eda_synth_openroad_syn
+    adopted: true
+    upstream: OpenROAD synthesis (src/syn)
+  - name: optimizers
+    layer: L4
+    path: src/synth/optimizers
+    target: eda_synth_optimizers
+    adopted: false
+  - name: floorplan
+    layer: L4
+    path: src/pd/floorplan
+    target: eda_pd_floorplan
+    adopted: false
+  - name: place
+    layer: L4
+    path: src/pd/place
+    target: eda_pd_place
+    adopted: false
+  - name: cts
+    layer: L4
+    path: src/pd/cts
+    target: eda_pd_cts
+    adopted: false
+  - name: route
+    layer: L4
+    path: src/pd/route
+    target: eda_pd_route
+    adopted: false
+  - name: finish
+    layer: L4
+    path: src/pd/finish
+    target: eda_pd_finish
+    adopted: false
+  - name: drc
+    layer: L4
+    path: src/pv/drc
+    target: eda_pv_drc
+    adopted: false
+  - name: lvs
+    layer: L4
+    path: src/pv/lvs
+    target: eda_pv_lvs
+    adopted: false
+  - name: antenna
+    layer: L4
+    path: src/pv/antenna
+    target: eda_pv_antenna
+    adopted: false
+  - name: extract
+    layer: L4
+    path: src/pv/extract
+    target: eda_pv_extract
+    adopted: false
+  - name: transactions
+    layer: L4
+    path: src/eco/transactions
+    target: eda_eco_transactions
+    adopted: false
+  - name: timing-eco
+    layer: L4
+    path: src/eco/timing-eco
+    target: eda_eco_timing_eco
+    adopted: false
+  - name: functional-eco
+    layer: L4
+    path: src/eco/functional-eco
+    target: eda_eco_functional_eco
+    adopted: false
+  - name: session
+    layer: L5
+    path: src/session/session
+    target: eda_session_session
+    adopted: false
+  - name: ledger
+    layer: L5
+    path: src/session/ledger
+    target: eda_session_ledger
+    adopted: false
+  - name: flow
+    layer: L5
+    path: src/session/flow
+    target: eda_session_flow
+    adopted: false
+  - name: cost
+    layer: L5
+    path: src/session/cost
+    target: eda_session_cost
+    adopted: false
+  - name: reports
+    layer: L5
+    path: src/session/reports
+    target: eda_session_reports
+    adopted: false
+  - name: metrics
+    layer: L5
+    path: src/session/metrics
+    target: eda_session_metrics
+    adopted: false
+  - name: registry
+    layer: L6
+    path: src/ui/registry
+    target: eda_ui_registry
+    adopted: false
+  - name: tcl
+    layer: L6
+    path: src/ui/tcl
+    target: eda_ui_tcl
+    adopted: false
+  - name: python
+    layer: L6
+    path: src/ui/python
+    target: eda_ui_python
+    adopted: false
+  - name: gui
+    layer: L6
+    path: src/ui/gui
+    target: eda_ui_gui
+    adopted: false

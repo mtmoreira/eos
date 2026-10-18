@@ -1,0 +1,10 @@
+# Sky130 technology package manifest.
+# Pins are set by the Phase 0 baseline; every payload is verified
+# against the hashes recorded here before use.
+name: sky130
+support_tier: experimental
+pdk:
+  source: open_pdks
+  revision: TBD (Phase 0 baseline)
+collateral: {}
+decks: {}
