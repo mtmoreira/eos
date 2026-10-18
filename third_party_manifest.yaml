@@ -1,0 +1,64 @@
+# Every adopted component: upstream, pinned version, licence, the
+# module it lives in, and its local patch count. Pins are set by the
+# Phase 0 baseline and audited by the licence audit tool.
+components:
+  - name: slang
+    upstream: https://github.com/MikePopoloski/slang
+    version: TBD
+    licence: MIT
+    module: src/synth/frontend (planned)
+    patches: 0
+  - name: yosys
+    upstream: https://github.com/YosysHQ/yosys
+    version: TBD
+    licence: ISC
+    module: src/synth/yosys
+    patches: 0
+  - name: abc
+    upstream: https://github.com/berkeley-abc/abc
+    version: TBD
+    licence: BSD-style (permissive)
+    module: src/synth/abc
+    patches: 0
+  - name: mockturtle
+    upstream: https://github.com/lsils/mockturtle
+    version: TBD
+    licence: MIT
+    module: src/synth/optimizers (planned)
+    patches: 0
+  - name: opensta
+    upstream: https://github.com/The-OpenROAD-Project/OpenSTA
+    version: TBD
+    licence: GPL-3.0 (dual-licensed; commercial licence from Parallax)
+    module: src/analysis/timing/sta
+    patches: 0
+  - name: opendb
+    upstream: https://github.com/The-OpenROAD-Project/OpenROAD (src/odb)
+    version: TBD
+    licence: BSD-3-Clause
+    module: src/db/odb
+    patches: 0
+  - name: openroad-modules
+    upstream: https://github.com/The-OpenROAD-Project/OpenROAD
+    version: TBD
+    licence: BSD-3-Clause
+    module: src/pd and src/pv (per-pass provenance at import time)
+    patches: 0
+  - name: klayout
+    upstream: https://github.com/KLayout/klayout
+    version: TBD
+    licence: GPL-3.0
+    module: src/io/gds and src/pv (planned)
+    patches: 0
+  - name: magic
+    upstream: https://github.com/RTimothyEdwards/magic
+    version: TBD
+    licence: TBD (licence audit in Phase 0)
+    module: src/pv (planned)
+    patches: 0
+  - name: netgen
+    upstream: https://github.com/RTimothyEdwards/netgen
+    version: TBD
+    licence: GPL (licence audit in Phase 0)
+    module: src/pv/lvs (planned)
+    patches: 0
