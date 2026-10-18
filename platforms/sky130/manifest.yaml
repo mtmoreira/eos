@@ -4,7 +4,7 @@
 name: sky130
 support_tier: experimental
 pdk:
-  source: open_pdks
-  revision: TBD (Phase 0 baseline)
+  source: open_pdks (fossi-foundation/open-pdks)
+  revision: commit abfc54bd87e0, pinned 2026-10-18 by the Phase 0 licence audit
 collateral: {}
 decks: {}
