@@ -169,9 +169,9 @@ targets on the gcd baseline outputs. Scripts and decks unmodified.
   `6_report.log`. Every metric artifact is written before that point and
   the 14-rule gate passes; the only missing outputs are the report's
   layout images. A Qt-enabled rebuild of the pinned OpenROAD would close
-  it. Recommendation: accept as a documented limitation for Phase 0;
-  revisit if the Phase 1 regression harness ever diffs full report
-  output. Decision: open (project owner).
+  it. Decision (project owner, 2026-10-24): accepted as a documented
+  limitation; no Qt-enabled rebuild for Phase 0. Revisit only if the
+  Phase 1 regression harness ever diffs full report output.
 - L2. No GDS from the default flow. In ORFS v3.0, `6_final.gds` is
   produced only by the `generate_abstract` target. The baseline runs
   therefore left final DEF, ODB, SPEF, SDC and netlist on disk, and no
