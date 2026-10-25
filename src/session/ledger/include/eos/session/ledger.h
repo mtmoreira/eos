@@ -122,6 +122,18 @@ struct LedgerSnapshot {
   std::vector<ArtifactRecord> artifacts;
 };
 
+// The text form of a snapshot, format version 1: a line-oriented
+// text with the same percent-escaping as the L2 checkpoint format
+// and a trailing FNV-1a 64 checksum line covering every preceding
+// byte. SnapshotToText serializes exactly what Snapshot() exports;
+// SnapshotFromText parses strictly (bad magic, unsupported version,
+// checksum mismatch, truncation or a malformed record are all
+// errors). The text form is syntax only: semantic consistency is
+// judged by Ledger::Restore, which a parsed snapshot must still
+// pass before any ledger adopts it.
+Result<std::string> SnapshotToText(const LedgerSnapshot& snapshot);
+Result<LedgerSnapshot> SnapshotFromText(const std::string& text);
+
 class Ledger {
  public:
   Ledger() = default;

@@ -253,5 +253,59 @@ TEST(Checkpoint, LoadMarksDanglingBindingsUnresolvedAndCountsThem) {
   Remove(path);
 }
 
+TEST(Checkpoint, TextFormRoundTripsAndMatchesTheFileForm) {
+  Fixture f;
+  const Result<std::string> text = Checkpoint::Serialize(f.Data());
+  ASSERT_TRUE(text.ok());
+
+  RestoreInfo info;
+  const Result<CheckpointData> parsed =
+      Checkpoint::FromString(text.value(), &info);
+  ASSERT_TRUE(parsed.ok());
+  EXPECT_EQ(info.constraints_marked_unresolved, 0u);
+  const Result<Design> design = Design::FromState(parsed.value().design);
+  ASSERT_TRUE(design.ok());
+  EXPECT_EQ(design.value().name(), "top");
+  EXPECT_EQ(design.value().Count(foundation::ObjectKind::kPin), 1u);
+
+  // Save writes exactly the Serialize text, and Load reads it back.
+  const std::string path = TempPath("textform");
+  Remove(path);
+  ASSERT_TRUE(Checkpoint::Save(path, f.Data()).ok());
+  EXPECT_EQ(ReadAll(path), text.value());
+  const Result<CheckpointData> loaded = Checkpoint::Load(path, nullptr);
+  ASSERT_TRUE(loaded.ok());
+  Remove(path);
+}
+
+TEST(Checkpoint, FromStringRejectsCorruptText) {
+  Fixture f;
+  const Result<std::string> text = Checkpoint::Serialize(f.Data());
+  ASSERT_TRUE(text.ok());
+
+  std::string flipped = text.value();
+  flipped[20] = flipped[20] == 'a' ? 'b' : 'a';
+  const Result<CheckpointData> bad = Checkpoint::FromString(flipped, nullptr);
+  ASSERT_FALSE(bad.ok());
+  EXPECT_EQ(bad.status().code(), ErrorCode::kInvalidArgument);
+
+  EXPECT_FALSE(Checkpoint::FromString("hello world\n", nullptr).ok());
+  EXPECT_FALSE(
+      Checkpoint::FromString(text.value().substr(0, 40), nullptr).ok());
+}
+
+TEST(Checkpoint, SerializeRefusesTheSameStatesSaveRefuses) {
+  Fixture f;
+  CheckpointData data = f.Data();
+  for (Constraint& c : data.constraints.constraints) {
+    if (c.status == BindingStatus::kUnresolved) {
+      c.status = BindingStatus::kBound;
+      c.bound_object =
+          foundation::ObjectId::Make(foundation::ObjectKind::kNet, 555);
+    }
+  }
+  EXPECT_FALSE(Checkpoint::Serialize(data).ok());
+}
+
 }  // namespace
 }  // namespace eos::db

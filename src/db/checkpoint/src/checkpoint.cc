@@ -439,7 +439,7 @@ Status ParseConstraints(LineReader& reader, CheckpointData& data) {
 
 }  // namespace
 
-Status Checkpoint::Save(const std::string& path, const CheckpointData& data) {
+Result<std::string> Checkpoint::Serialize(const CheckpointData& data) {
   const Result<Design> design = ValidateModules(data);
   if (!design.ok()) {
     return design.status();
@@ -453,8 +453,15 @@ Status Checkpoint::Save(const std::string& path, const CheckpointData& data) {
     }
   }
   const std::string body = BuildBody(data);
-  const std::string content =
-      body + "end " + Hex64(Fnv1a(body.data(), body.size())) + "\n";
+  return body + "end " + Hex64(Fnv1a(body.data(), body.size())) + "\n";
+}
+
+Status Checkpoint::Save(const std::string& path, const CheckpointData& data) {
+  const Result<std::string> serialized = Serialize(data);
+  if (!serialized.ok()) {
+    return serialized.status();
+  }
+  const std::string& content = serialized.value();
   const std::string tmp_path = path + ".tmp";
   {
     std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
@@ -486,8 +493,11 @@ Result<CheckpointData> Checkpoint::Load(const std::string& path,
   if (in.bad()) {
     return IoError("failed reading checkpoint file: " + path);
   }
-  const std::string content = buffer.str();
+  return FromString(buffer.str(), info);
+}
 
+Result<CheckpointData> Checkpoint::FromString(const std::string& content,
+                                              RestoreInfo* info) {
   // The checksum line is the last line; the checksum covers every byte
   // before it, including the newline that precedes it.
   const std::size_t end_pos = content.rfind("\nend ");

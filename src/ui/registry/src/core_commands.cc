@@ -13,7 +13,6 @@
 #include <utility>
 #include <vector>
 
-#include "eos/db/checkpoint.h"
 
 namespace eos::ui {
 namespace {
@@ -179,10 +178,7 @@ std::vector<ObjectId> EnumerateKind(const db::Design& design,
 std::string IdStr(ObjectId id) { return std::to_string(id.raw()); }
 
 void ResetProject(CommandContext& ctx) {
-  ctx.design.reset();
-  ctx.scenarios = db::ScenarioSet();
-  ctx.constraints = db::ConstraintSet();
-  ctx.ledger = session::Ledger();
+  ctx.project.Reset();
   ctx.collections.clear();
   ctx.next_collection = 1;
 }
@@ -207,11 +203,11 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (ctx.HasDesign()) {
           return CommandResult::Fail(
               Diag::kInvalidConfiguration,
-              "a design is already open: " + ctx.design->name() +
+              "a design is already open: " + ctx.project.design->name() +
                   " (eos::close_design first)");
         }
         ResetProject(ctx);
-        ctx.design.emplace(args[0]);
+        ctx.project.design.emplace(args[0]);
         return CommandResult::Ok("design=" + args[0] + " revision=0");
       });
 
@@ -233,11 +229,11 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         for (const ObjectKind kind :
              {ObjectKind::kCell, ObjectKind::kInstance, ObjectKind::kNet,
               ObjectKind::kPort, ObjectKind::kTerm, ObjectKind::kPin}) {
-          objects += ctx.design->Count(kind);
+          objects += ctx.project.design->Count(kind);
         }
         return CommandResult::Ok(
-            "design=" + ctx.design->name() + " revision=" +
-            std::to_string(ctx.ledger.current_revision()) +
+            "design=" + ctx.project.design->name() + " revision=" +
+            std::to_string(ctx.project.ledger.current_revision()) +
             " objects=" + std::to_string(objects));
       });
 
@@ -259,7 +255,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
         const Result<ObjectId> id =
-            ctx.design->CreateCell(args[0], macro);
+            ctx.project.design->CreateCell(args[0], macro);
         if (!id.ok()) return FromStatus(id.status());
         return CommandResult::Ok("id=" + IdStr(id.value()) +
                                  " name=" + args[0]);
@@ -274,13 +270,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
         const ObjectId cell =
-            ctx.design->Find(ObjectKind::kCell, args[1]);
+            ctx.project.design->Find(ObjectKind::kCell, args[1]);
         if (cell.is_null()) {
           return CommandResult::Fail(Diag::kInvalidConfiguration,
                                      "unknown cell: " + args[1]);
         }
         const Result<ObjectId> id =
-            ctx.design->CreateInstance(args[0], cell);
+            ctx.project.design->CreateInstance(args[0], cell);
         if (!id.ok()) return FromStatus(id.status());
         return CommandResult::Ok("id=" + IdStr(id.value()) +
                                  " name=" + args[0]);
@@ -293,7 +289,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return *bad;
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
-        const Result<ObjectId> id = ctx.design->CreateNet(args[0]);
+        const Result<ObjectId> id = ctx.project.design->CreateNet(args[0]);
         if (!id.ok()) return FromStatus(id.status());
         return CommandResult::Ok("id=" + IdStr(id.value()) +
                                  " name=" + args[0]);
@@ -320,7 +316,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               "direction must be in, out or inout, got: " + args[1]);
         }
         const Result<ObjectId> id =
-            ctx.design->CreatePort(args[0], direction);
+            ctx.project.design->CreatePort(args[0], direction);
         if (!id.ok()) return FromStatus(id.status());
         return CommandResult::Ok("id=" + IdStr(id.value()) +
                                  " name=" + args[0]);
@@ -335,18 +331,18 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
         const ObjectId instance =
-            ctx.design->Find(ObjectKind::kInstance, args[0]);
+            ctx.project.design->Find(ObjectKind::kInstance, args[0]);
         if (instance.is_null()) {
           return CommandResult::Fail(Diag::kInvalidConfiguration,
                                      "unknown instance: " + args[0]);
         }
-        const ObjectId net = ctx.design->Find(ObjectKind::kNet, args[2]);
+        const ObjectId net = ctx.project.design->Find(ObjectKind::kNet, args[2]);
         if (net.is_null()) {
           return CommandResult::Fail(Diag::kInvalidConfiguration,
                                      "unknown net: " + args[2]);
         }
         const Result<ObjectId> id =
-            ctx.design->Connect(instance, args[1], net);
+            ctx.project.design->Connect(instance, args[1], net);
         if (!id.ok()) return FromStatus(id.status());
         return CommandResult::Ok("id=" + IdStr(id.value()) + " name=" +
                                  args[0] + "/" + args[1]);
@@ -373,7 +369,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                   args[3]);
         }
         const Result<db::ScenarioId> id =
-            ctx.scenarios.Create(args[0], args[1], args[2], level);
+            ctx.project.scenarios.Create(args[0], args[1], args[2], level);
         if (!id.ok()) return FromStatus(id.status());
         return CommandResult::Ok("scenario=" + args[0] +
                                  " id=" + std::to_string(id.value()));
@@ -384,7 +380,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           -> CommandResult {
         if (auto bad = ExpectCount(args, 0, "list_scenarios")) return *bad;
         std::string out;
-        for (const db::Scenario& s : ctx.scenarios.all()) {
+        for (const db::Scenario& s : ctx.project.scenarios.all()) {
           if (!out.empty()) out += "\n";
           out += "scenario " + s.name + " mode=" + s.mode +
                  " corner=" + s.corner + " parasitics=" +
@@ -405,9 +401,9 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return *bad;
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
-        const db::ConstraintId id = ctx.constraints.Add(
-            db::ConstraintKind::kClock, args[0], args[1], *ctx.design);
-        const db::Constraint* c = ctx.constraints.Find(id);
+        const db::ConstraintId id = ctx.project.constraints.Add(
+            db::ConstraintKind::kClock, args[0], args[1], *ctx.project.design);
+        const db::Constraint* c = ctx.project.constraints.Find(id);
         std::string payload = "constraint=" + std::to_string(id) +
                               " status=" + StatusWord(c->status) +
                               " target=" + args[1];
@@ -431,8 +427,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                                      "unknown constraint kind: " + args[0]);
         }
         const db::ConstraintId id =
-            ctx.constraints.Add(*kind, args[1], args[2], *ctx.design);
-        const db::Constraint* c = ctx.constraints.Find(id);
+            ctx.project.constraints.Add(*kind, args[1], args[2], *ctx.project.design);
+        const db::Constraint* c = ctx.project.constraints.Find(id);
         return CommandResult::Ok("constraint=" + std::to_string(id) +
                                  " status=" + StatusWord(c->status) +
                                  " target=" + args[2]);
@@ -444,7 +440,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = ExpectCount(args, 0, "constraint_coverage")) {
           return *bad;
         }
-        const db::CoverageReport report = ctx.constraints.Coverage();
+        const db::CoverageReport report = ctx.project.constraints.Coverage();
         return CommandResult::Ok(
             "total=" + std::to_string(report.total) +
             " bound=" + std::to_string(report.bound) +
@@ -460,7 +456,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return *bad;
         }
         std::string out;
-        for (const db::Constraint& c : ctx.constraints.all()) {
+        for (const db::Constraint& c : ctx.project.constraints.all()) {
           if (!out.empty()) out += "\n";
           out += "constraint " + std::to_string(c.id) + " kind=" +
                  ConstraintKindWord(c.kind) + " name=" + c.name +
@@ -481,8 +477,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return *bad;
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
-        ctx.constraints.RebindAll(*ctx.design);
-        const db::CoverageReport report = ctx.constraints.Coverage();
+        ctx.project.constraints.RebindAll(*ctx.project.design);
+        const db::CoverageReport report = ctx.project.constraints.Coverage();
         return CommandResult::Ok(
             "total=" + std::to_string(report.total) +
             " bound=" + std::to_string(report.bound) +
@@ -506,8 +502,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                                      "unknown object kind: " + args[0]);
         }
         std::vector<ObjectId> members;
-        for (const ObjectId id : EnumerateKind(*ctx.design, *kind)) {
-          if (GlobMatch(args[1], ctx.design->NameOf(id))) {
+        for (const ObjectId id : EnumerateKind(*ctx.project.design, *kind)) {
+          if (GlobMatch(args[1], ctx.project.design->NameOf(id))) {
             members.push_back(id);
           }
         }
@@ -551,7 +547,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         for (const ObjectId id : it->second) {
           if (!out.empty()) out += "\n";
           const std::string name =
-              ctx.HasDesign() ? ctx.design->NameOf(id) : std::string();
+              ctx.HasDesign() ? ctx.project.design->NameOf(id) : std::string();
           out += name.empty() ? std::string("<deleted>") : name;
         }
         return CommandResult::Ok(out);
@@ -571,14 +567,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           label += " " + args[i];
         }
         session::TransactionSpec spec;
-        spec.input_revision = ctx.ledger.current_revision();
+        spec.input_revision = ctx.project.ledger.current_revision();
         spec.label = label;
         spec.tool_build = "eos-phase1";
-        const foundation::Status status = ctx.ledger.BeginTransaction(spec);
+        const foundation::Status status = ctx.project.ledger.BeginTransaction(spec);
         if (!status.ok()) return FromStatus(status);
         return CommandResult::Ok(
             "pending=1 revision=" +
-            std::to_string(ctx.ledger.current_revision()));
+            std::to_string(ctx.project.ledger.current_revision()));
       });
 
   add("commit_transaction", "commit_transaction [pass|fail|unknown]",
@@ -600,7 +596,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           proof = *parsed;
         }
         const Result<session::Revision> committed =
-            ctx.ledger.CommitPending(proof);
+            ctx.project.ledger.CommitPending(proof);
         if (!committed.ok()) return FromStatus(committed.status());
         return CommandResult::Ok("revision=" +
                                  std::to_string(committed.value()));
@@ -612,11 +608,11 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = ExpectCount(args, 0, "abort_transaction")) {
           return *bad;
         }
-        const foundation::Status status = ctx.ledger.AbortPending();
+        const foundation::Status status = ctx.project.ledger.AbortPending();
         if (!status.ok()) return FromStatus(status);
         return CommandResult::Ok(
             "aborted=1 revision=" +
-            std::to_string(ctx.ledger.current_revision()));
+            std::to_string(ctx.project.ledger.current_revision()));
       });
 
   add("rollback", "rollback <revision>",
@@ -630,7 +626,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return CommandResult::Fail(Diag::kInvalidConfiguration,
                                      "not a revision: " + args[0]);
         }
-        const foundation::Status status = ctx.ledger.RollbackTo(target);
+        const foundation::Status status = ctx.project.ledger.RollbackTo(target);
         if (!status.ok()) return FromStatus(status);
         return CommandResult::Ok("revision=" + std::to_string(target));
       });
@@ -642,7 +638,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return *bad;
         }
         return CommandResult::Ok(
-            "revision=" + std::to_string(ctx.ledger.current_revision()));
+            "revision=" + std::to_string(ctx.project.ledger.current_revision()));
       });
 
   add("register_report", "register_report <name> [pass|fail|unknown]",
@@ -663,11 +659,11 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           proof = *parsed;
         }
-        const session::ArtifactId id = ctx.ledger.RegisterArtifact(
+        const session::ArtifactId id = ctx.project.ledger.RegisterArtifact(
             session::ArtifactKind::kReport, args[0], proof);
         return CommandResult::Ok(
             "artifact=" + std::to_string(id) + " revision=" +
-            std::to_string(ctx.ledger.current_revision()));
+            std::to_string(ctx.project.ledger.current_revision()));
       });
 
   add("report_status", "report_status <artifact>",
@@ -681,15 +677,15 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return CommandResult::Fail(Diag::kInvalidConfiguration,
                                      "not an artifact id: " + args[0]);
         }
-        const session::ArtifactRecord* record = ctx.ledger.FindArtifact(id);
+        const session::ArtifactRecord* record = ctx.project.ledger.FindArtifact(id);
         if (record == nullptr) {
           return CommandResult::Fail(Diag::kInvalidConfiguration,
                                      "unknown artifact: " + args[0]);
         }
         return CommandResult::Ok(
             "artifact=" + std::to_string(id) +
-            (ctx.ledger.ArtifactValid(id) ? " valid=1" : " valid=0") +
-            (ctx.ledger.ArtifactCurrent(id) ? " current=1" : " current=0") +
+            (ctx.project.ledger.ArtifactValid(id) ? " valid=1" : " valid=0") +
+            (ctx.project.ledger.ArtifactCurrent(id) ? " current=1" : " current=0") +
             " proof=" + ProofWord(record->proof) + " bound_revision=" +
             std::to_string(record->bound_revision));
       });
@@ -701,22 +697,32 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return *bad;
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
-        db::CheckpointData data;
-        data.design = ctx.design->ExportState();
-        data.scenarios = ctx.scenarios.ExportState();
-        data.constraints = ctx.constraints.ExportState();
-        const foundation::Status status = db::Checkpoint::Save(args[0], data);
+        const foundation::Status status = ctx.project.SaveProject(args[0]);
         if (!status.ok()) return FromStatus(status);
         return CommandResult::Ok("checkpoint=" + args[0]);
       });
 
   add("restore", "restore <path>",
-      [](CommandContext&, const std::vector<std::string>&) -> CommandResult {
-        return CommandResult::Fail(
-            Diag::kUnsupportedFeature,
-            "project restore arrives with the session layer (Phase 1 "
-            "increment 5); the checkpoint file format and library load "
-            "are in place");
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 1, "restore <path>")) {
+          return *bad;
+        }
+        // Project load is all-or-nothing: a bad file leaves the
+        // current project exactly as it was.
+        const Result<db::RestoreInfo> info =
+            ctx.project.LoadProject(args[0]);
+        if (!info.ok()) return FromStatus(info.status());
+        // Collections named objects of the previous project state;
+        // they do not survive a restore.
+        ctx.collections.clear();
+        ctx.next_collection = 1;
+        return CommandResult::Ok(
+            "restored=1 design=" + ctx.project.design->name() +
+            " revision=" +
+            std::to_string(ctx.project.ledger.current_revision()) +
+            " unresolved=" +
+            std::to_string(info.value().constraints_marked_unresolved));
       });
 
   add("list_commands", "list_commands",

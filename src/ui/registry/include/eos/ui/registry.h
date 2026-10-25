@@ -42,6 +42,7 @@
 #include "eos/foundation/errors.h"
 #include "eos/foundation/ids.h"
 #include "eos/session/ledger.h"
+#include "eos/session/project.h"
 
 namespace eos::ui {
 
@@ -72,22 +73,20 @@ struct CommandResult {
   static CommandResult Fail(Diag diag, std::string message);
 };
 
-// The state commands operate on. Owned by whoever hosts the session
-// (the L5 session layer composes this into the Project); interfaces
-// borrow it. There is at most one open design, the "current design"
-// of traditional tools.
+// The state commands operate on: the L5 Project (design, scenarios,
+// constraints and ledger as one owned unit), plus the collections
+// this interface session has minted. Owned by whoever hosts the
+// session; interfaces borrow it. There is at most one open design,
+// the "current design" of traditional tools.
 struct CommandContext {
-  std::optional<db::Design> design;
-  db::ScenarioSet scenarios;
-  db::ConstraintSet constraints;
-  session::Ledger ledger;
+  session::Project project;
 
   // Collections by handle ("eos_coll_1", ...). Handles are never
   // reused within a context.
   std::map<std::string, std::vector<ObjectId>> collections;
   std::uint32_t next_collection = 1;
 
-  bool HasDesign() const { return design.has_value(); }
+  bool HasDesign() const { return project.HasDesign(); }
 };
 
 using CommandHandler = std::function<CommandResult(
@@ -120,9 +119,9 @@ class CommandRegistry {
 
 // Registers the core command set: design lifecycle and construction,
 // scenarios, constraints and coverage, collections, ledger
-// transactions and artifacts, and checkpoint save. (Project restore is
-// registered too and answers kUnsupportedFeature until the L5 session
-// layer composes the full project checkpoint in increment 5.)
+// transactions and artifacts, and the project-level checkpoint and
+// restore commands (the full project file: design, scenarios,
+// constraints and ledger).
 void RegisterCoreCommands(CommandRegistry& registry);
 
 }  // namespace eos::ui
