@@ -107,6 +107,21 @@ struct ArtifactRecord {
   ProofStatus proof = ProofStatus::kUnknown;
 };
 
+// The complete serializable state of a Ledger, including a pending
+// transaction. This is what a restart restores from: a ledger that was
+// snapshotted mid-transaction comes back with the same pending
+// transaction, and the rollback-or-resume decision (abort it, or
+// commit it) is made on the restored ledger, exactly as it would have
+// been made before the interruption.
+struct LedgerSnapshot {
+  Revision current_revision = 0;
+  TxnId next_txn = 1;
+  ArtifactId next_artifact = 1;
+  std::optional<TransactionSpec> pending;
+  std::vector<TransactionRecord> history;
+  std::vector<ArtifactRecord> artifacts;
+};
+
 class Ledger {
  public:
   Ledger() = default;
@@ -171,6 +186,15 @@ class Ledger {
   // commit order. The checkpoint layer serializes this.
   const std::vector<TransactionRecord>& history() const { return history_; }
   const std::vector<ArtifactRecord>& artifacts() const { return artifacts_; }
+
+  // Restart support: Snapshot exports the full state; Restore validates
+  // a snapshot (record chain is dense and consistent, the current
+  // revision is the last active record's output, counters are ahead of
+  // every id, a pending transaction begins at the current revision and
+  // invalidates only known artifacts) and only then adopts it. A bad
+  // snapshot is an error and leaves this ledger untouched.
+  LedgerSnapshot Snapshot() const;
+  Status Restore(const LedgerSnapshot& snapshot);
 
  private:
   Revision current_revision_ = 0;

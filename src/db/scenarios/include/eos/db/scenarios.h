@@ -45,6 +45,12 @@ struct Scenario {
   bool active = true;
 };
 
+// The complete serializable state of a ScenarioSet.
+struct ScenarioState {
+  std::vector<Scenario> scenarios;
+  ScenarioId next_id = 1;
+};
+
 class ScenarioSet {
  public:
   // Creates a scenario, active by default (defining a scenario means
@@ -70,6 +76,12 @@ class ScenarioSet {
 
   const std::vector<Scenario>& all() const { return scenarios_; }
   std::size_t size() const { return scenarios_.size(); }
+
+  // Checkpoint support: ExportState snapshots the set; FromState
+  // validates it (nonzero unique ids, unique names, unique triples,
+  // next_id ahead of every id) and only then builds.
+  ScenarioState ExportState() const;
+  static Result<ScenarioSet> FromState(const ScenarioState& state);
 
  private:
   ScenarioId next_id_ = 1;

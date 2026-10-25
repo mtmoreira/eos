@@ -19,6 +19,7 @@
 #ifndef EOS_DB_DESIGN_H_
 #define EOS_DB_DESIGN_H_
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -78,6 +79,22 @@ struct PinRecord {
   ObjectId net;
 };
 
+// The complete serializable state of a Design: every record plus the
+// allocator's next index per kind (index 0 of the array is unused;
+// kinds are ObjectKind values 1 to 7). The checkpoint module writes
+// this; FromState validates it fully before building anything.
+struct DesignState {
+  std::string name;
+  ObjectId id;
+  std::array<std::uint32_t, 8> allocator_next{};
+  std::vector<CellRecord> cells;
+  std::vector<InstanceRecord> instances;
+  std::vector<NetRecord> nets;
+  std::vector<PortRecord> ports;
+  std::vector<TermRecord> terms;
+  std::vector<PinRecord> pins;
+};
+
 class Design {
  public:
   explicit Design(std::string name);
@@ -116,7 +133,18 @@ class Design {
   foundation::IdAllocator& allocator() { return allocator_; }
   const foundation::IdAllocator& allocator() const { return allocator_; }
 
+  // Checkpoint support: ExportState snapshots everything FromState
+  // needs; FromState validates the snapshot (unique IDs and names,
+  // kind-correct IDs, no dangling references, allocator indices ahead
+  // of every used index) and only then builds. A bad snapshot is an
+  // error, never a half-built design.
+  DesignState ExportState() const;
+  static Result<Design> FromState(const DesignState& state);
+
  private:
+  // Builds a design with a given identity instead of allocating one;
+  // only FromState uses this, after validation.
+  Design(std::string name, ObjectId id);
   template <typename Record>
   const Record* FindIn(const std::vector<Record>& records,
                        const std::unordered_map<std::uint32_t, std::size_t>&

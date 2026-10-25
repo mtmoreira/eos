@@ -136,4 +136,94 @@ Status Ledger::RollbackTo(Revision target) {
   return Status::Ok();
 }
 
+LedgerSnapshot Ledger::Snapshot() const {
+  LedgerSnapshot snapshot;
+  snapshot.current_revision = current_revision_;
+  snapshot.next_txn = next_txn_;
+  snapshot.next_artifact = next_artifact_;
+  snapshot.pending = pending_;
+  snapshot.history = history_;
+  snapshot.artifacts = artifacts_;
+  return snapshot;
+}
+
+Status Ledger::Restore(const LedgerSnapshot& snapshot) {
+  auto reject = [](const char* what) {
+    return Status::Error(ErrorCode::kInvalidArgument, what);
+  };
+  // History: strictly increasing ids, dense revision steps, the
+  // rollback checkpoint is the input revision by construction.
+  TxnId max_txn = 0;
+  Revision max_output = 0;
+  Revision last_active_output = 0;
+  for (const TransactionRecord& txn : snapshot.history) {
+    if (txn.id <= max_txn || txn.output_revision != txn.input_revision + 1 ||
+        txn.rollback_checkpoint != txn.input_revision) {
+      return reject("ledger snapshot: malformed transaction record");
+    }
+    max_txn = txn.id;
+    if (txn.output_revision > max_output) {
+      max_output = txn.output_revision;
+    }
+    if (txn.active) {
+      last_active_output = txn.output_revision;
+    }
+  }
+  if (snapshot.current_revision != last_active_output) {
+    return reject(
+        "ledger snapshot: current revision is not the last active output");
+  }
+  if (snapshot.next_txn <= max_txn) {
+    return reject("ledger snapshot: txn counter would reuse an id");
+  }
+  // Artifacts: strictly increasing ids, bound at a revision the
+  // history actually reached.
+  ArtifactId max_artifact = 0;
+  for (const ArtifactRecord& artifact : snapshot.artifacts) {
+    if (artifact.id <= max_artifact ||
+        artifact.bound_revision > max_output) {
+      return reject("ledger snapshot: malformed artifact record");
+    }
+    max_artifact = artifact.id;
+  }
+  if (snapshot.next_artifact <= max_artifact) {
+    return reject("ledger snapshot: artifact counter would reuse an id");
+  }
+  auto known = [&snapshot](ArtifactId id) {
+    for (const ArtifactRecord& artifact : snapshot.artifacts) {
+      if (artifact.id == id) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const TransactionRecord& txn : snapshot.history) {
+    for (const ArtifactId id : txn.invalidated) {
+      if (!known(id)) {
+        return reject("ledger snapshot: record invalidates unknown artifact");
+      }
+    }
+  }
+  if (snapshot.pending.has_value()) {
+    if (snapshot.pending->input_revision != snapshot.current_revision) {
+      return reject(
+          "ledger snapshot: pending transaction starts at a stale revision");
+    }
+    for (const ArtifactId id : snapshot.pending->invalidates) {
+      if (!known(id)) {
+        return reject(
+            "ledger snapshot: pending transaction invalidates unknown "
+            "artifact");
+      }
+    }
+  }
+  current_revision_ = snapshot.current_revision;
+  next_txn_ = snapshot.next_txn;
+  next_artifact_ = snapshot.next_artifact;
+  pending_ = snapshot.pending;
+  history_ = snapshot.history;
+  artifacts_ = snapshot.artifacts;
+  return Status::Ok();
+}
+
 }  // namespace eos::session

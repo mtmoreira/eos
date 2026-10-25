@@ -79,4 +79,36 @@ std::vector<const Scenario*> ScenarioSet::ActiveScenarios() const {
   return active;
 }
 
+ScenarioState ScenarioSet::ExportState() const {
+  ScenarioState state;
+  state.scenarios = scenarios_;
+  state.next_id = next_id_;
+  return state;
+}
+
+Result<ScenarioSet> ScenarioSet::FromState(const ScenarioState& state) {
+  ScenarioSet set;
+  ScenarioId max_id = 0;
+  for (const Scenario& scenario : state.scenarios) {
+    if (scenario.id == 0 || set.Find(scenario.id) != nullptr ||
+        set.FindByName(scenario.name) != nullptr ||
+        set.FindByTriple(scenario.mode, scenario.corner,
+                         scenario.parasitics) != nullptr) {
+      return Status::Error(
+          ErrorCode::kInvalidArgument,
+          "scenario state: duplicate or invalid scenario");
+    }
+    set.scenarios_.push_back(scenario);
+    if (scenario.id > max_id) {
+      max_id = scenario.id;
+    }
+  }
+  if (state.next_id <= max_id) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "scenario state: next_id would reuse an id");
+  }
+  set.next_id_ = state.next_id;
+  return set;
+}
+
 }  // namespace eos::db
