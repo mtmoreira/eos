@@ -321,6 +321,57 @@ TEST(Odb, MissingDefFileIsIoErrorAfterLef) {
   EXPECT_FALSE(db.has_top_block());
 }
 
+TEST(Odb, EcoQueriesAndMutations) {
+  // The Phase 2 unit 2.4 facade surface the ECO adapters use:
+  // master and instance queries, a master swap, instance and net
+  // creation, and pin connect and disconnect.
+  TempDir dir;
+  OdbDatabase db;
+  LoadFixture(db, dir);
+  EXPECT_EQ(db.MasterNames(), std::vector<std::string>{"BUFX2"});
+  const auto pins = db.MasterPins("BUFX2");
+  ASSERT_EQ(pins.size(), 2u);
+  EXPECT_EQ(pins[0].name, "A");
+  EXPECT_TRUE(pins[0].is_input);
+  EXPECT_EQ(pins[1].name, "Y");
+  EXPECT_TRUE(pins[1].is_output);
+  OdbInstanceInfo info;
+  ASSERT_TRUE(db.FindInstance("u1", &info));
+  EXPECT_EQ(info.master, "BUFX2");
+  EXPECT_EQ(info.x, 1000);
+  EXPECT_EQ(info.y, 1000);
+  EXPECT_TRUE(db.HasNet("n_mid"));
+  const auto connections = db.NetConnections("n_mid");
+  ASSERT_EQ(connections.size(), 2u);
+  EXPECT_EQ(connections[0].instance, "u1");
+  EXPECT_TRUE(connections[0].is_driver);
+  EXPECT_EQ(connections[1].instance, "u2");
+  EXPECT_FALSE(connections[1].is_driver);
+
+  ASSERT_TRUE(db.CreateNet("n_new").ok());
+  EXPECT_EQ(db.CreateNet("n_new").code(), ErrorCode::kInvalidArgument);
+  ASSERT_TRUE(db.CreateInstance("u3", "BUFX2", 3000, 1000).ok());
+  EXPECT_EQ(db.CreateInstance("u3", "BUFX2", 0, 0).code(),
+            ErrorCode::kInvalidArgument);
+  EXPECT_EQ(db.CreateInstance("u4", "NOPE", 0, 0).code(),
+            ErrorCode::kNotFound);
+  ASSERT_TRUE(db.ConnectInstancePin("u3", "A", "n_mid").ok());
+  EXPECT_EQ(db.ConnectInstancePin("u3", "A", "n_new").code(),
+            ErrorCode::kInvalidState);
+  ASSERT_TRUE(db.ConnectInstancePin("u3", "Y", "n_new").ok());
+  ASSERT_TRUE(db.DisconnectInstancePin("u3", "A").ok());
+  ASSERT_TRUE(db.ConnectInstancePin("u3", "A", "n_new").ok());
+  EXPECT_EQ(db.InstanceCount(), 3u);
+  EXPECT_EQ(db.NetCount(), 4u);
+  // Swap failures: unknown instance and unknown master. Real
+  // variant swaps are covered by the timing-eco adapter tests,
+  // whose fixture carries several masters.
+  EXPECT_EQ(db.SwapInstanceMaster("nope", "BUFX2").code(),
+            ErrorCode::kNotFound);
+  EXPECT_EQ(db.SwapInstanceMaster("u1", "NOPE").code(),
+            ErrorCode::kNotFound);
+}
+
 TEST(Odb, WriteDefBeforeAnyDefIsInvalidState) {
   TempDir dir;
   OdbDatabase db;
