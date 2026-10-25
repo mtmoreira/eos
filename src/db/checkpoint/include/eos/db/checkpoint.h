@@ -71,6 +71,16 @@ class Checkpoint {
   // restored state and, when info is non-null, fills RestoreInfo.
   static Result<CheckpointData> Load(const std::string& path,
                                      RestoreInfo* info);
+
+  // The text forms Save and Load are thin wrappers over: Serialize
+  // validates the state exactly as Save does and returns the exact
+  // bytes Save would write; FromString parses and fully validates
+  // text exactly as Load does (checksum, format, module consistency,
+  // dangling bindings marked unresolved and counted in info). The
+  // session layer embeds these texts in the project file.
+  static Result<std::string> Serialize(const CheckpointData& data);
+  static Result<CheckpointData> FromString(const std::string& text,
+                                           RestoreInfo* info);
 };
 
 }  // namespace eos::db

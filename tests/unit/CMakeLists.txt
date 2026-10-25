@@ -42,6 +42,19 @@ target_link_libraries(eda_session_ledger_snapshot_unit_test
 add_test(NAME session.ledger.snapshot
   COMMAND eda_session_ledger_snapshot_unit_test)
 
+add_executable(eda_session_ledger_text_unit_test
+  session/ledger/ledger_text_test.cc)
+target_link_libraries(eda_session_ledger_text_unit_test
+  PRIVATE eda_session_ledger GTest::gtest GTest::gtest_main)
+add_test(NAME session.ledger.text
+  COMMAND eda_session_ledger_text_unit_test)
+
+add_executable(eda_session_project_unit_test
+  session/session/project_test.cc)
+target_link_libraries(eda_session_project_unit_test
+  PRIVATE eda_session_session GTest::gtest GTest::gtest_main)
+add_test(NAME session.project COMMAND eda_session_project_unit_test)
+
 add_executable(eda_ui_registry_unit_test ui/registry/registry_test.cc)
 target_link_libraries(eda_ui_registry_unit_test
   PRIVATE eda_ui_registry eda_db_checkpoint GTest::gtest GTest::gtest_main)

@@ -2,8 +2,9 @@
 #include "eos/ui/registry.h"
 
 #include <cstdio>
+#include <fstream>
+#include <sstream>
 
-#include "eos/db/checkpoint.h"
 #include <gtest/gtest.h>
 
 namespace eos::ui {
@@ -102,7 +103,8 @@ TEST(CoreCommands, UnsupportedOptionsAreRejectedNeverIgnored) {
   EXPECT_NE(result.message.find("unsupported option"),
             std::string::npos);
   // And the rejected command created nothing.
-  EXPECT_TRUE(shell.ctx.design->Find(foundation::ObjectKind::kCell, "c1")
+  EXPECT_TRUE(shell.ctx.project.design
+                  ->Find(foundation::ObjectKind::kCell, "c1")
                   .is_null());
 }
 
@@ -178,23 +180,65 @@ TEST(CoreCommands, TransactionsAndReportsThroughCommands) {
   EXPECT_NE(restored.payload.find("current=1"), std::string::npos);
 }
 
-TEST(CoreCommands, CheckpointWritesARealFileAndRestoreIsHonest) {
+TEST(CoreCommands, CheckpointAndRestoreRoundTripTheWholeProject) {
   Shell shell;
   ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
   ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
-  const std::string path = "registry_test_checkpoint.ckpt";
+  ASSERT_TRUE(shell.Run("create_clock", {"c1", "clk"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("begin_transaction", {"place"}).ok);
+  ASSERT_TRUE(shell.Run("commit_transaction", {"pass"}).ok);
+  ASSERT_TRUE(shell.Run("register_report", {"timing", "pass"}).ok);
+  const CommandResult before = shell.Run("current_design");
+  ASSERT_TRUE(before.ok);
+
+  const std::string path = "registry_test_project.eosproj";
   std::remove(path.c_str());
   const CommandResult saved = shell.Run("checkpoint", {path});
   ASSERT_TRUE(saved.ok);
-  db::RestoreInfo info;
-  const foundation::Result<db::CheckpointData> loaded =
-      db::Checkpoint::Load(path, &info);
-  EXPECT_TRUE(loaded.ok());
-  std::remove(path.c_str());
+  EXPECT_EQ(saved.payload, "checkpoint=" + path);
 
-  const CommandResult restore = shell.Run("restore", {path});
-  ASSERT_FALSE(restore.ok);
-  EXPECT_EQ(restore.diag, Diag::kUnsupportedFeature);
+  // Restore into a fresh context reproduces the project: design,
+  // scenarios, constraints and the ledger revision alike.
+  Shell fresh;
+  const CommandResult restored = fresh.Run("restore", {path});
+  ASSERT_TRUE(restored.ok);
+  EXPECT_NE(restored.payload.find("design=top"), std::string::npos);
+  EXPECT_NE(restored.payload.find("revision=1"), std::string::npos);
+  EXPECT_NE(restored.payload.find("unresolved=0"), std::string::npos);
+  const CommandResult after = fresh.Run("current_design");
+  ASSERT_TRUE(after.ok);
+  EXPECT_EQ(after.payload, before.payload);
+  EXPECT_NE(fresh.Run("list_scenarios").payload.find("func_tt"),
+            std::string::npos);
+  EXPECT_NE(fresh.Run("list_constraints").payload.find("status=bound"),
+            std::string::npos);
+  const CommandResult report = fresh.Run("report_status", {"1"});
+  ASSERT_TRUE(report.ok);
+  EXPECT_NE(report.payload.find("current=1"), std::string::npos);
+
+  // A corrupt project file is refused and leaves the live project
+  // exactly as it was.
+  Shell live;
+  ASSERT_TRUE(live.Run("create_design", {"live"}).ok);
+  {
+    std::ifstream in(path, std::ios::binary);
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    std::string corrupt = buffer.str();
+    const std::size_t mid = corrupt.size() / 2;
+    corrupt[mid] = corrupt[mid] == 'a' ? 'b' : 'a';
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << corrupt;
+  }
+  const CommandResult refused = live.Run("restore", {path});
+  EXPECT_FALSE(refused.ok);
+  const CommandResult still = live.Run("current_design");
+  ASSERT_TRUE(still.ok);
+  EXPECT_NE(still.payload.find("design=live"), std::string::npos);
+  std::remove(path.c_str());
 }
 
 TEST(CoreCommands, ScenariosAndListCommands) {
