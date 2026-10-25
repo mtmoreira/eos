@@ -11,6 +11,10 @@ if(EOS_BUILD_TESTS)
   enable_testing()
 endif()
 
+# Optional: the Tcl shell. Found once here so the tcl module, the eda
+# app and the test wiring all agree on whether a real shell exists.
+find_package(TCL QUIET)
+
 add_subdirectory(src/foundation/types)
 add_subdirectory(src/foundation/ids)
 add_subdirectory(src/foundation/geom)
@@ -71,3 +75,5 @@ add_subdirectory(src/ui/gui)
 if(EOS_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
+
+add_subdirectory(apps/eda)
