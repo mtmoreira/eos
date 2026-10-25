@@ -1,6 +1,13 @@
 # flow (L5 session)
 
-Runs flows as directed acyclic graphs of stage operations.
+Runs flows as orchestrated sequences of stage operations under
+the project's ledger and report registry.
 
-Status: skeleton, seeded in Phase 0. No implementation yet.
-The stable public API of this module will live in include/ and is versioned per the EOS Code Structure document.
+Status: the timing closure loop (Phase 2 unit 2.5) is this
+module's first feature: `RunTimingClosure` in
+`include/eos/session/flow.h` diagnoses the violating scenes,
+generates sizing and buffering candidates, screens them through
+the ECO transaction protocol, records one ledger transaction
+per accepted iteration, and registers the loop's
+`timing_closure` report binding at the end. A general flow DAG
+runner remains future work.

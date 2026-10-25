@@ -18,11 +18,14 @@
 //   at extracted parasitics are refused here: their SPEF describes
 //   the pre-edit netlist, so an extracted-fidelity verdict after an
 //   edit would be a claim about parasitics that no longer exist.
-//   Extracted acceptance after edits arrives with the closure
-//   loop's re-analysis path (unit 2.5); v1 scenes run at estimate
-//   fidelity, and EcoOutcome::parasitics_note says so in words, so
-//   a caller registering a report binding for the outcome cannot
-//   mislabel the fidelity it describes.
+//   The closure loop (unit 2.5) keeps the same estimate-only rule:
+//   extracted acceptance after edits stays deferred until
+//   incremental extraction is qualified, because EOS has no
+//   extraction engine to re-derive parasitics for an edited
+//   netlist. Scenes run at estimate fidelity, and
+//   EcoOutcome::parasitics_note says so in words, so a caller
+//   registering a report binding for the outcome cannot mislabel
+//   the fidelity it describes.
 // - Legalize and reroute are not separate steps in v1: the v1
 //   adapters (sizing, buffering) preserve connectivity by
 //   construction, place inserted cells at their driver's location

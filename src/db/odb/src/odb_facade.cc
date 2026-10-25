@@ -552,6 +552,18 @@ std::vector<OdbInstanceInfo> OdbDatabase::Instances() const {
   return instances;
 }
 
+std::vector<std::string> OdbDatabase::NetNames() const {
+  std::vector<std::string> names;
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return names;
+  }
+  for (odb::dbNet* net : block->getNets()) {
+    names.push_back(net->getName());
+  }
+  return names;
+}
+
 bool OdbDatabase::HasNet(const std::string& name) const {
   odb::dbBlock* block = impl_->TopBlock();
   return block != nullptr && block->findNet(name.c_str()) != nullptr;

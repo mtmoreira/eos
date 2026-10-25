@@ -148,9 +148,10 @@ Result<EcoOutcome> RunEcoTransaction(
       return Invalid(
           "scene " + scene.scenario.name +
           " is at extracted parasitics; after an edit its SPEF no "
-          "longer describes the design, so v1 ECO acceptance runs "
-          "at estimate fidelity only (extracted acceptance arrives "
-          "with unit 2.5)");
+          "longer describes the design, so ECO acceptance runs at "
+          "estimate fidelity only (extracted acceptance after edits "
+          "stays deferred until incremental extraction is "
+          "qualified)");
     }
   }
   if (!database.has_top_block()) {
@@ -184,8 +185,8 @@ Result<EcoOutcome> RunEcoTransaction(
   outcome.before = before.value();
   outcome.parasitics_note =
       "after metrics are a full re-analysis of every required scene "
-      "at estimate parasitics fidelity (unit 2.4 v1); no extracted "
-      "re-analysis after edits until unit 2.5";
+      "at estimate parasitics fidelity; no extracted re-analysis "
+      "after edits until incremental extraction is qualified";
 
   const Status edited = edit(database);
   if (!edited.ok()) {

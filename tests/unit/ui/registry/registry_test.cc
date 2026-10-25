@@ -55,7 +55,7 @@ TEST(Registry, UnknownCommandIsAnInvalidCommandDiagnostic) {
 TEST(Registry, CoreSetIsComplete) {
   Shell shell;
   // The count is a contract: adding a command means updating it.
-  EXPECT_EQ(shell.registry.Names().size(), 35u);
+  EXPECT_EQ(shell.registry.Names().size(), 36u);
   EXPECT_NE(shell.registry.Find("create_design"), nullptr);
   EXPECT_NE(shell.registry.Find("restore"), nullptr);
 }
@@ -494,6 +494,238 @@ END NETS
 END DESIGN
 )DEF";
 
+// The closure fixture (Phase 2 unit 2.5): the sizing chain with
+// two drive variants. By construction the weak variant's delay
+// (0.8 ns) makes the setup slack -0.1 ns at the 1 ns clock and
+// the strong variant's (0.2 ns) makes it +0.5 ns, so one
+// close_timing iteration must close it. The variant names follow
+// the trailing-drive-number convention the command derives
+// families from.
+const char kClosureLef[] = R"LEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MANUFACTURINGGRID 0.005 ;
+SITE core
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END core
+LAYER metal1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal1
+MACRO DFF
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN D
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END D
+  PIN CK
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END CK
+  PIN Q
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Q
+END DFF
+MACRO BUF_X1
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Y
+END BUF_X1
+MACRO BUF_X2
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Y
+END BUF_X2
+END LIBRARY
+)LEF";
+
+const char kClosureDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 3 ;
+- r1 DFF + PLACED ( 1000 1000 ) N ;
+- u1 BUF_X1 + PLACED ( 2000 1000 ) N ;
+- r2 DFF + PLACED ( 3000 1000 ) N ;
+END COMPONENTS
+PINS 3 ;
+- clk + NET clk + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- d + NET d + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- q + NET q + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 5 ;
+- clk ( PIN clk ) ( r1 CK ) ( r2 CK ) ;
+- d ( PIN d ) ( r1 D ) ;
+- n1 ( r1 Q ) ( u1 A ) ;
+- n2 ( u1 Y ) ( r2 D ) ;
+- q ( r2 Q ) ( PIN q ) ;
+END NETS
+END DESIGN
+)DEF";
+
+const char kClosureLiberty[] = R"LIB(library (eos_closure_fixture) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) {
+      direction : input;
+      capacitance : 0.001;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (scalar) { values ("0.05"); }
+        fall_constraint (scalar) { values ("0.05"); }
+      }
+    }
+    pin (CK) {
+      direction : input;
+      capacitance : 0.001;
+      clock : true;
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (BUF_X1) {
+    area : 2.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.8"); }
+        cell_fall (scalar) { values ("0.8"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (BUF_X2) {
+    area : 2.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+const char kClosureSdc[] =
+    "create_clock -name clk -period 1 [get_ports clk]\n";
+
 class TimingTempDir {
  public:
   TimingTempDir()
@@ -609,6 +841,67 @@ TEST(CoreCommands, ImportOdbLoadsTheDatabase) {
       shell.Run("import_odb", {dir.Path("no_such.odb")});
   EXPECT_FALSE(missing.ok);
   EXPECT_EQ(missing.diag, Diag::kIoError);
+}
+
+TEST(CoreCommands, CloseTimingClosesTheImportedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kClosureLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kClosureDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kClosureLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kClosureSdc)}).ok);
+  const CommandResult closed = shell.Run("close_timing", {"5"});
+  ASSERT_TRUE(closed.ok) << closed.message;
+  EXPECT_EQ(closed.diag, Diag::kVerifiedPass);
+  EXPECT_NE(closed.payload.find("closed=1"), std::string::npos);
+  EXPECT_NE(closed.payload.find("iterations=1"), std::string::npos);
+  EXPECT_NE(closed.payload.find("report=timing_closure"),
+            std::string::npos);
+  const auto payload_number = [&closed](const std::string& key) {
+    const std::size_t at = closed.payload.find(key + "=");
+    EXPECT_NE(at, std::string::npos) << "missing " << key;
+    if (at == std::string::npos) return 0.0;
+    return std::stod(closed.payload.substr(at + key.size() + 1));
+  };
+  EXPECT_NEAR(payload_number("initial_worst_slack_ns"), -0.1, 1e-6);
+  EXPECT_NEAR(payload_number("worst_slack_ns"), 0.5, 1e-6);
+  // The accepted iteration is a ledger transaction and the loop's
+  // report binding is registered at the final revision.
+  EXPECT_EQ(shell.ctx.project.ledger.current_revision(), 1u);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "timing_closure"),
+            nullptr);
+  ASSERT_TRUE(shell.ctx.timing.odb.has_value());
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(shell.ctx.timing.odb->FindInstance("u1", &info));
+  EXPECT_EQ(info.master, "BUF_X2");
+}
+
+TEST(CoreCommands, CloseTimingDiagnostics) {
+  Shell shell;
+  // A malformed bound is a configuration failure, before any
+  // design question.
+  const CommandResult bad_bound = shell.Run("close_timing", {"zero"});
+  ASSERT_FALSE(bad_bound.ok);
+  EXPECT_EQ(bad_bound.diag, Diag::kInvalidConfiguration);
+  const CommandResult zero_bound = shell.Run("close_timing", {"0"});
+  ASSERT_FALSE(zero_bound.ok);
+  EXPECT_EQ(zero_bound.diag, Diag::kInvalidConfiguration);
+  // A well-formed bound but no ODB design: closure edits the
+  // physical database, so this is the unclosed-design diagnostic.
+  const CommandResult no_design = shell.Run("close_timing", {"3"});
+  ASSERT_FALSE(no_design.ok);
+  EXPECT_EQ(no_design.diag, Diag::kUnclosedDesign);
 }
 
 }  // namespace

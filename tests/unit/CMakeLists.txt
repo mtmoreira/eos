@@ -90,6 +90,11 @@ target_link_libraries(eda_session_reports_unit_test
   PRIVATE eda_session_reports GTest::gtest GTest::gtest_main)
 add_test(NAME session.reports COMMAND eda_session_reports_unit_test)
 
+add_executable(eda_session_flow_unit_test session/flow/flow_test.cc)
+target_link_libraries(eda_session_flow_unit_test
+  PRIVATE eda_session_flow GTest::gtest GTest::gtest_main)
+add_test(NAME session.flow COMMAND eda_session_flow_unit_test)
+
 add_executable(eda_session_metrics_unit_test
   session/metrics/metrics_test.cc)
 target_link_libraries(eda_session_metrics_unit_test
