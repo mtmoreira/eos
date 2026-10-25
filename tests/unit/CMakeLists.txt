@@ -41,6 +41,19 @@ target_link_libraries(eda_analysis_timing_unit_test
   PRIVATE eda_analysis_timing GTest::gtest GTest::gtest_main)
 add_test(NAME analysis.timing COMMAND eda_analysis_timing_unit_test)
 
+add_executable(eda_eco_transactions_unit_test
+  eco/transactions/transactions_test.cc)
+target_link_libraries(eda_eco_transactions_unit_test
+  PRIVATE eda_eco_transactions eda_eco_timing_eco eda_session_ledger
+          GTest::gtest GTest::gtest_main)
+add_test(NAME eco.transactions COMMAND eda_eco_transactions_unit_test)
+
+add_executable(eda_eco_timing_eco_unit_test eco/timing-eco/timing_eco_test.cc)
+target_link_libraries(eda_eco_timing_eco_unit_test
+  PRIVATE eda_eco_timing_eco eda_analysis_timing
+          GTest::gtest GTest::gtest_main)
+add_test(NAME eco.timing_eco COMMAND eda_eco_timing_eco_unit_test)
+
 add_executable(eda_db_odb_unit_test db/odb/odb_test.cc)
 target_link_libraries(eda_db_odb_unit_test
   PRIVATE eda_db_odb GTest::gtest GTest::gtest_main)

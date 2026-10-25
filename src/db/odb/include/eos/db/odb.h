@@ -17,12 +17,42 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "eos/foundation/errors.h"
 
 namespace eos::db {
 
+using foundation::Result;
 using foundation::Status;
+
+// One instance of the top block, as the ECO adapters see it: its
+// name, its master's name, and its placed location in database
+// units (the DEF distance units of the design).
+struct OdbInstanceInfo {
+  std::string name;
+  std::string master;
+  int x = 0;
+  int y = 0;
+};
+
+// One signal pin of a master cell, with its direction.
+struct OdbMasterPin {
+  std::string name;
+  bool is_input = false;
+  bool is_output = false;
+};
+
+// One connection on a net. A top-level port connection has an
+// empty instance name and is_port set; is_driver is set for the
+// connections that drive the net (an instance output pin, or a
+// top-level input port).
+struct OdbNetConnection {
+  std::string instance;
+  std::string pin;
+  bool is_port = false;
+  bool is_driver = false;
+};
 
 // One physical database. Move-only; the destructor releases the
 // upstream database. ReadLef may be called more than once (each call
@@ -92,6 +122,51 @@ class OdbDatabase {
   std::size_t NetCount() const;
   // Masters (cells) across every library read so far.
   std::size_t MasterCount() const;
+
+  // ECO support (Phase 2 unit 2.4): the queries and mutations the
+  // ECO adapters are built on. Queries return empty results for
+  // unknown names; mutations report the failure as a Status and
+  // change nothing on failure. Nothing here exposes an upstream
+  // type, and a mutation never renames or deletes an object.
+  std::vector<std::string> MasterNames() const;
+  // The signal pins of one master, in master order. Empty when the
+  // master is unknown.
+  std::vector<OdbMasterPin> MasterPins(const std::string& master) const;
+  bool HasInstance(const std::string& name) const;
+  bool FindInstance(const std::string& name, OdbInstanceInfo* out) const;
+  std::vector<OdbInstanceInfo> Instances() const;
+  bool HasNet(const std::string& name) const;
+  // The signal connections of one net, ports included. Empty when
+  // the net is unknown.
+  std::vector<OdbNetConnection> NetConnections(
+      const std::string& net_name) const;
+
+  // Swaps an instance to another master. Fails with kNotFound for
+  // an unknown instance or master, and with kInvalidArgument when
+  // the two masters do not carry the same signal pin names and
+  // directions (a swap must preserve every connection by
+  // construction, so a pin mismatch is refused, never adapted).
+  Status SwapInstanceMaster(const std::string& instance,
+                            const std::string& new_master);
+  // Creates a placed instance of a master at the given location
+  // (database units). Fails with kNotFound for an unknown master
+  // and with kInvalidArgument when the name is taken.
+  Status CreateInstance(const std::string& name, const std::string& master,
+                        int x, int y);
+  // Creates a signal net. Fails with kInvalidArgument when the
+  // name is taken.
+  Status CreateNet(const std::string& name);
+  // Connects one instance pin to a net. Fails with kNotFound for
+  // an unknown instance, pin or net, and with kInvalidState when
+  // the pin is already connected (disconnect it first).
+  Status ConnectInstancePin(const std::string& instance,
+                            const std::string& pin,
+                            const std::string& net_name);
+  // Disconnects one instance pin from its net. Fails with
+  // kNotFound for an unknown instance or pin, and with
+  // kInvalidState when the pin is not connected.
+  Status DisconnectInstancePin(const std::string& instance,
+                               const std::string& pin);
 
  private:
   struct Impl;

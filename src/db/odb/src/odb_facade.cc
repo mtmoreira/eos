@@ -134,6 +134,15 @@ struct OdbDatabase::Impl {
     }
     return libs;
   }
+
+  odb::dbMaster* FindMaster(const std::string& name) const {
+    for (odb::dbLib* lib : Libs()) {
+      if (odb::dbMaster* master = lib->findMaster(name.c_str())) {
+        return master;
+      }
+    }
+    return nullptr;
+  }
 };
 
 OdbDatabase::OdbDatabase() : impl_(new Impl) {}
@@ -463,6 +472,280 @@ std::size_t OdbDatabase::MasterCount() const {
     total += lib->getMasters().size();
   }
   return total;
+}
+
+namespace {
+
+Status NotFound(const std::string& what, const std::string& name) {
+  return Status::Error(ErrorCode::kNotFound, what + " not found: " + name);
+}
+
+}  // namespace
+
+std::vector<std::string> OdbDatabase::MasterNames() const {
+  std::vector<std::string> names;
+  for (odb::dbLib* lib : impl_->Libs()) {
+    for (odb::dbMaster* master : lib->getMasters()) {
+      names.push_back(master->getName());
+    }
+  }
+  return names;
+}
+
+std::vector<OdbMasterPin> OdbDatabase::MasterPins(
+    const std::string& master_name) const {
+  std::vector<OdbMasterPin> pins;
+  odb::dbMaster* master = impl_->FindMaster(master_name);
+  if (master == nullptr) {
+    return pins;
+  }
+  for (odb::dbMTerm* term : master->getMTerms()) {
+    if (IsSupply(term->getSigType())) {
+      continue;
+    }
+    OdbMasterPin pin;
+    pin.name = term->getName();
+    const odb::dbIoType io = term->getIoType();
+    pin.is_input = io == odb::dbIoType::INPUT || io == odb::dbIoType::INOUT;
+    pin.is_output = io == odb::dbIoType::OUTPUT || io == odb::dbIoType::INOUT;
+    pins.push_back(pin);
+  }
+  return pins;
+}
+
+bool OdbDatabase::HasInstance(const std::string& name) const {
+  OdbInstanceInfo info;
+  return FindInstance(name, &info);
+}
+
+bool OdbDatabase::FindInstance(const std::string& name,
+                               OdbInstanceInfo* out) const {
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return false;
+  }
+  odb::dbInst* inst = block->findInst(name.c_str());
+  if (inst == nullptr) {
+    return false;
+  }
+  if (out != nullptr) {
+    out->name = inst->getName();
+    out->master = inst->getMaster()->getName();
+    inst->getLocation(out->x, out->y);
+  }
+  return true;
+}
+
+std::vector<OdbInstanceInfo> OdbDatabase::Instances() const {
+  std::vector<OdbInstanceInfo> instances;
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return instances;
+  }
+  for (odb::dbInst* inst : block->getInsts()) {
+    OdbInstanceInfo info;
+    info.name = inst->getName();
+    info.master = inst->getMaster()->getName();
+    inst->getLocation(info.x, info.y);
+    instances.push_back(info);
+  }
+  return instances;
+}
+
+bool OdbDatabase::HasNet(const std::string& name) const {
+  odb::dbBlock* block = impl_->TopBlock();
+  return block != nullptr && block->findNet(name.c_str()) != nullptr;
+}
+
+std::vector<OdbNetConnection> OdbDatabase::NetConnections(
+    const std::string& net_name) const {
+  std::vector<OdbNetConnection> connections;
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return connections;
+  }
+  odb::dbNet* net = block->findNet(net_name.c_str());
+  if (net == nullptr) {
+    return connections;
+  }
+  for (odb::dbITerm* term : net->getITerms()) {
+    OdbNetConnection connection;
+    connection.instance = term->getInst()->getName();
+    connection.pin = term->getMTerm()->getName();
+    const odb::dbIoType io = term->getMTerm()->getIoType();
+    connection.is_driver =
+        io == odb::dbIoType::OUTPUT || io == odb::dbIoType::INOUT;
+    connections.push_back(connection);
+  }
+  for (odb::dbBTerm* term : net->getBTerms()) {
+    OdbNetConnection connection;
+    connection.pin = term->getName();
+    connection.is_port = true;
+    connection.is_driver = term->getIoType() == odb::dbIoType::INPUT;
+    connections.push_back(connection);
+  }
+  return connections;
+}
+
+Status OdbDatabase::SwapInstanceMaster(const std::string& instance,
+                                       const std::string& new_master) {
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "swap a master before any DEF has been read");
+  }
+  odb::dbInst* inst = block->findInst(instance.c_str());
+  if (inst == nullptr) {
+    return NotFound("instance", instance);
+  }
+  odb::dbMaster* master = impl_->FindMaster(new_master);
+  if (master == nullptr) {
+    return NotFound("master", new_master);
+  }
+  // The pin sets must match exactly (name and direction), so every
+  // existing connection carries over by construction.
+  const auto pin_set = [](odb::dbMaster* m) {
+    std::set<std::pair<std::string, int>> pins;
+    for (odb::dbMTerm* term : m->getMTerms()) {
+      if (IsSupply(term->getSigType())) {
+        continue;
+      }
+      pins.insert({term->getName(), term->getIoType().getValue()});
+    }
+    return pins;
+  };
+  if (pin_set(inst->getMaster()) != pin_set(master)) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "master " + new_master +
+                             " does not carry the same signal pins as " +
+                             inst->getMaster()->getName());
+  }
+  try {
+    if (!inst->swapMaster(master)) {
+      return Status::Error(ErrorCode::kInvalidState,
+                           "master swap failed for instance " + instance);
+    }
+  } catch (const std::exception&) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "master swap failed for instance " + instance);
+  }
+  return Status::Ok();
+}
+
+Status OdbDatabase::CreateInstance(const std::string& name,
+                                   const std::string& master_name, int x,
+                                   int y) {
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "create an instance before any DEF has been read");
+  }
+  if (block->findInst(name.c_str()) != nullptr) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "instance name already taken: " + name);
+  }
+  odb::dbMaster* master = impl_->FindMaster(master_name);
+  if (master == nullptr) {
+    return NotFound("master", master_name);
+  }
+  try {
+    odb::dbInst* inst = odb::dbInst::create(block, master, name.c_str());
+    if (inst == nullptr) {
+      return Status::Error(ErrorCode::kInvalidState,
+                           "could not create instance " + name);
+    }
+    inst->setLocation(x, y);
+    inst->setPlacementStatus(odb::dbPlacementStatus::PLACED);
+  } catch (const std::exception&) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "could not create instance " + name);
+  }
+  return Status::Ok();
+}
+
+Status OdbDatabase::CreateNet(const std::string& name) {
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "create a net before any DEF has been read");
+  }
+  if (block->findNet(name.c_str()) != nullptr) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "net name already taken: " + name);
+  }
+  try {
+    if (odb::dbNet::create(block, name.c_str()) == nullptr) {
+      return Status::Error(ErrorCode::kInvalidState,
+                           "could not create net " + name);
+    }
+  } catch (const std::exception&) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "could not create net " + name);
+  }
+  return Status::Ok();
+}
+
+Status OdbDatabase::ConnectInstancePin(const std::string& instance,
+                                       const std::string& pin,
+                                       const std::string& net_name) {
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "connect a pin before any DEF has been read");
+  }
+  odb::dbInst* inst = block->findInst(instance.c_str());
+  if (inst == nullptr) {
+    return NotFound("instance", instance);
+  }
+  odb::dbITerm* term = inst->findITerm(pin.c_str());
+  if (term == nullptr) {
+    return NotFound("pin " + instance + "/", pin);
+  }
+  odb::dbNet* net = block->findNet(net_name.c_str());
+  if (net == nullptr) {
+    return NotFound("net", net_name);
+  }
+  if (term->getNet() != nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "pin " + instance + "/" + pin +
+                             " is already connected; disconnect it first");
+  }
+  try {
+    odb::dbITerm::connect(term, net);
+  } catch (const std::exception&) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "could not connect pin " + instance + "/" + pin);
+  }
+  return Status::Ok();
+}
+
+Status OdbDatabase::DisconnectInstancePin(const std::string& instance,
+                                          const std::string& pin) {
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "disconnect a pin before any DEF has been read");
+  }
+  odb::dbInst* inst = block->findInst(instance.c_str());
+  if (inst == nullptr) {
+    return NotFound("instance", instance);
+  }
+  odb::dbITerm* term = inst->findITerm(pin.c_str());
+  if (term == nullptr) {
+    return NotFound("pin " + instance + "/", pin);
+  }
+  if (term->getNet() == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "pin " + instance + "/" + pin +
+                             " is not connected");
+  }
+  try {
+    odb::dbITerm::disconnect(term);
+  } catch (const std::exception&) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "could not disconnect pin " + instance + "/" + pin);
+  }
+  return Status::Ok();
 }
 
 }  // namespace eos::db
