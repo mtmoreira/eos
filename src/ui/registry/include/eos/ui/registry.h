@@ -36,8 +36,10 @@
 #include <string>
 #include <vector>
 
+#include "eos/analysis/timing.h"
 #include "eos/db/constraints.h"
 #include "eos/db/design.h"
+#include "eos/db/odb.h"
 #include "eos/db/scenarios.h"
 #include "eos/foundation/errors.h"
 #include "eos/foundation/ids.h"
@@ -93,6 +95,25 @@ struct CommandContext {
   // reused within a context.
   std::map<std::string, std::vector<ObjectId>> collections;
   std::uint32_t next_collection = 1;
+
+  // Timing session state (Phase 2 unit 2.3): the design source and
+  // the analysis inputs the timing commands accumulate, plus the
+  // most recent run's per-scene results. Like the collections,
+  // this is interface session state, not project state: it names
+  // files and a physical database the project checkpoint does not
+  // hold, it is cleared when the design closes, and a restore does
+  // not bring it back. The results are the L3 service's own metric
+  // maps, kept as returned.
+  struct TimingSession {
+    std::optional<db::OdbDatabase> odb;
+    std::string verilog_path;
+    std::string top_cell;
+    std::string sdc_path;
+    std::map<std::string, std::string> liberty_by_corner;
+    std::string spef_path;
+    std::vector<analysis::SceneResult> last_results;
+  };
+  TimingSession timing;
 
   bool HasDesign() const { return project.HasDesign(); }
 };

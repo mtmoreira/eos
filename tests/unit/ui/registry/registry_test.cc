@@ -2,10 +2,14 @@
 #include "eos/ui/registry.h"
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string>
 
 #include <gtest/gtest.h>
+
+#include "eos/db/odb.h"
 
 namespace eos::ui {
 namespace {
@@ -51,7 +55,7 @@ TEST(Registry, UnknownCommandIsAnInvalidCommandDiagnostic) {
 TEST(Registry, CoreSetIsComplete) {
   Shell shell;
   // The count is a contract: adding a command means updating it.
-  EXPECT_EQ(shell.registry.Names().size(), 29u);
+  EXPECT_EQ(shell.registry.Names().size(), 35u);
   EXPECT_NE(shell.registry.Find("create_design"), nullptr);
   EXPECT_NE(shell.registry.Find("restore"), nullptr);
 }
@@ -324,6 +328,287 @@ TEST(CoreCommands, ScenariosAndListCommands) {
   ASSERT_TRUE(commands.ok);
   EXPECT_NE(commands.payload.find("create_design"), std::string::npos);
   EXPECT_NE(commands.payload.find("checkpoint"), std::string::npos);
+}
+
+namespace {
+
+// The unit 2.2 STA fixture, reused for the timing commands: the
+// reg-to-reg delay is 0.6 ns by construction, so a 10 ns clock
+// gives worst slack 9.4 ns (the pinned upstream value).
+const char kTimingLiberty[] = R"LIB(library (eos_fixture) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) {
+      direction : input;
+      capacitance : 0.001;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (scalar) { values ("0.05"); }
+        fall_constraint (scalar) { values ("0.05"); }
+      }
+    }
+    pin (CK) {
+      direction : input;
+      capacitance : 0.001;
+      clock : true;
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (BUF) {
+    area : 2.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+const char kTimingVerilog[] = R"V(module top (clk, d, q);
+  input clk, d;
+  output q;
+  wire n1, n2;
+  DFF r1 (.D(d), .CK(clk), .Q(n1));
+  BUF u1 (.A(n1), .Y(n2));
+  DFF r2 (.D(n2), .CK(clk), .Q(q));
+endmodule
+)V";
+
+const char kTimingSdc[] =
+    "create_clock -name clk -period 10 [get_ports clk]\n";
+
+const char kTimingLef[] = R"LEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MANUFACTURINGGRID 0.005 ;
+SITE core
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END core
+LAYER metal1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal1
+MACRO BUFX2
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.35 -0.05 0.45 0.05 ;
+    END
+  END Y
+END BUFX2
+END LIBRARY
+)LEF";
+
+const char kTimingDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 2 ;
+- u1 BUFX2 + PLACED ( 1000 1000 ) N ;
+- u2 BUFX2 + PLACED ( 2000 1000 ) N ;
+END COMPONENTS
+PINS 2 ;
+- in1 + NET n_in + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- out1 + NET n_out + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 3 ;
+- n_in ( PIN in1 ) ( u1 A ) ;
+- n_mid ( u1 Y ) ( u2 A ) ;
+- n_out ( u2 Y ) ( PIN out1 ) ;
+END NETS
+END DESIGN
+)DEF";
+
+class TimingTempDir {
+ public:
+  TimingTempDir()
+      : path_(std::filesystem::temp_directory_path() /
+              ("eos_registry_timing_test_" + std::to_string(counter_++))) {
+    std::filesystem::create_directories(path_);
+  }
+  ~TimingTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+  std::string Write(const std::string& name,
+                    const std::string& text) const {
+    const std::filesystem::path file = path_ / name;
+    std::ofstream out(file);
+    out << text;
+    out.close();
+    return file.string();
+  }
+  std::string Path(const std::string& name) const {
+    return (path_ / name).string();
+  }
+
+ private:
+  static inline int counter_ = 0;
+  std::filesystem::path path_;
+};
+
+}  // namespace
+
+TEST(CoreCommands, TimingRunRegistersPerSceneReports) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  EXPECT_NE(run.payload.find("source=verilog scenes=1"), std::string::npos);
+  EXPECT_NE(run.payload.find("scene=func_tt"), std::string::npos);
+  // The payload carries the measured values at float precision
+  // (9.399999... for the fixture's 9.4 ns), so parse and compare
+  // numerically rather than matching a rounded string.
+  const auto payload_number = [&run](const std::string& key) {
+    const std::size_t at = run.payload.find(key + "=");
+    EXPECT_NE(at, std::string::npos) << "missing " << key;
+    if (at == std::string::npos) return 0.0;
+    return std::stod(run.payload.substr(at + key.size() + 1));
+  };
+  EXPECT_NEAR(payload_number("worst_slack_ns"), 9.4, 1e-6);
+  EXPECT_NEAR(payload_number("worst_hold_slack_ns"), 0.45, 1e-6);
+  EXPECT_NE(run.payload.find("report=timing_func_tt"), std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "timing_func_tt"),
+            nullptr);
+  ASSERT_EQ(shell.ctx.timing.last_results.size(), 1u);
+  // A second run cannot re-register the same report names.
+  const CommandResult again = shell.Run("run_timing");
+  EXPECT_FALSE(again.ok);
+}
+
+TEST(CoreCommands, TimingRunDiagnostics) {
+  Shell shell;
+  // No scenarios yet: a configuration failure, before any source
+  // question.
+  const CommandResult no_scenarios = shell.Run("run_timing");
+  ASSERT_FALSE(no_scenarios.ok);
+  EXPECT_EQ(no_scenarios.diag, Diag::kInvalidConfiguration);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  // A scenario but no design source: the unclosed-design
+  // diagnostic.
+  const CommandResult no_source = shell.Run("run_timing");
+  ASSERT_FALSE(no_source.ok);
+  EXPECT_EQ(no_source.diag, Diag::kUnclosedDesign);
+  // A source but no Liberty for the scene's corner names the
+  // corner.
+  TimingTempDir dir;
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult no_liberty = shell.Run("run_timing");
+  ASSERT_FALSE(no_liberty.ok);
+  EXPECT_EQ(no_liberty.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(no_liberty.message.find("tt"), std::string::npos);
+}
+
+TEST(CoreCommands, ImportOdbLoadsTheDatabase) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kTimingDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  const CommandResult imported = shell.Run("import_odb", {db_path});
+  ASSERT_TRUE(imported.ok) << imported.message;
+  EXPECT_NE(imported.payload.find("design=top"), std::string::npos);
+  EXPECT_NE(imported.payload.find("instances=2"), std::string::npos);
+  EXPECT_NE(imported.payload.find("nets=3"), std::string::npos);
+  ASSERT_TRUE(shell.ctx.timing.odb.has_value());
+  const CommandResult missing =
+      shell.Run("import_odb", {dir.Path("no_such.odb")});
+  EXPECT_FALSE(missing.ok);
+  EXPECT_EQ(missing.diag, Diag::kIoError);
 }
 
 }  // namespace

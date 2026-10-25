@@ -71,6 +71,14 @@ class StaEngine {
   // Fails with kInvalidState under the same conditions as
   // WorstSlackNs.
   Result<double> TotalNegativeSlackNs();
+  // Worst hold (min) slack in nanoseconds. Fails with kInvalidState
+  // under the same conditions as WorstSlackNs.
+  Result<double> WorstHoldSlackNs();
+  // Total negative hold (min) slack in nanoseconds: the sum of the
+  // negative hold endpoint slacks, or zero when no endpoint
+  // violates. Fails with kInvalidState under the same conditions
+  // as WorstSlackNs.
+  Result<double> TotalNegativeHoldSlackNs();
 
  private:
   struct Impl;

@@ -35,6 +35,12 @@ target_link_libraries(eda_analysis_sta_unit_test
   PRIVATE eda_analysis_sta GTest::gtest GTest::gtest_main)
 add_test(NAME analysis.sta COMMAND eda_analysis_sta_unit_test)
 
+add_executable(eda_analysis_timing_unit_test
+  analysis/timing/timing_service_test.cc)
+target_link_libraries(eda_analysis_timing_unit_test
+  PRIVATE eda_analysis_timing GTest::gtest GTest::gtest_main)
+add_test(NAME analysis.timing COMMAND eda_analysis_timing_unit_test)
+
 add_executable(eda_db_odb_unit_test db/odb/odb_test.cc)
 target_link_libraries(eda_db_odb_unit_test
   PRIVATE eda_db_odb GTest::gtest GTest::gtest_main)
