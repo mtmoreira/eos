@@ -2,5 +2,5 @@
 
 Owns scenario and mode and corner objects that analyses are evaluated under.
 
-Status: skeleton, seeded in Phase 0. No implementation yet.
-The stable public API of this module will live in include/ and is versioned per the EOS Code Structure document.
+Status: implemented (Phase 1). A scenario is its (mode, corner, parasitics level) triple; the set enforces unique names and unique triples, and tracks the active set that report bindings snapshot.
+The stable public API of this module lives in include/ and is versioned per the EOS Code Structure document.
