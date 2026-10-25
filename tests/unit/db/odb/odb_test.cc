@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -153,6 +154,144 @@ TEST(Odb, WriteDefRoundTripReReadsWithIdenticalCounts) {
   EXPECT_EQ(reread.TopBlockName(), db.TopBlockName());
   EXPECT_EQ(reread.InstanceCount(), db.InstanceCount());
   EXPECT_EQ(reread.NetCount(), db.NetCount());
+}
+
+TEST(Odb, WriteDbRoundTripReReadsWithIdenticalCounts) {
+  TempDir dir;
+  OdbDatabase db;
+  LoadFixture(db, dir);
+  const std::string out = dir.Path("roundtrip.odb");
+  ASSERT_TRUE(db.WriteDb(out).ok());
+
+  OdbDatabase reread;
+  ASSERT_TRUE(reread.ReadDb(out).ok());
+  EXPECT_EQ(reread.TopBlockName(), "top");
+  EXPECT_EQ(reread.InstanceCount(), 2u);
+  EXPECT_EQ(reread.NetCount(), 3u);
+  EXPECT_EQ(reread.MasterCount(), 1u);
+}
+
+TEST(Odb, ReadDbIntoNonEmptyDatabaseIsInvalidState) {
+  TempDir dir;
+  OdbDatabase db;
+  LoadFixture(db, dir);
+  const std::string out = dir.Path("roundtrip.odb");
+  ASSERT_TRUE(db.WriteDb(out).ok());
+  const Status status = db.ReadDb(out);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+}
+
+TEST(Odb, WriteVerilogEmitsTheNetlist) {
+  TempDir dir;
+  OdbDatabase db;
+  LoadFixture(db, dir);
+  const std::string out = dir.Path("top.v");
+  ASSERT_TRUE(db.WriteVerilog(out).ok());
+  std::ifstream in(out);
+  std::stringstream text;
+  text << in.rdbuf();
+  const std::string verilog = text.str();
+  EXPECT_NE(verilog.find("module top (in1, out1);"), std::string::npos);
+  EXPECT_NE(verilog.find("input in1;"), std::string::npos);
+  EXPECT_NE(verilog.find("output out1;"), std::string::npos);
+  EXPECT_NE(verilog.find("wire n_mid;"), std::string::npos);
+  EXPECT_NE(verilog.find("BUFX2 u1 (.A(n_in), .Y(n_mid));"),
+            std::string::npos);
+  EXPECT_NE(verilog.find("BUFX2 u2 (.A(n_mid), .Y(n_out));"),
+            std::string::npos);
+  EXPECT_NE(verilog.find("endmodule"), std::string::npos);
+}
+
+TEST(Odb, WriteVerilogNormalizesDefEscapedNames) {
+  // A DEF net name with backslash-escaped bus brackets is stored
+  // with its escapes; the Verilog writer must emit the name itself,
+  // not the stored escape sequence, or SPEF and SDC references to
+  // the net will not match it. An internal escaped net is written
+  // as one escaped identifier; a port bit whose net carries its
+  // name becomes a real bus port (see the bus test below).
+  const char kEscapedDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 2 ;
+- u1 BUFX2 + PLACED ( 1000 1000 ) N ;
+- u2 BUFX2 + PLACED ( 2000 1000 ) N ;
+END COMPONENTS
+PINS 2 ;
+- in1 + NET n_in + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- bus\[0\] + NET bus\[0\] + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 3 ;
+- n_in ( PIN in1 ) ( u1 A ) ;
+- n\[0\] ( u1 Y ) ( u2 A ) ;
+- bus\[0\] ( u2 Y ) ( PIN bus\[0\] ) ;
+END NETS
+END DESIGN
+)DEF";
+  TempDir dir;
+  OdbDatabase db;
+  ASSERT_TRUE(db.ReadLef(dir.Write("cells.lef", kLef)).ok());
+  ASSERT_TRUE(db.ReadDef(dir.Write("top.def", kEscapedDef)).ok());
+  const std::string out = dir.Path("top.v");
+  ASSERT_TRUE(db.WriteVerilog(out).ok());
+  std::ifstream in(out);
+  std::stringstream text;
+  text << in.rdbuf();
+  const std::string verilog = text.str();
+  EXPECT_EQ(verilog.find("bus\\[0\\]"), std::string::npos) << verilog;
+  EXPECT_EQ(verilog.find("n\\[0\\]"), std::string::npos) << verilog;
+  EXPECT_NE(verilog.find("wire \\n[0] ;"), std::string::npos) << verilog;
+  EXPECT_NE(verilog.find(".Y(\\n[0] )"), std::string::npos) << verilog;
+  EXPECT_NE(verilog.find("output [0:0] bus;"), std::string::npos)
+      << verilog;
+  EXPECT_NE(verilog.find(".Y(bus[0])"), std::string::npos) << verilog;
+}
+
+TEST(Odb, WriteVerilogGroupsBusBitPortsIntoBuses) {
+  // Ports named base[N] (the plain DEF bus form) whose nets carry
+  // the same names are one bus: one header entry, one ranged
+  // declaration, bit-select connections. Parasitics formats
+  // resolve port pins through the bus object.
+  const char kBusDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 2 ;
+- u1 BUFX2 + PLACED ( 1000 1000 ) N ;
+- u2 BUFX2 + PLACED ( 2000 1000 ) N ;
+END COMPONENTS
+PINS 2 ;
+- data[0] + NET data[0] + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+- data[1] + NET data[1] + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 6000 ) N ;
+END PINS
+NETS 3 ;
+- n_in ( u1 A ) ;
+- data[0] ( u1 Y ) ( PIN data[0] ) ;
+- data[1] ( u2 Y ) ( PIN data[1] ) ;
+END NETS
+END DESIGN
+)DEF";
+  TempDir dir;
+  OdbDatabase db;
+  ASSERT_TRUE(db.ReadLef(dir.Write("cells.lef", kLef)).ok());
+  ASSERT_TRUE(db.ReadDef(dir.Write("top.def", kBusDef)).ok());
+  const std::string out = dir.Path("top.v");
+  ASSERT_TRUE(db.WriteVerilog(out).ok());
+  std::ifstream in(out);
+  std::stringstream text;
+  text << in.rdbuf();
+  const std::string verilog = text.str();
+  EXPECT_NE(verilog.find("module top (data);"), std::string::npos)
+      << verilog;
+  EXPECT_NE(verilog.find("output [1:0] data;"), std::string::npos)
+      << verilog;
+  EXPECT_NE(verilog.find(".Y(data[0])"), std::string::npos) << verilog;
+  EXPECT_NE(verilog.find(".Y(data[1])"), std::string::npos) << verilog;
 }
 
 TEST(Odb, ReadDefBeforeAnyLefIsInvalidState) {

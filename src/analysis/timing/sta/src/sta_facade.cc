@@ -143,7 +143,7 @@ struct StaEngine::Impl {
     return Eval(std::string(verb) + " " + TclQuote(arg), what, arg);
   }
 
-  Result<double> SlackNs(bool total) {
+  Result<double> SlackNs(bool total, bool hold) {
     if (sta == nullptr) {
       return Status::Error(
           ErrorCode::kInvalidState,
@@ -156,9 +156,9 @@ struct StaEngine::Impl {
           "constrained");
     }
     try {
-      const sta::Slack slack =
-          total ? sta->totalNegativeSlack(sta::MinMax::max())
-                : sta->worstSlack(sta::MinMax::max());
+      const sta::MinMax* min_max = hold ? sta::MinMax::min() : sta::MinMax::max();
+      const sta::Slack slack = total ? sta->totalNegativeSlack(min_max)
+                                     : sta->worstSlack(min_max);
       const sta::Unit* unit = sta->units()->timeUnit();
       // Unit::staToUser(value) is value / unit->scale(); staToUser is
       // not const-qualified upstream, so divide by the scale here.
@@ -206,10 +206,18 @@ Status StaEngine::ReadSpef(const std::string& path) {
   return impl_->Run("read_spef", path, "could not read SPEF file");
 }
 
-Result<double> StaEngine::WorstSlackNs() { return impl_->SlackNs(false); }
+Result<double> StaEngine::WorstSlackNs() { return impl_->SlackNs(false, false); }
 
 Result<double> StaEngine::TotalNegativeSlackNs() {
-  return impl_->SlackNs(true);
+  return impl_->SlackNs(true, false);
+}
+
+Result<double> StaEngine::WorstHoldSlackNs() {
+  return impl_->SlackNs(false, true);
+}
+
+Result<double> StaEngine::TotalNegativeHoldSlackNs() {
+  return impl_->SlackNs(true, true);
 }
 
 }  // namespace eos::analysis

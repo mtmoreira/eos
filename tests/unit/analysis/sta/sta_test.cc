@@ -193,6 +193,21 @@ TEST(StaFacade, WorstSlackMatchesUpstream) {
   EXPECT_NEAR(tns.value(), 0.0, 1e-9);
 }
 
+TEST(StaFacade, HoldSlackMatchesUpstream) {
+  // Measured with the pinned upstream executable on this identical
+  // fixture on 2026-10-25: WORST_SLACK_MIN=0.449999994449 and
+  // TNS_MIN=0 with the 10 ns SDC.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto hold = engine.WorstHoldSlackNs();
+  ASSERT_TRUE(hold.ok()) << hold.status().message();
+  EXPECT_NEAR(hold.value(), 0.45, 1e-6 * 0.45);
+  const auto tns = engine.TotalNegativeHoldSlackNs();
+  ASSERT_TRUE(tns.ok()) << tns.status().message();
+  EXPECT_NEAR(tns.value(), 0.0, 1e-9);
+}
+
 TEST(StaFacade, NegativeSlackAndTnsMatchUpstream) {
   TempDir dir;
   StaEngine engine;

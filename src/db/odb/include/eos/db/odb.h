@@ -30,6 +30,25 @@ using foundation::Status;
 // the libraries read so far. WriteDef writes the top block created
 // by ReadDef. Counts describe the top block, or zero when no DEF
 // has been read.
+//
+// ReadDb and WriteDb handle the database's own binary form (the
+// .odb files implementation flows save and reopen). ReadDb loads a
+// whole database (technology, libraries and chip) into an empty
+// facade; WriteDb saves the whole database. WriteVerilog writes the
+// top block as a flat gate-level Verilog netlist, for consumers
+// (the timing service) whose input is a netlist: power and ground
+// connections are omitted, and so are instances with no signal
+// connection at all (filler, tap and decap cells), because neither
+// can carry a timing arc and the physical-only cells are usually
+// absent from the Liberty library. Names that are not plain
+// Verilog identifiers are written as escaped identifiers, and
+// DEF-style backslash escapes stored in database names are
+// normalized away first, so the netlist names objects exactly as
+// the other formats (SPEF, SDC) name them. A port named "base[N]"
+// whose net carries the same name is written as one bit of a real
+// bus port ("output [31:0] base"), because parasitics formats
+// resolve port pins through the bus; internal bus-bit nets stay
+// escaped scalars, which is how those formats name nets.
 class OdbDatabase {
  public:
   OdbDatabase();
@@ -51,6 +70,21 @@ class OdbDatabase {
   // DEF has been read, and with kIoError when the file cannot be
   // written.
   Status WriteDef(const std::string& path) const;
+  // Reads a whole database from its binary form. Fails with
+  // kInvalidState when this database already holds a chip or any
+  // LEF library, and with kIoError when the file cannot be read or
+  // does not parse (including a file written by an incompatible
+  // database version).
+  Status ReadDb(const std::string& path);
+  // Writes the whole database in its binary form. Fails with
+  // kInvalidState when no DEF or database has been read, and with
+  // kIoError when the file cannot be written.
+  Status WriteDb(const std::string& path) const;
+  // Writes the top block as a flat gate-level Verilog netlist, per
+  // the rules in this header's banner. Fails with kInvalidState
+  // when no DEF or database has been read, and with kIoError when
+  // the file cannot be written.
+  Status WriteVerilog(const std::string& path) const;
 
   bool has_top_block() const;
   std::string TopBlockName() const;

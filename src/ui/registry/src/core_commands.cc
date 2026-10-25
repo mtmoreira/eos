@@ -8,7 +8,9 @@
 
 #include <charconv>
 #include <cstdint>
+#include <iomanip>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -181,6 +183,21 @@ void ResetProject(CommandContext& ctx) {
   ctx.project.Reset();
   ctx.collections.clear();
   ctx.next_collection = 1;
+  ctx.timing = CommandContext::TimingSession();
+}
+
+// Metric values print at full useful precision: enough significant
+// digits that a picosecond-scale slack survives the payload.
+std::string FormatNumber(double value) {
+  std::ostringstream out;
+  out << std::setprecision(10) << value;
+  return out.str();
+}
+
+std::string MetricText(const analysis::TimingMetricMap& metrics,
+                       const std::string& name) {
+  const auto it = metrics.find(name);
+  return it == metrics.end() ? "none" : FormatNumber(it->second.value);
 }
 
 }  // namespace
@@ -762,6 +779,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         // artifact the ledger lacks already dropped and counted.
         ctx.collections.clear();
         ctx.next_collection = 1;
+        ctx.timing = CommandContext::TimingSession();
         return CommandResult::Ok(
             "restored=1 design=" + ctx.project.design->name() +
             " revision=" +
@@ -773,6 +791,171 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             std::to_string(info.value().bindings_restored) +
             " bindings_dropped=" +
             std::to_string(info.value().bindings_dropped));
+      });
+
+  add("import_odb", "import_odb <path>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 1, "import_odb <path>")) {
+          return *bad;
+        }
+        db::OdbDatabase database;
+        const foundation::Status status = database.ReadDb(args[0]);
+        if (!status.ok()) return FromStatus(status);
+        CommandResult result = CommandResult::Ok(
+            "design=" + database.TopBlockName() +
+            " instances=" + std::to_string(database.InstanceCount()) +
+            " nets=" + std::to_string(database.NetCount()) +
+            " masters=" + std::to_string(database.MasterCount()));
+        ctx.timing.odb = std::move(database);
+        return result;
+      });
+
+  add("read_liberty", "read_liberty <corner> <path>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad =
+                ExpectCount(args, 2, "read_liberty <corner> <path>")) {
+          return *bad;
+        }
+        ctx.timing.liberty_by_corner[args[0]] = args[1];
+        return CommandResult::Ok("corner=" + args[0] +
+                                 " liberty=" + args[1]);
+      });
+
+  add("read_verilog", "read_verilog <path> <top>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad =
+                ExpectCount(args, 2, "read_verilog <path> <top>")) {
+          return *bad;
+        }
+        ctx.timing.verilog_path = args[0];
+        ctx.timing.top_cell = args[1];
+        return CommandResult::Ok("verilog=" + args[0] + " top=" + args[1]);
+      });
+
+  add("read_sdc", "read_sdc <path>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 1, "read_sdc <path>")) {
+          return *bad;
+        }
+        ctx.timing.sdc_path = args[0];
+        return CommandResult::Ok("sdc=" + args[0]);
+      });
+
+  add("set_spef", "set_spef <path>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 1, "set_spef <path>")) {
+          return *bad;
+        }
+        ctx.timing.spef_path = args[0];
+        return CommandResult::Ok("spef=" + args[0]);
+      });
+
+  add("run_timing", "run_timing",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "run_timing")) return *bad;
+        const std::vector<const db::Scenario*> active =
+            ctx.project.scenarios.ActiveScenarios();
+        if (active.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no active scenarios (see eos::create_scenario)");
+        }
+        const bool from_odb = ctx.timing.odb.has_value() &&
+                              ctx.timing.odb->has_top_block();
+        const bool from_verilog = !ctx.timing.verilog_path.empty();
+        if (!from_odb && !from_verilog) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no timing design source: eos::import_odb or "
+              "eos::read_verilog first");
+        }
+        if (ctx.timing.sdc_path.empty()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "no SDC: eos::read_sdc first");
+        }
+        std::vector<analysis::SceneAnalysis> scenes;
+        for (const db::Scenario* scenario : active) {
+          analysis::SceneAnalysis scene;
+          scene.scenario = *scenario;
+          const auto liberty =
+              ctx.timing.liberty_by_corner.find(scenario->corner);
+          if (liberty == ctx.timing.liberty_by_corner.end()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "no Liberty for corner " + scenario->corner +
+                    " (scene " + scenario->name +
+                    "): eos::read_liberty first");
+          }
+          scene.liberty_path = liberty->second;
+          if (scenario->parasitics == db::ParasiticsLevel::kExtracted) {
+            if (ctx.timing.spef_path.empty()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "scene " + scenario->name +
+                      " is at extracted parasitics but no SPEF is "
+                      "set: eos::set_spef first");
+            }
+            scene.spef_path = ctx.timing.spef_path;
+          }
+          scenes.push_back(std::move(scene));
+        }
+        analysis::TimingService service;
+        const Result<std::vector<analysis::SceneResult>> analyzed =
+            from_odb
+                ? service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
+                                  scenes)
+                : service.Analyze(
+                      analysis::VerilogDesign{ctx.timing.verilog_path,
+                                              ctx.timing.top_cell,
+                                              ctx.timing.sdc_path},
+                      scenes);
+        if (!analyzed.ok()) return FromStatus(analyzed.status());
+        // One report binding per scene, registered through
+        // session/reports at the current ledger revision. The
+        // analysis completed, so the report's proof is pass: the
+        // metrics are the measured result, whatever their sign.
+        std::string payload = std::string("source=") +
+                              (from_odb ? "odb" : "verilog") +
+                              " scenes=" +
+                              std::to_string(analyzed.value().size()) +
+                              " revision=" +
+                              std::to_string(
+                                  ctx.project.ledger.current_revision());
+        for (const analysis::SceneResult& result : analyzed.value()) {
+          const std::string report = "timing_" + result.scenario.name;
+          const Result<session::ArtifactId> artifact =
+              ctx.reports.RegisterReport(ctx.project, report,
+                                         session::ProofStatus::kPass,
+                                         "NLDM");
+          if (!artifact.ok()) return FromStatus(artifact.status());
+          payload += "\nscene=" + result.scenario.name +
+                     " mode=" + result.scenario.mode +
+                     " corner=" + result.scenario.corner +
+                     " parasitics=" +
+                     std::string(result.scenario.parasitics ==
+                                         db::ParasiticsLevel::kExtracted
+                                     ? "extracted"
+                                     : "estimate") +
+                     " worst_slack_ns=" +
+                     MetricText(result.metrics, "worst_slack_ns") +
+                     " total_negative_slack_ns=" +
+                     MetricText(result.metrics, "total_negative_slack_ns") +
+                     " worst_hold_slack_ns=" +
+                     MetricText(result.metrics, "worst_hold_slack_ns") +
+                     " total_negative_hold_slack_ns=" +
+                     MetricText(result.metrics,
+                                "total_negative_hold_slack_ns") +
+                     " report=" + report + " artifact=" +
+                     std::to_string(artifact.value());
+        }
+        ctx.timing.last_results = analyzed.value();
+        return CommandResult::Ok(payload);
       });
 
   add("list_commands", "list_commands",
