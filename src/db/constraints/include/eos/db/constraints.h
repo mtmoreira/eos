@@ -82,6 +82,12 @@ struct CoverageReport {
   }
 };
 
+// The complete serializable state of a ConstraintSet.
+struct ConstraintState {
+  std::vector<Constraint> constraints;
+  ConstraintId next_id = 1;
+};
+
 class ConstraintSet {
  public:
   // Adds a constraint and resolves its target against the design now.
@@ -100,6 +106,15 @@ class ConstraintSet {
 
   CoverageReport Coverage() const;
   std::vector<const Constraint*> Unresolved() const;
+
+  // Checkpoint support: ExportState snapshots the set; FromState
+  // validates it (nonzero unique ids, bound status consistent with a
+  // non-null bound object, next_id ahead of every id) and only then
+  // builds. Whether a bound ID still names a live design object is
+  // the checkpoint layer's cross-check, not this module's.
+  ConstraintState ExportState() const;
+  static foundation::Result<ConstraintSet> FromState(
+      const ConstraintState& state);
 
  private:
   static void Resolve(Constraint& constraint, const Design& design);

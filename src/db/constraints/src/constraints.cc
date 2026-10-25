@@ -88,4 +88,37 @@ std::vector<const Constraint*> ConstraintSet::Unresolved() const {
   return out;
 }
 
+ConstraintState ConstraintSet::ExportState() const {
+  ConstraintState state;
+  state.constraints = constraints_;
+  state.next_id = next_id_;
+  return state;
+}
+
+foundation::Result<ConstraintSet> ConstraintSet::FromState(
+    const ConstraintState& state) {
+  ConstraintSet set;
+  ConstraintId max_id = 0;
+  for (const Constraint& constraint : state.constraints) {
+    const bool bound = constraint.status == BindingStatus::kBound;
+    if (constraint.id == 0 || set.Find(constraint.id) != nullptr ||
+        bound == constraint.bound_object.is_null()) {
+      return foundation::Status::Error(
+          foundation::ErrorCode::kInvalidArgument,
+          "constraint state: duplicate or inconsistent constraint");
+    }
+    set.constraints_.push_back(constraint);
+    if (constraint.id > max_id) {
+      max_id = constraint.id;
+    }
+  }
+  if (state.next_id <= max_id) {
+    return foundation::Status::Error(
+        foundation::ErrorCode::kInvalidArgument,
+        "constraint state: next_id would reuse an id");
+  }
+  set.next_id_ = state.next_id;
+  return set;
+}
+
 }  // namespace eos::db
