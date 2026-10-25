@@ -1,7 +1,10 @@
-// errors: skeleton translation unit, seeded in Phase 0.
-// The anchor symbol exists so the module target is a real
-// library from day one; real implementation replaces this
-// file with the module's first feature commit.
+// errors: error and result types (L0 foundation).
+//
+// Status and Result<T> are header-only by design; this translation unit
+// exists so the module target carries the module's version anchor.
+#include "eos/foundation/errors.h"
+
 namespace eos::foundation {
-int errors_skeleton_anchor = 0;
+// Anchor: bumped when the error surface changes incompatibly.
+int errors_api_anchor = 1;
 }  // namespace eos::foundation

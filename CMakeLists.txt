@@ -67,3 +67,7 @@ add_subdirectory(src/ui/registry)
 add_subdirectory(src/ui/tcl)
 add_subdirectory(src/ui/python)
 add_subdirectory(src/ui/gui)
+
+if(EOS_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
