@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y tcl-dev
+        run: sudo apt-get update && sudo apt-get install -y tcl-dev bison libboost-dev zlib1g-dev libspdlog-dev
       - name: Configure
         run: cmake -S . -B build -DEOS_BUILD_TESTS=ON
       - name: Build

@@ -30,6 +30,11 @@ target_link_libraries(eda_db_constraints_unit_test
   PRIVATE eda_db_constraints GTest::gtest GTest::gtest_main)
 add_test(NAME db.constraints COMMAND eda_db_constraints_unit_test)
 
+add_executable(eda_db_odb_unit_test db/odb/odb_test.cc)
+target_link_libraries(eda_db_odb_unit_test
+  PRIVATE eda_db_odb GTest::gtest GTest::gtest_main)
+add_test(NAME db.odb COMMAND eda_db_odb_unit_test)
+
 add_executable(eda_db_checkpoint_unit_test db/checkpoint/checkpoint_test.cc)
 target_link_libraries(eda_db_checkpoint_unit_test
   PRIVATE eda_db_checkpoint GTest::gtest GTest::gtest_main)
