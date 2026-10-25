@@ -248,10 +248,12 @@ TEST(Phase1Qualification, RestartReproducesStateIncludingTheLedger) {
   ASSERT_TRUE(f.project.SaveProject(path).ok());
 
   Project restored;
-  const foundation::Result<db::RestoreInfo> info =
+  const foundation::Result<session::ProjectRestoreInfo> info =
       restored.LoadProject(path);
   ASSERT_TRUE(info.ok());
-  EXPECT_EQ(info.value().constraints_marked_unresolved, 0u);
+  EXPECT_EQ(info.value().checkpoint.constraints_marked_unresolved, 0u);
+  EXPECT_EQ(info.value().bindings_restored, 2u);
+  EXPECT_EQ(info.value().bindings_dropped, 0u);
 
   // Design, scenarios and constraints reproduce exactly.
   ASSERT_TRUE(restored.HasDesign());
@@ -284,6 +286,25 @@ TEST(Phase1Qualification, RestartReproducesStateIncludingTheLedger) {
   EXPECT_FALSE(restored.ledger.ArtifactValid(f.early_report));
   EXPECT_TRUE(restored.ledger.ArtifactValid(f.live_report));
   EXPECT_TRUE(restored.ledger.ArtifactCurrent(f.live_report));
+
+  // The report bindings reproduce with the project (Phase 2 unit
+  // 2.0, closing limitation Q1): both bindings are back, linked to
+  // their ledger artifacts, and the gate on the restored project
+  // passes the live report and refuses the invalidated one.
+  ASSERT_EQ(restored.report_bindings.size(), 2u);
+  ReportRegistry restored_reports;
+  const session::ReportBinding* live =
+      restored_reports.FindByName(restored, "placed-timing");
+  ASSERT_NE(live, nullptr);
+  EXPECT_EQ(live->artifact_id, f.live_report);
+  EXPECT_EQ(live->bound_revision, 2u);
+  const ExportVerdict live_verdict =
+      restored_reports.Evaluate(restored, {"placed-timing"});
+  EXPECT_TRUE(live_verdict.allowed());
+  const ExportVerdict early_verdict =
+      restored_reports.Evaluate(restored, {"synth-timing"});
+  ASSERT_EQ(early_verdict.blockers.size(), 1u);
+  EXPECT_EQ(early_verdict.blockers[0].kind, BlockerKind::kInvalid);
 
   // Re-saving the restored project reproduces the project file
   // byte for byte: restart is a reproduction, not an approximation.

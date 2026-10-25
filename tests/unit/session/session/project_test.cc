@@ -94,9 +94,11 @@ TEST(Project, RoundTripPreservesDesignScenariosConstraintsAndLedger) {
   EXPECT_FALSE(tmp.good());  // atomic save leaves no temp file
 
   Project restored;
-  const Result<db::RestoreInfo> info = restored.LoadProject(path);
+  const Result<ProjectRestoreInfo> info = restored.LoadProject(path);
   ASSERT_TRUE(info.ok());
-  EXPECT_EQ(info.value().constraints_marked_unresolved, 0u);
+  EXPECT_EQ(info.value().checkpoint.constraints_marked_unresolved, 0u);
+  EXPECT_EQ(info.value().bindings_restored, 0u);
+  EXPECT_EQ(info.value().bindings_dropped, 0u);
 
   ASSERT_TRUE(restored.HasDesign());
   EXPECT_EQ(restored.design->name(), "top");
@@ -190,10 +192,170 @@ TEST(Project, CorruptProjectFileIsRejectedAndLiveStateUntouched) {
 
   // Missing file is an IO error, and still touches nothing.
   Remove(path);
-  const Result<db::RestoreInfo> missing = target.LoadProject(path);
+  const Result<ProjectRestoreInfo> missing = target.LoadProject(path);
   ASSERT_FALSE(missing.ok());
   EXPECT_EQ(missing.status().code(), foundation::ErrorCode::kIoError);
   EXPECT_EQ(target.design->name(), "live");
+  Remove(path);
+}
+
+// A hand-built binding over a fixture artifact, shaped exactly as
+// ReportRegistry::RegisterReport would have made it.
+ReportBinding MakeBinding(ArtifactId artifact, const std::string& name,
+                          Revision revision) {
+  ReportBinding binding;
+  binding.artifact_id = artifact;
+  binding.name = name;
+  binding.bound_revision = revision;
+  binding.timing_model = "NLDM";
+  binding.tool_build = "eos-test";
+  ScenarioSnapshot scenario;
+  scenario.id = 1;
+  scenario.name = "func tt";  // a space, to exercise the escaping
+  scenario.mode = "func";
+  scenario.corner = "tt_025c";
+  scenario.parasitics = ParasiticsLevel::kEstimate;
+  binding.scenarios.push_back(scenario);
+  binding.parasitics = ParasiticsLevel::kEstimate;
+  return binding;
+}
+
+void ExpectBindingEq(const ReportBinding& a, const ReportBinding& b) {
+  EXPECT_EQ(a.artifact_id, b.artifact_id);
+  EXPECT_EQ(a.name, b.name);
+  EXPECT_EQ(a.bound_revision, b.bound_revision);
+  EXPECT_EQ(a.timing_model, b.timing_model);
+  EXPECT_EQ(a.tool_build, b.tool_build);
+  EXPECT_EQ(a.parasitics, b.parasitics);
+  ASSERT_EQ(a.scenarios.size(), b.scenarios.size());
+  for (std::size_t i = 0; i < a.scenarios.size(); ++i) {
+    EXPECT_EQ(a.scenarios[i].id, b.scenarios[i].id);
+    EXPECT_EQ(a.scenarios[i].name, b.scenarios[i].name);
+    EXPECT_EQ(a.scenarios[i].mode, b.scenarios[i].mode);
+    EXPECT_EQ(a.scenarios[i].corner, b.scenarios[i].corner);
+    EXPECT_EQ(a.scenarios[i].parasitics, b.scenarios[i].parasitics);
+  }
+}
+
+TEST(Project, BindingsRoundTripWithTheProject) {
+  Fixture f;
+  f.project.report_bindings.push_back(
+      MakeBinding(f.early_report, "early-timing", 0));
+  ReportBinding mixed = MakeBinding(f.live_report, "placed-timing", 2);
+  ScenarioSnapshot extracted;
+  extracted.id = 2;
+  extracted.name = "func_ss";
+  extracted.mode = "func";
+  extracted.corner = "ss_125c";
+  extracted.parasitics = ParasiticsLevel::kExtracted;
+  mixed.scenarios.push_back(extracted);
+  mixed.parasitics.reset();  // mixed levels: no single level claimed
+  f.project.report_bindings.push_back(mixed);
+
+  const std::string path = TempPath("bindings");
+  Remove(path);
+  ASSERT_TRUE(f.project.SaveProject(path).ok());
+
+  Project restored;
+  const Result<ProjectRestoreInfo> info = restored.LoadProject(path);
+  ASSERT_TRUE(info.ok());
+  EXPECT_EQ(info.value().bindings_restored, 2u);
+  EXPECT_EQ(info.value().bindings_dropped, 0u);
+  ASSERT_EQ(restored.report_bindings.size(), 2u);
+  ExpectBindingEq(restored.report_bindings[0],
+                  f.project.report_bindings[0]);
+  ExpectBindingEq(restored.report_bindings[1],
+                  f.project.report_bindings[1]);
+  Remove(path);
+}
+
+TEST(Project, BindingWhoseArtifactIsMissingIsDroppedAndCounted) {
+  Fixture f;
+  f.project.report_bindings.push_back(
+      MakeBinding(f.live_report, "placed-timing", 2));
+  // No artifact 99 exists in the ledger, and no artifact 3 either:
+  // the first binding below names a report that was never
+  // registered, the second names an analysis artifact, which is
+  // present but is not the report the binding claims to describe.
+  f.project.report_bindings.push_back(MakeBinding(99, "ghost", 2));
+  const ArtifactId analysis = f.project.ledger.RegisterArtifact(
+      ArtifactKind::kAnalysis, "some-analysis", ProofStatus::kPass);
+  f.project.report_bindings.push_back(
+      MakeBinding(analysis, "not-a-report", 2));
+
+  const std::string path = TempPath("dropped");
+  Remove(path);
+  ASSERT_TRUE(f.project.SaveProject(path).ok());
+
+  Project restored;
+  const Result<ProjectRestoreInfo> info = restored.LoadProject(path);
+  ASSERT_TRUE(info.ok());
+  EXPECT_EQ(info.value().bindings_restored, 1u);
+  EXPECT_EQ(info.value().bindings_dropped, 2u);
+  ASSERT_EQ(restored.report_bindings.size(), 1u);
+  EXPECT_EQ(restored.report_bindings[0].name, "placed-timing");
+  Remove(path);
+}
+
+TEST(Project, ProjectFileWithoutAReportsSectionLoadsWithNoBindings) {
+  Fixture f;
+  // Compose the pre-2.0 file form by hand: magic, checkpoint and
+  // ledger sections only.
+  db::CheckpointData data;
+  data.design = f.project.design->ExportState();
+  data.scenarios = f.project.scenarios.ExportState();
+  data.constraints = f.project.constraints.ExportState();
+  const Result<std::string> checkpoint_text =
+      db::Checkpoint::Serialize(data);
+  ASSERT_TRUE(checkpoint_text.ok());
+  const Result<std::string> ledger_text =
+      SnapshotToText(f.project.ledger.Snapshot());
+  ASSERT_TRUE(ledger_text.ok());
+  std::string content = "EOSPROJ 1\n";
+  content += "checkpoint " + std::to_string(checkpoint_text.value().size()) +
+             "\n" + checkpoint_text.value();
+  content += "ledger " + std::to_string(ledger_text.value().size()) + "\n" +
+             ledger_text.value();
+
+  const std::string path = TempPath("legacy");
+  Remove(path);
+  WriteAll(path, content);
+
+  Project restored;
+  const Result<ProjectRestoreInfo> info = restored.LoadProject(path);
+  ASSERT_TRUE(info.ok());
+  EXPECT_EQ(info.value().bindings_restored, 0u);
+  EXPECT_EQ(info.value().bindings_dropped, 0u);
+  EXPECT_TRUE(restored.report_bindings.empty());
+  EXPECT_TRUE(restored.HasDesign());
+  EXPECT_EQ(restored.ledger.current_revision(), 2u);
+  Remove(path);
+}
+
+TEST(Project, CorruptBindingsSectionIsRejectedAndLiveStateUntouched) {
+  Fixture f;
+  f.project.report_bindings.push_back(
+      MakeBinding(f.live_report, "placed-timing", 2));
+  const std::string path = TempPath("corrupt_bindings");
+  Remove(path);
+  ASSERT_TRUE(f.project.SaveProject(path).ok());
+  std::string content = ReadAll(path);
+  const std::size_t at = content.find("EOSBINDINGS");
+  ASSERT_NE(at, std::string::npos);
+  content[at + 20] = content[at + 20] == 'a' ? 'b' : 'a';
+  WriteAll(path, content);
+
+  Project target;
+  target.design.emplace("live");
+  const ArtifactId kept = target.ledger.RegisterArtifact(
+      ArtifactKind::kReport, "keep-report", ProofStatus::kPass);
+  target.report_bindings.push_back(MakeBinding(kept, "keep-report", 0));
+
+  EXPECT_FALSE(target.LoadProject(path).ok());
+  ASSERT_TRUE(target.HasDesign());
+  EXPECT_EQ(target.design->name(), "live");
+  ASSERT_EQ(target.report_bindings.size(), 1u);
+  EXPECT_EQ(target.report_bindings[0].name, "keep-report");
   Remove(path);
 }
 

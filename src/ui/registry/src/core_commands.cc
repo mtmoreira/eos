@@ -179,7 +179,6 @@ std::string IdStr(ObjectId id) { return std::to_string(id.raw()); }
 
 void ResetProject(CommandContext& ctx) {
   ctx.project.Reset();
-  ctx.reports.Clear();
   ctx.collections.clear();
   ctx.next_collection = 1;
 }
@@ -753,21 +752,27 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         // Project load is all-or-nothing: a bad file leaves the
         // current project exactly as it was.
-        const Result<db::RestoreInfo> info =
+        const Result<session::ProjectRestoreInfo> info =
             ctx.project.LoadProject(args[0]);
         if (!info.ok()) return FromStatus(info.status());
         // Collections named objects of the previous project state;
-        // they do not survive a restore. Report bindings are session
-        // state describing the previous project state, likewise.
+        // they do not survive a restore. Report bindings are project
+        // state: the restored project carries the bindings its file
+        // held, linked to its ledger, with any binding whose
+        // artifact the ledger lacks already dropped and counted.
         ctx.collections.clear();
         ctx.next_collection = 1;
-        ctx.reports.Clear();
         return CommandResult::Ok(
             "restored=1 design=" + ctx.project.design->name() +
             " revision=" +
             std::to_string(ctx.project.ledger.current_revision()) +
             " unresolved=" +
-            std::to_string(info.value().constraints_marked_unresolved));
+            std::to_string(
+                info.value().checkpoint.constraints_marked_unresolved) +
+            " bindings_restored=" +
+            std::to_string(info.value().bindings_restored) +
+            " bindings_dropped=" +
+            std::to_string(info.value().bindings_dropped));
       });
 
   add("list_commands", "list_commands",
