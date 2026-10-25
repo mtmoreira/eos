@@ -51,7 +51,7 @@ TEST(Registry, UnknownCommandIsAnInvalidCommandDiagnostic) {
 TEST(Registry, CoreSetIsComplete) {
   Shell shell;
   // The count is a contract: adding a command means updating it.
-  EXPECT_EQ(shell.registry.Names().size(), 28u);
+  EXPECT_EQ(shell.registry.Names().size(), 29u);
   EXPECT_NE(shell.registry.Find("create_design"), nullptr);
   EXPECT_NE(shell.registry.Find("restore"), nullptr);
 }
@@ -239,6 +239,67 @@ TEST(CoreCommands, CheckpointAndRestoreRoundTripTheWholeProject) {
   ASSERT_TRUE(still.ok);
   EXPECT_NE(still.payload.find("design=live"), std::string::npos);
   std::remove(path.c_str());
+}
+
+TEST(CoreCommands, ExportCheckPassesAndNamesEveryBlockerKind) {
+  // The passing form: a current, proven report and complete
+  // coverage carry the verified_pass diagnostic.
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_clock", {"c1", "clk"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("register_report", {"timing", "pass"}).ok);
+  const CommandResult pass = shell.Run("export_check", {"timing"});
+  ASSERT_TRUE(pass.ok);
+  EXPECT_EQ(pass.diag, Diag::kVerifiedPass);
+  EXPECT_EQ(std::string(DiagName(pass.diag)), "verified_pass");
+  EXPECT_NE(pass.payload.find("export=pass"), std::string::npos);
+
+  // Missing: proof_unknown, and the blocker names the report.
+  const CommandResult missing = shell.Run("export_check", {"nope"});
+  ASSERT_FALSE(missing.ok);
+  EXPECT_EQ(missing.diag, Diag::kProofUnknown);
+  EXPECT_NE(missing.payload.find("blocker=missing"), std::string::npos);
+  EXPECT_NE(missing.payload.find("report=nope"), std::string::npos);
+
+  // Stale: a commit that does not invalidate ages the report out.
+  ASSERT_TRUE(shell.Run("begin_transaction", {"place"}).ok);
+  ASSERT_TRUE(shell.Run("commit_transaction", {"pass"}).ok);
+  const CommandResult stale = shell.Run("export_check", {"timing"});
+  ASSERT_FALSE(stale.ok);
+  EXPECT_EQ(stale.diag, Diag::kProofUnknown);
+  EXPECT_NE(stale.payload.find("blocker=stale"), std::string::npos);
+
+  // Coverage: an unresolved constraint blocks even a fresh report.
+  Shell uncovered;
+  ASSERT_TRUE(uncovered.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(uncovered.Run("create_clock", {"c1", "missing_clk"}).ok);
+  ASSERT_TRUE(uncovered.Run("register_report", {"timing", "pass"}).ok);
+  const CommandResult blocked = uncovered.Run("export_check", {"timing"});
+  ASSERT_FALSE(blocked.ok);
+  EXPECT_NE(blocked.payload.find("blocker=coverage_incomplete"),
+            std::string::npos);
+
+  // Proof: a report registered without a pass blocks on its proof.
+  Shell unproven;
+  ASSERT_TRUE(unproven.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(unproven.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(unproven.Run("create_clock", {"c1", "clk"}).ok);
+  ASSERT_TRUE(unproven.Run("register_report", {"timing"}).ok);
+  const CommandResult proof = unproven.Run("export_check", {"timing"});
+  ASSERT_FALSE(proof.ok);
+  EXPECT_NE(proof.payload.find("blocker=proof_not_pass"),
+            std::string::npos);
+
+  // export_check with no reports named is a usage error, and with
+  // no design open it is the unclosed-design diagnostic.
+  Shell empty;
+  EXPECT_EQ(empty.Run("export_check").diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(empty.Run("export_check", {"timing"}).diag,
+            Diag::kUnclosedDesign);
 }
 
 TEST(CoreCommands, ScenariosAndListCommands) {
