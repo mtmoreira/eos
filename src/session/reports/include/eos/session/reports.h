@@ -22,17 +22,19 @@
 // revision), or not proven pass blocks the export, and so does
 // incomplete constraint coverage.
 //
-// Bindings are session state, not project state: they are not part
-// of the project checkpoint (increment 5.1), so a restore starts
-// with an empty registry and reports must be registered again in the
-// new session. The ledger artifacts themselves do survive a restore.
+// Bindings are project state (Phase 2 unit 2.0, closing Phase 1
+// limitation Q1): they live on the Project, are serialized into the
+// project file, and restore with it, linked to their ledger
+// artifacts. A binding whose artifact is missing from a restored
+// ledger is dropped at load and counted in the restore report. This
+// registry is the stateless logic over that state: registration,
+// lookup and the gate.
 //
 // This header is a stable surface.
 #ifndef EOS_SESSION_REPORTS_H_
 #define EOS_SESSION_REPORTS_H_
 
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -46,37 +48,8 @@ namespace eos::session {
 using foundation::Result;
 using foundation::Status;
 
-// One scenario as the binding saw it at registration time. The
-// triple (mode, corner, parasitics) is the scenario's identity, per
-// the L2 scenario model; the id and name are its handles then.
-struct ScenarioSnapshot {
-  db::ScenarioId id = 0;
-  std::string name;
-  std::string mode;
-  std::string corner;
-  db::ParasiticsLevel parasitics = db::ParasiticsLevel::kEstimate;
-};
-
-// The immutable record of what a report certifies. Created only by
-// ReportRegistry::RegisterReport and never modified afterwards.
-struct ReportBinding {
-  ArtifactId artifact_id = 0;
-  std::string name;
-  Revision bound_revision = 0;
-  // The active scenario set at registration time, in creation order.
-  std::vector<ScenarioSnapshot> scenarios;
-  // The single parasitics level covered, when every active scenario
-  // ran at the same level. Absent when the active set was empty or
-  // mixed levels: levels are never mixed silently inside one report
-  // (Plan Section 7), so a mixed binding says so here and the
-  // per-scenario levels in `scenarios` carry the exact record.
-  std::optional<db::ParasiticsLevel> parasitics;
-  std::string timing_model;
-  std::string tool_build;
-};
-
 // A report's live standing, read from the ledger at query time.
-// `found` is false when the registry holds no binding under the
+// `found` is false when the project holds no binding under the
 // queried name (or the ledger has lost the artifact, which the
 // registry treats the same way for gate purposes).
 struct ReportStatus {
@@ -115,13 +88,14 @@ struct ExportVerdict {
 class ReportRegistry {
  public:
   // Registers a report in the project's ledger and binds it, in one
-  // step. The binding snapshots the project's active scenario set,
-  // the ledger's current revision and the declared timing model and
-  // tool build. Fails with kInvalidArgument on an empty name, an
-  // empty timing model, or a name this registry already holds (one
-  // name certifies one report; register the new run under a new
-  // name or in a fresh registry), and leaves the ledger untouched on
-  // failure, because the duplicate check runs before registration.
+  // step. The binding is stored on the project and snapshots the
+  // project's active scenario set, the ledger's current revision and
+  // the declared timing model and tool build. Fails with
+  // kInvalidArgument on an empty name, an empty timing model, or a
+  // name the project already holds a binding under (one name
+  // certifies one report; register the new run under a new name),
+  // and leaves the ledger untouched on failure, because the
+  // duplicate check runs before registration.
   Result<ArtifactId> RegisterReport(Project& project,
                                     const std::string& name,
                                     ProofStatus proof,
@@ -138,11 +112,15 @@ class ReportRegistry {
                           "eos-phase1");
   }
 
-  const ReportBinding* FindByName(const std::string& name) const;
-  const ReportBinding* FindByArtifact(ArtifactId id) const;
-  const std::vector<ReportBinding>& bindings() const { return bindings_; }
+  const ReportBinding* FindByName(const Project& project,
+                                  const std::string& name) const;
+  const ReportBinding* FindByArtifact(const Project& project,
+                                      ArtifactId id) const;
+  const std::vector<ReportBinding>& bindings(const Project& project) const {
+    return project.report_bindings;
+  }
 
-  void Clear() { bindings_.clear(); }
+  void Clear(Project& project) const { project.report_bindings.clear(); }
 
   // The named report's standing, read live from the project's
   // ledger: validity and freshness are the ledger's derived values,
@@ -161,9 +139,6 @@ class ReportRegistry {
   // checked for coverage only.
   ExportVerdict Evaluate(const Project& project,
                          const std::vector<std::string>& required) const;
-
- private:
-  std::vector<ReportBinding> bindings_;
 };
 
 }  // namespace eos::session

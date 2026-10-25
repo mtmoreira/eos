@@ -208,6 +208,14 @@ TEST(CoreCommands, CheckpointAndRestoreRoundTripTheWholeProject) {
   EXPECT_NE(restored.payload.find("design=top"), std::string::npos);
   EXPECT_NE(restored.payload.find("revision=1"), std::string::npos);
   EXPECT_NE(restored.payload.find("unresolved=0"), std::string::npos);
+  // The report registered before the checkpoint is project state:
+  // its binding restores with the project and the gate passes it in
+  // the fresh context (Phase 2 unit 2.0).
+  EXPECT_NE(restored.payload.find("bindings_restored=1"), std::string::npos);
+  EXPECT_NE(restored.payload.find("bindings_dropped=0"), std::string::npos);
+  const CommandResult gate = fresh.Run("export_check", {"timing"});
+  ASSERT_TRUE(gate.ok);
+  EXPECT_NE(gate.payload.find("export=pass"), std::string::npos);
   const CommandResult after = fresh.Run("current_design");
   ASSERT_TRUE(after.ok);
   EXPECT_EQ(after.payload, before.payload);

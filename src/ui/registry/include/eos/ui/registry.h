@@ -82,10 +82,11 @@ struct CommandResult {
 struct CommandContext {
   session::Project project;
 
-  // Report bindings for the reports registered in this session.
-  // Session state, like the collections below: a checkpoint restore
-  // or a design close clears it, because its bindings describe the
-  // project state they were registered against.
+  // The report registry: stateless logic over the project's report
+  // bindings. The bindings themselves are project state (Phase 2
+  // unit 2.0): a checkpoint restore replaces them with the restored
+  // project's bindings, and a design close clears them with the
+  // rest of the project.
   session::ReportRegistry reports;
 
   // Collections by handle ("eos_coll_1", ...). Handles are never

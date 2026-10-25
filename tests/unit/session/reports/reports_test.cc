@@ -2,6 +2,9 @@
 // freshness gate.
 #include "eos/session/reports.h"
 
+#include <cstdio>
+#include <string>
+
 #include <gtest/gtest.h>
 
 namespace eos::session {
@@ -60,9 +63,9 @@ TEST(Reports, RegisterCreatesArtifactAndBindingTogether) {
   EXPECT_EQ(record->proof, ProofStatus::kPass);
   EXPECT_EQ(record->bound_revision, 0u);
 
-  const ReportBinding* binding = f.reports.FindByName("timing");
+  const ReportBinding* binding = f.reports.FindByName(f.project, "timing");
   ASSERT_NE(binding, nullptr);
-  EXPECT_EQ(binding, f.reports.FindByArtifact(id.value()));
+  EXPECT_EQ(binding, f.reports.FindByArtifact(f.project, id.value()));
   EXPECT_EQ(binding->artifact_id, id.value());
   EXPECT_EQ(binding->bound_revision, 0u);
   EXPECT_EQ(binding->timing_model, "NLDM");
@@ -93,7 +96,7 @@ TEST(Reports, DuplicateOrEmptyRegistrationIsRejectedCleanly) {
                    .ok());
   // The rejected registrations created no artifact and no binding.
   EXPECT_EQ(f.project.ledger.artifacts().size(), 1u);
-  EXPECT_EQ(f.reports.bindings().size(), 1u);
+  EXPECT_EQ(f.reports.bindings(f.project).size(), 1u);
 }
 
 TEST(Reports, BindingIsAnImmutableSnapshot) {
@@ -112,7 +115,7 @@ TEST(Reports, BindingIsAnImmutableSnapshot) {
                   .ok());
   f.Commit();
 
-  const ReportBinding* binding = f.reports.FindByName("timing");
+  const ReportBinding* binding = f.reports.FindByName(f.project, "timing");
   ASSERT_NE(binding, nullptr);
   EXPECT_EQ(binding->bound_revision, 0u);
   ASSERT_EQ(binding->scenarios.size(), 1u);
@@ -133,7 +136,7 @@ TEST(Reports, MixedParasiticsLevelsAreRecordedNeverMerged) {
   ASSERT_TRUE(f.reports.RegisterReport(f.project, "timing",
                                        ProofStatus::kPass, "CCS")
                   .ok());
-  const ReportBinding* binding = f.reports.FindByName("timing");
+  const ReportBinding* binding = f.reports.FindByName(f.project, "timing");
   ASSERT_NE(binding, nullptr);
   ASSERT_EQ(binding->scenarios.size(), 2u);
   EXPECT_EQ(binding->scenarios[0].parasitics,
@@ -266,6 +269,92 @@ TEST(ExportGate, IncompleteCoverageBlocks) {
   ASSERT_EQ(bare_verdict.blockers.size(), 1u);
   EXPECT_EQ(bare_verdict.blockers[0].kind,
             BlockerKind::kCoverageIncomplete);
+}
+
+// Phase 2 unit 2.0: bindings are project state. A project saved
+// with a passing, current report restores into a fresh project with
+// the binding intact, and the export gate gives the identical
+// verdict before and after the restore.
+TEST(Reports, BindingsSurviveRestoreAndTheGateVerdictIsIdentical) {
+  Fixture f;
+  const ArtifactId id = f.reports
+                            .RegisterReport(f.project, "timing",
+                                            ProofStatus::kPass, "NLDM",
+                                            "build-42")
+                            .value();
+  const ExportVerdict before = f.reports.Evaluate(f.project, {"timing"});
+  ASSERT_TRUE(before.allowed());
+
+  const std::string path = "reports_test_durable.eosproj";
+  std::remove(path.c_str());
+  ASSERT_TRUE(f.project.SaveProject(path).ok());
+
+  Project restored;
+  ReportRegistry fresh_registry;
+  const Result<ProjectRestoreInfo> info = restored.LoadProject(path);
+  ASSERT_TRUE(info.ok());
+  EXPECT_EQ(info.value().bindings_restored, 1u);
+  EXPECT_EQ(info.value().bindings_dropped, 0u);
+
+  const ReportBinding* binding =
+      fresh_registry.FindByName(restored, "timing");
+  ASSERT_NE(binding, nullptr);
+  EXPECT_EQ(binding, fresh_registry.FindByArtifact(restored, id));
+  EXPECT_EQ(binding->artifact_id, id);
+  EXPECT_EQ(binding->bound_revision, 0u);
+  EXPECT_EQ(binding->timing_model, "NLDM");
+  EXPECT_EQ(binding->tool_build, "build-42");
+  ASSERT_EQ(binding->scenarios.size(), 1u);
+  EXPECT_EQ(binding->scenarios[0].name, "func_tt");
+
+  const ReportStatus status = fresh_registry.StatusFor(restored, "timing");
+  EXPECT_TRUE(status.found);
+  EXPECT_TRUE(status.valid);
+  EXPECT_TRUE(status.current);
+  const ExportVerdict after = fresh_registry.Evaluate(restored, {"timing"});
+  EXPECT_EQ(after.allowed(), before.allowed());
+  EXPECT_EQ(after.blockers.size(), before.blockers.size());
+  std::remove(path.c_str());
+}
+
+// The binding restored from the file is the snapshot taken at
+// registration: changes made to the live project after registration
+// (a new scenario, an advanced revision) do not rewrite it, before
+// or after the restore, and a stale verdict stays stale identically.
+TEST(Reports, BindingImmutabilityAcrossRestore) {
+  Fixture f;
+  ASSERT_TRUE(f.reports.RegisterReport(f.project, "timing",
+                                       ProofStatus::kPass, "NLDM")
+                  .ok());
+  ASSERT_TRUE(f.project.scenarios
+                  .Create("func_ss", "func", "ss_125c",
+                          ParasiticsLevel::kExtracted)
+                  .ok());
+  f.Commit();
+  const ExportVerdict before = f.reports.Evaluate(f.project, {"timing"});
+  ASSERT_EQ(before.blockers.size(), 1u);
+  ASSERT_EQ(before.blockers[0].kind, BlockerKind::kStale);
+
+  const std::string path = "reports_test_snapshot.eosproj";
+  std::remove(path.c_str());
+  ASSERT_TRUE(f.project.SaveProject(path).ok());
+
+  Project restored;
+  ReportRegistry fresh_registry;
+  ASSERT_TRUE(restored.LoadProject(path).ok());
+  const ReportBinding* binding =
+      fresh_registry.FindByName(restored, "timing");
+  ASSERT_NE(binding, nullptr);
+  EXPECT_EQ(binding->bound_revision, 0u);
+  ASSERT_EQ(binding->scenarios.size(), 1u);
+  EXPECT_EQ(binding->scenarios[0].name, "func_tt");
+  EXPECT_EQ(binding->scenarios[0].corner, "tt_025c");
+
+  const ExportVerdict after = fresh_registry.Evaluate(restored, {"timing"});
+  ASSERT_EQ(after.blockers.size(), 1u);
+  EXPECT_EQ(after.blockers[0].kind, BlockerKind::kStale);
+  EXPECT_EQ(after.blockers[0].detail, before.blockers[0].detail);
+  std::remove(path.c_str());
 }
 
 TEST(ExportGate, EveryBlockerIsReportedNotJustTheFirst) {

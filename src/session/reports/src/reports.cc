@@ -30,7 +30,7 @@ Result<ArtifactId> ReportRegistry::RegisterReport(
     return Status::Error(ErrorCode::kInvalidArgument,
                          "report timing model is empty");
   }
-  if (FindByName(name) != nullptr) {
+  if (FindByName(project, name) != nullptr) {
     return Status::Error(ErrorCode::kInvalidArgument,
                          "a report named " + name +
                              " is already registered");
@@ -64,13 +64,13 @@ Result<ArtifactId> ReportRegistry::RegisterReport(
   if (!uniform) {
     binding.parasitics.reset();
   }
-  bindings_.push_back(std::move(binding));
+  project.report_bindings.push_back(std::move(binding));
   return id;
 }
 
 const ReportBinding* ReportRegistry::FindByName(
-    const std::string& name) const {
-  for (const ReportBinding& binding : bindings_) {
+    const Project& project, const std::string& name) const {
+  for (const ReportBinding& binding : project.report_bindings) {
     if (binding.name == name) {
       return &binding;
     }
@@ -78,8 +78,9 @@ const ReportBinding* ReportRegistry::FindByName(
   return nullptr;
 }
 
-const ReportBinding* ReportRegistry::FindByArtifact(ArtifactId id) const {
-  for (const ReportBinding& binding : bindings_) {
+const ReportBinding* ReportRegistry::FindByArtifact(
+    const Project& project, ArtifactId id) const {
+  for (const ReportBinding& binding : project.report_bindings) {
     if (binding.artifact_id == id) {
       return &binding;
     }
@@ -91,7 +92,7 @@ ReportStatus ReportRegistry::StatusFor(const Project& project,
                                        const std::string& name) const {
   ReportStatus status;
   status.current_revision = project.ledger.current_revision();
-  const ReportBinding* binding = FindByName(name);
+  const ReportBinding* binding = FindByName(project, name);
   if (binding == nullptr) {
     return status;
   }
