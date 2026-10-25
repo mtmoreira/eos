@@ -17,7 +17,11 @@ against the registry in structure.yaml at the repository root:
 
 Include resolution convention: a quoted include is resolved by finding
 the module that owns a matching file under its include/, src/ or
-internal/ directory. Unresolvable quoted includes are ignored in this
+internal/ directory. When the including module itself owns a matching
+file, only its own files are candidates: a quoted include resolves in
+the including file's own directories first, exactly as the compiler
+resolves it, so a same-named header in another module is not the file
+being included. Unresolvable quoted includes are ignored in this
 version (system and third-party headers are not the checker's business).
 
 Usage: check_layers.py [--root PATH]   (default root: the repository
@@ -155,7 +159,18 @@ def check_includes(root, reg, violations):
                     if not match:
                         continue
                     inc = match.group(1)
-                    for owner, owner_sub, _owner_path in resolve_include(index, inc):
+                    candidates = resolve_include(index, inc)
+                    # A quoted include resolves inside the including
+                    # module first (the compiler searches the including
+                    # file's own directories before other include
+                    # paths), so when this module owns a header with
+                    # this name, same-named headers in other modules
+                    # are not candidates and cannot cause spurious
+                    # cross-module findings.
+                    own = [hit for hit in candidates if hit[0] is mod]
+                    if own:
+                        candidates = own
+                    for owner, owner_sub, _owner_path in candidates:
                         where = path.relative_to(root).as_posix()
                         if owner is mod:
                             if sub == "include" and owner_sub == "internal":

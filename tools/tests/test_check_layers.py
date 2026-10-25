@@ -149,6 +149,22 @@ THREE_MODULES = TWO_MODULES + """\
 """
 
 
+def test_same_named_own_header_shadows_other_module(tmp_path):
+    # Regression: an L0 module that owns util.h and includes "util.h"
+    # must not be flagged for the same-named header owned by an L1
+    # module; the quoted include resolves to its own header first.
+    def build(root):
+        build_two(root)
+        (root / "src/foundation/types/include/util.h").write_text(
+            "", encoding="utf-8")
+        (root / "src/ui/tcl/include/util.h").write_text("", encoding="utf-8")
+        (root / "src/foundation/types/src/types.cc").write_text(
+            '#include "util.h"\n', encoding="utf-8")
+    repo = make_repo(tmp_path, TWO_MODULES, build)
+    result = run_checker(repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_sideways_internal_include_fails(tmp_path):
     def build(root):
         build_two(root)
