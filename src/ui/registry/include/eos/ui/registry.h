@@ -43,6 +43,7 @@
 #include "eos/foundation/ids.h"
 #include "eos/session/ledger.h"
 #include "eos/session/project.h"
+#include "eos/session/reports.h"
 
 namespace eos::ui {
 
@@ -80,6 +81,12 @@ struct CommandResult {
 // the "current design" of traditional tools.
 struct CommandContext {
   session::Project project;
+
+  // Report bindings for the reports registered in this session.
+  // Session state, like the collections below: a checkpoint restore
+  // or a design close clears it, because its bindings describe the
+  // project state they were registered against.
+  session::ReportRegistry reports;
 
   // Collections by handle ("eos_coll_1", ...). Handles are never
   // reused within a context.
@@ -119,9 +126,9 @@ class CommandRegistry {
 
 // Registers the core command set: design lifecycle and construction,
 // scenarios, constraints and coverage, collections, ledger
-// transactions and artifacts, and the project-level checkpoint and
-// restore commands (the full project file: design, scenarios,
-// constraints and ledger).
+// transactions and artifacts, the export freshness gate, and the
+// project-level checkpoint and restore commands (the full project
+// file: design, scenarios, constraints and ledger).
 void RegisterCoreCommands(CommandRegistry& registry);
 
 }  // namespace eos::ui

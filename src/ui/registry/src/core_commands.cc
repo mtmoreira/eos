@@ -179,6 +179,7 @@ std::string IdStr(ObjectId id) { return std::to_string(id.raw()); }
 
 void ResetProject(CommandContext& ctx) {
   ctx.project.Reset();
+  ctx.reports.Clear();
   ctx.collections.clear();
   ctx.next_collection = 1;
 }
@@ -641,16 +642,18 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             "revision=" + std::to_string(ctx.project.ledger.current_revision()));
       });
 
-  add("register_report", "register_report <name> [pass|fail|unknown]",
+  add("register_report",
+      "register_report <name> [pass|fail|unknown] [timing_model]",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
-        if (args.empty() || args.size() > 2) {
+        if (args.empty() || args.size() > 3) {
           return CommandResult::Fail(
               Diag::kInvalidConfiguration,
-              "usage: eos::register_report <name> [pass|fail|unknown]");
+              "usage: eos::register_report <name> [pass|fail|unknown] "
+              "[timing_model]");
         }
         session::ProofStatus proof = session::ProofStatus::kUnknown;
-        if (args.size() == 2) {
+        if (args.size() >= 2) {
           const auto parsed = ParseProof(args[1]);
           if (!parsed.has_value()) {
             return CommandResult::Fail(
@@ -659,10 +662,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           proof = *parsed;
         }
-        const session::ArtifactId id = ctx.project.ledger.RegisterArtifact(
-            session::ArtifactKind::kReport, args[0], proof);
+        const std::string timing_model =
+            args.size() == 3 ? args[2] : "NLDM";
+        const Result<session::ArtifactId> id = ctx.reports.RegisterReport(
+            ctx.project, args[0], proof, timing_model);
+        if (!id.ok()) return FromStatus(id.status());
         return CommandResult::Ok(
-            "artifact=" + std::to_string(id) + " revision=" +
+            "artifact=" + std::to_string(id.value()) + " revision=" +
             std::to_string(ctx.project.ledger.current_revision()));
       });
 
@@ -690,6 +696,43 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             std::to_string(record->bound_revision));
       });
 
+  add("export_check", "export_check <report>...",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (args.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::export_check <report>...");
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        const session::ExportVerdict verdict =
+            ctx.reports.Evaluate(ctx.project, args);
+        if (verdict.allowed()) {
+          CommandResult result;
+          result.ok = true;
+          result.diag = Diag::kVerifiedPass;
+          result.payload =
+              "export=pass required=" + std::to_string(args.size());
+          return result;
+        }
+        std::string listing;
+        for (const session::ExportBlocker& blocker : verdict.blockers) {
+          if (!listing.empty()) listing += "\n";
+          listing += "blocker=";
+          listing += session::BlockerKindName(blocker.kind);
+          if (!blocker.report.empty()) {
+            listing += " report=" + blocker.report;
+          }
+          listing += " detail=\"" + blocker.detail + "\"";
+        }
+        CommandResult result;
+        result.ok = false;
+        result.diag = Diag::kProofUnknown;
+        result.message = listing;
+        result.payload = listing;
+        return result;
+      });
+
   add("checkpoint", "checkpoint <path>",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
@@ -714,9 +757,11 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             ctx.project.LoadProject(args[0]);
         if (!info.ok()) return FromStatus(info.status());
         // Collections named objects of the previous project state;
-        // they do not survive a restore.
+        // they do not survive a restore. Report bindings are session
+        // state describing the previous project state, likewise.
         ctx.collections.clear();
         ctx.next_collection = 1;
+        ctx.reports.Clear();
         return CommandResult::Ok(
             "restored=1 design=" + ctx.project.design->name() +
             " revision=" +
