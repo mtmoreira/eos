@@ -141,6 +141,19 @@ TEST(Odb, ReadLefAndDefReportTopBlockAndCounts) {
   EXPECT_EQ(db.NetCount(), 3u);
 }
 
+TEST(Odb, NetNamesEnumeratesEveryNet) {
+  TempDir dir;
+  OdbDatabase db;
+  EXPECT_TRUE(db.NetNames().empty());
+  LoadFixture(db, dir);
+  const std::vector<std::string> names = db.NetNames();
+  ASSERT_EQ(names.size(), db.NetCount());
+  EXPECT_EQ(names.size(), 3u);
+  for (const std::string& name : names) {
+    EXPECT_TRUE(db.HasNet(name)) << name;
+  }
+}
+
 TEST(Odb, WriteDefRoundTripReReadsWithIdenticalCounts) {
   TempDir dir;
   OdbDatabase db;

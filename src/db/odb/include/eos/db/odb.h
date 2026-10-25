@@ -136,6 +136,11 @@ class OdbDatabase {
   bool FindInstance(const std::string& name, OdbInstanceInfo* out) const;
   std::vector<OdbInstanceInfo> Instances() const;
   bool HasNet(const std::string& name) const;
+  // The names of every net in the top block, in database order.
+  // Empty when no DEF has been read. Added for the closure loop
+  // (Phase 2 unit 2.5), which enumerates nets to propose buffer
+  // candidates the way Instances() enumerates instances for sizing.
+  std::vector<std::string> NetNames() const;
   // The signal connections of one net, ports included. Empty when
   // the net is unknown.
   std::vector<OdbNetConnection> NetConnections(

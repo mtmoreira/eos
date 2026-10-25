@@ -6,6 +6,10 @@
 // run the operation and map its Status onto the diagnostic taxonomy.
 #include "eos/ui/registry.h"
 
+#include "eos/session/flow.h"
+
+#include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cstdint>
 #include <iomanip>
@@ -198,6 +202,105 @@ std::string MetricText(const analysis::TimingMetricMap& metrics,
                        const std::string& name) {
   const auto it = metrics.find(name);
   return it == metrics.end() ? "none" : FormatNumber(it->second.value);
+}
+
+// The closure loop's candidate knowledge, derived from the
+// database's master list (Phase 2 unit 2.5). Drive strength is a
+// Liberty fact the ODB facade does not carry, so the command
+// layer derives the sizing families from the master naming
+// convention the libraries in scope follow: masters that share a
+// stem and a signal pin set, differing only in a trailing drive
+// number (BUF_X1 and BUF_X2, sky130_fd_sc_hd__buf_1 and _buf_2),
+// form one family ordered by that number. The derivation is a
+// naming heuristic and is stated as such: the L5 service takes
+// the families as given and validates their pin sets, and a
+// library whose variants do not follow the convention yields
+// fewer families, never wrong ones the pin check would not catch.
+// Buffer masters are the buffer-shaped masters (exactly one
+// input and one output signal pin) whose stem names a buffer,
+// strongest first.
+struct DriveStem {
+  std::string stem;
+  long drive = -1;  // -1: the name carries no trailing number
+};
+
+DriveStem SplitDrive(const std::string& name) {
+  std::size_t digits = 0;
+  while (digits < name.size() &&
+         name[name.size() - 1 - digits] >= '0' &&
+         name[name.size() - 1 - digits] <= '9') {
+    ++digits;
+  }
+  if (digits == 0) {
+    return DriveStem{name, -1};
+  }
+  DriveStem split;
+  split.stem = name.substr(0, name.size() - digits);
+  if (!split.stem.empty() && split.stem.back() == '_') {
+    split.stem.pop_back();
+  }
+  split.drive = std::stol(name.substr(name.size() - digits));
+  return split;
+}
+
+std::string PinSignature(const std::vector<db::OdbMasterPin>& pins) {
+  std::string signature;
+  for (const db::OdbMasterPin& pin : pins) {
+    signature += pin.name + (pin.is_input ? ":i" : "") +
+                 (pin.is_output ? ":o" : "") + ";";
+  }
+  return signature;
+}
+
+void DeriveClosureCandidates(
+    const db::OdbDatabase& database,
+    std::vector<std::vector<std::string>>* families,
+    std::vector<std::string>* buffer_masters) {
+  std::map<std::string, std::vector<std::pair<long, std::string>>> groups;
+  for (const std::string& master : database.MasterNames()) {
+    const std::vector<db::OdbMasterPin> pins = database.MasterPins(master);
+    if (pins.empty()) {
+      continue;
+    }
+    const DriveStem split = SplitDrive(master);
+    groups[split.stem + "|" + PinSignature(pins)].push_back(
+        {split.drive, master});
+    bool buffer_shaped = pins.size() == 2;
+    if (buffer_shaped) {
+      std::size_t inputs = 0;
+      std::size_t outputs = 0;
+      for (const db::OdbMasterPin& pin : pins) {
+        if (pin.is_input && !pin.is_output) ++inputs;
+        if (pin.is_output && !pin.is_input) ++outputs;
+      }
+      buffer_shaped = inputs == 1 && outputs == 1;
+    }
+    std::string lower = split.stem;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    if (buffer_shaped && lower.find("buf") != std::string::npos) {
+      buffer_masters->push_back(master);
+    }
+  }
+  for (auto& entry : groups) {
+    std::vector<std::pair<long, std::string>>& members = entry.second;
+    if (members.size() < 2) {
+      continue;
+    }
+    std::sort(members.begin(), members.end());
+    std::vector<std::string> family;
+    for (const auto& member : members) {
+      family.push_back(member.second);
+    }
+    families->push_back(std::move(family));
+  }
+  std::sort(buffer_masters->begin(), buffer_masters->end(),
+            [](const std::string& a, const std::string& b) {
+              const long da = SplitDrive(a).drive;
+              const long db = SplitDrive(b).drive;
+              if (da != db) return da > db;
+              return a < b;
+            });
 }
 
 }  // namespace
@@ -956,6 +1059,103 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         ctx.timing.last_results = analyzed.value();
         return CommandResult::Ok(payload);
+      });
+
+  add("close_timing", "close_timing <max_iterations>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad =
+                ExpectCount(args, 1, "close_timing <max_iterations>")) {
+          return *bad;
+        }
+        std::uint64_t max_iterations = 0;
+        if (!ParseU64(args[0], max_iterations) || max_iterations == 0) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "max_iterations must be a positive integer, got: " + args[0]);
+        }
+        if (!ctx.timing.odb.has_value() ||
+            !ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no ODB design: eos::import_odb first (timing closure "
+              "edits the physical database; a Verilog source has no "
+              "instances to size or buffer)");
+        }
+        if (ctx.timing.sdc_path.empty()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "no SDC: eos::read_sdc first");
+        }
+        const std::vector<const db::Scenario*> active =
+            ctx.project.scenarios.ActiveScenarios();
+        if (active.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no active scenarios (see eos::create_scenario)");
+        }
+        std::vector<analysis::SceneAnalysis> scenes;
+        for (const db::Scenario* scenario : active) {
+          analysis::SceneAnalysis scene;
+          scene.scenario = *scenario;
+          const auto liberty =
+              ctx.timing.liberty_by_corner.find(scenario->corner);
+          if (liberty == ctx.timing.liberty_by_corner.end()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "no Liberty for corner " + scenario->corner +
+                    " (scene " + scenario->name +
+                    "): eos::read_liberty first");
+          }
+          scene.liberty_path = liberty->second;
+          if (scenario->parasitics == db::ParasiticsLevel::kExtracted) {
+            scene.spef_path = ctx.timing.spef_path;
+          }
+          scenes.push_back(std::move(scene));
+        }
+        session::CloseTimingRequest request;
+        request.sdc_path = ctx.timing.sdc_path;
+        request.scenes = std::move(scenes);
+        request.max_iterations =
+            static_cast<std::size_t>(max_iterations);
+        DeriveClosureCandidates(*ctx.timing.odb, &request.sizing_families,
+                                &request.buffer_masters);
+        const Result<session::ClosureOutcome> outcome =
+            session::RunTimingClosure(ctx.project, *ctx.timing.odb, request);
+        if (!outcome.ok()) return FromStatus(outcome.status());
+        std::string payload =
+            std::string("closed=") + (outcome.value().closed ? "1" : "0") +
+            " iterations=" +
+            std::to_string(outcome.value().steps.size()) +
+            " candidates_tried=" +
+            std::to_string(outcome.value().candidates_tried) +
+            " candidates_rejected=" +
+            std::to_string(outcome.value().candidates_rejected) +
+            " revision=" +
+            std::to_string(ctx.project.ledger.current_revision()) +
+            " report=timing_closure";
+        for (std::size_t i = 0; i < outcome.value().final.size(); ++i) {
+          const analysis::SceneResult& scene = outcome.value().final[i];
+          const analysis::SceneResult& initial = outcome.value().initial[i];
+          payload += "\nscene=" + scene.scenario.name +
+                     " worst_slack_ns=" +
+                     MetricText(scene.metrics, "worst_slack_ns") +
+                     " total_negative_slack_ns=" +
+                     MetricText(scene.metrics, "total_negative_slack_ns") +
+                     " worst_hold_slack_ns=" +
+                     MetricText(scene.metrics, "worst_hold_slack_ns") +
+                     " total_negative_hold_slack_ns=" +
+                     MetricText(scene.metrics,
+                                "total_negative_hold_slack_ns") +
+                     " initial_worst_slack_ns=" +
+                     MetricText(initial.metrics, "worst_slack_ns");
+        }
+        payload += "\nstop_reason=" + outcome.value().stop_reason;
+        ctx.timing.last_results = outcome.value().final;
+        CommandResult result = CommandResult::Ok(payload);
+        if (outcome.value().closed) {
+          result.diag = Diag::kVerifiedPass;
+        }
+        return result;
       });
 
   add("list_commands", "list_commands",
