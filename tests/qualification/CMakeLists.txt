@@ -9,3 +9,10 @@ target_link_libraries(eda_qualification_phase1_exit_test
           GTest::gtest GTest::gtest_main)
 add_test(NAME qualification.phase1_exit
   COMMAND eda_qualification_phase1_exit_test)
+
+add_executable(eda_qualification_phase2_exit_test phase2_exit_test.cc)
+target_link_libraries(eda_qualification_phase2_exit_test
+  PRIVATE eda_session_flow eda_eco_timing_eco eda_session_reports
+          GTest::gtest GTest::gtest_main)
+add_test(NAME qualification.phase2_exit
+  COMMAND eda_qualification_phase2_exit_test)
