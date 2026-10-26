@@ -222,6 +222,101 @@ TEST(StaFacade, NegativeSlackAndTnsMatchUpstream) {
               1e-6 * std::abs(kTnsTightNs) + 1e-7);
 }
 
+TEST(StaFacade, ViolatingEndpointsMatchUpstream) {
+  // With the 0.5 ns clock the only violating endpoint is r2's D
+  // pin, at the same -0.1 ns the scalar queries report (see the
+  // provenance note at the top of this file). Hold has no
+  // violating endpoint: its worst slack is positive.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcTight);
+  const auto setup = engine.ViolatingEndpoints(CheckKind::kSetup);
+  ASSERT_TRUE(setup.ok()) << setup.status().message();
+  ASSERT_EQ(setup.value().size(), 1u);
+  EXPECT_EQ(setup.value()[0].pin, "r2/D");
+  EXPECT_NEAR(setup.value()[0].slack_ns, kWorstSlackTightNs,
+              1e-6 * std::abs(kWorstSlackTightNs) + 1e-7);
+  const auto hold = engine.ViolatingEndpoints(CheckKind::kHold);
+  ASSERT_TRUE(hold.ok()) << hold.status().message();
+  EXPECT_TRUE(hold.value().empty());
+}
+
+TEST(StaFacade, NoViolatingEndpointsAtRelaxedClock) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto setup = engine.ViolatingEndpoints(CheckKind::kSetup);
+  ASSERT_TRUE(setup.ok()) << setup.status().message();
+  EXPECT_TRUE(setup.value().empty());
+  const auto hold = engine.ViolatingEndpoints(CheckKind::kHold);
+  ASSERT_TRUE(hold.ok()) << hold.status().message();
+  EXPECT_TRUE(hold.value().empty());
+}
+
+TEST(StaFacade, WorstSetupPathWalksTheCriticalCone) {
+  // The reg-to-reg path runs r1 Q through the buffer into r2 D:
+  // the expanded worst path must name those pins in that order,
+  // with the owning instances alongside, and end at the endpoint.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcTight);
+  const auto path = engine.WorstPath(CheckKind::kSetup, "r2/D");
+  ASSERT_TRUE(path.ok()) << path.status().message();
+  ASSERT_EQ(path.value().size(), 4u);
+  EXPECT_EQ(path.value()[0].pin, "r1/Q");
+  EXPECT_EQ(path.value()[0].instance, "r1");
+  EXPECT_EQ(path.value()[1].pin, "u1/A");
+  EXPECT_EQ(path.value()[1].instance, "u1");
+  EXPECT_EQ(path.value()[2].pin, "u1/Y");
+  EXPECT_EQ(path.value()[2].instance, "u1");
+  EXPECT_EQ(path.value()[3].pin, "r2/D");
+  EXPECT_EQ(path.value()[3].instance, "r2");
+}
+
+TEST(StaFacade, WorstHoldPathUsesTheSameCone) {
+  // Worst path queries are not limited to violating endpoints:
+  // the hold check on r2/D runs over the same reg-to-reg cone.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto path = engine.WorstPath(CheckKind::kHold, "r2/D");
+  ASSERT_TRUE(path.ok()) << path.status().message();
+  ASSERT_FALSE(path.value().empty());
+  EXPECT_EQ(path.value().back().pin, "r2/D");
+  EXPECT_EQ(path.value().front().pin, "r1/Q");
+}
+
+TEST(StaFacade, WorstPathToUnknownEndpointFails) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcTight);
+  const auto path = engine.WorstPath(CheckKind::kSetup, "r9/D");
+  EXPECT_FALSE(path.ok());
+  EXPECT_EQ(path.status().code(), ErrorCode::kInvalidArgument);
+}
+
+TEST(StaFacade, WorstPathToUnconstrainedEndpointFails) {
+  // The top-level q port is an endpoint with no timing check
+  // behind it (no output delay in the SDC), so it has no
+  // constrained path end and no worst path.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcTight);
+  const auto path = engine.WorstPath(CheckKind::kSetup, "q");
+  EXPECT_FALSE(path.ok());
+  EXPECT_EQ(path.status().code(), ErrorCode::kInvalidArgument);
+}
+
+TEST(StaFacade, EndpointQueriesBeforeLinkFail) {
+  StaEngine engine;
+  const auto endpoints = engine.ViolatingEndpoints(CheckKind::kSetup);
+  EXPECT_FALSE(endpoints.ok());
+  EXPECT_EQ(endpoints.status().code(), ErrorCode::kInvalidState);
+  const auto path = engine.WorstPath(CheckKind::kSetup, "r2/D");
+  EXPECT_FALSE(path.ok());
+  EXPECT_EQ(path.status().code(), ErrorCode::kInvalidState);
+}
+
 TEST(StaFacade, MissingLibertyFails) {
   TempDir dir;
   StaEngine engine;

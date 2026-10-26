@@ -309,6 +309,8 @@ TEST(TimingService, VerilogDesignAnalyzedPerScene) {
     ExpectFixtureMetrics(result, 9.4, 0.0);
     EXPECT_NEAR(Metric(result, "worst_hold_slack_ns"), 0.45, 1e-6);
     EXPECT_NEAR(Metric(result, "total_negative_hold_slack_ns"), 0.0, 1e-9);
+    EXPECT_TRUE(result.setup_violating_endpoints.empty());
+    EXPECT_TRUE(result.hold_violating_endpoints.empty());
   }
 }
 
@@ -323,6 +325,15 @@ TEST(TimingService, TightClockShowsViolationPerScene) {
   ASSERT_TRUE(results.ok()) << results.status().message();
   ASSERT_EQ(results.value().size(), 1u);
   ExpectFixtureMetrics(results.value()[0], -0.1, -0.1);
+  // The scene result surfaces the violating endpoint behind the
+  // negative metrics: r2's D pin at the same -0.1 ns, and no hold
+  // endpoint (the hold pair stays positive on this fixture).
+  const SceneResult& tight = results.value()[0];
+  ASSERT_EQ(tight.setup_violating_endpoints.size(), 1u);
+  EXPECT_EQ(tight.setup_violating_endpoints[0].pin, "r2/D");
+  EXPECT_NEAR(tight.setup_violating_endpoints[0].slack_ns, -0.1,
+              1e-6 * 0.1 + 1e-7);
+  EXPECT_TRUE(tight.hold_violating_endpoints.empty());
 }
 
 TEST(TimingService, OdbDesignAnalyzedThroughNetlist) {
