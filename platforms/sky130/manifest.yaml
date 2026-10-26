@@ -1,10 +1,140 @@
-# Sky130 technology package manifest.
-# Pins are set by the Phase 0 baseline; every payload is verified
-# against the hashes recorded here before use.
-name: sky130
+# Sky130 technology package manifest (unit 3.0, Phase 3).
+# Formalizes the plan Section 11 package for sky130hd as data:
+# every collateral item EOS or the reference flow consumes, with
+# an immutable version identifier and a content hash. Payloads are
+# fetched and hash-verified, never committed. Hashes below were
+# computed on 2026-10-26 from the local ORFS v3.0 platform tree
+# (flow/platforms/sky130hd) pinned by the Phase 0 baseline.
+name: sky130hd
+package_version: "3.0.1"
 support_tier: experimental
 pdk:
   source: open_pdks (fossi-foundation/open-pdks)
   revision: commit abfc54bd87e0, pinned 2026-10-18 by the Phase 0 licence audit
-collateral: {}
+reference_flow:
+  source: OpenROAD-flow-scripts
+  revision: tag v3.0, commit 181e91337761
+units:
+  time: 1ns
+  capacitance: pf
+  voltage: 1V
+collateral:
+  - id: liberty_tt_025c_1v80
+    kind: liberty
+    path: lib/sky130_fd_sc_hd__tt_025C_1v80.lib
+    version: orfs-v3.0-181e91337761
+    sha256: ec0e1067a35c8bf20b11e58d1e8ac53326067e4dac84a125cc1b917a3518d0d9
+    required: true
+  - id: liberty_dummy_io
+    kind: liberty
+    path: lib/sky130_dummy_io.lib
+    version: orfs-v3.0-181e91337761
+    sha256: 6b7589ec90fb90deffe4a79eb24e1f9bf127cf2238887101ee15e3dda25c6be2
+    required: false
+  - id: tech_lef
+    kind: tech_lef
+    path: lef/sky130_fd_sc_hd.tlef
+    version: orfs-v3.0-181e91337761
+    sha256: 8e99b4e8b016db0713029ebcae6b2cc2aedd9c2c49682e2f23521dd0b1a2085e
+    required: true
+  - id: cell_lef_merged
+    kind: cell_lef
+    path: lef/sky130_fd_sc_hd_merged.lef
+    version: orfs-v3.0-181e91337761
+    sha256: 44180aaa0068b1fcb0789f128b090304c01ad48f511d3f7afa66c90b3e176ec5
+    required: true
+  - id: io_fill_lef
+    kind: cell_lef
+    path: lef/sky130io_fill.lef
+    version: orfs-v3.0-181e91337761
+    sha256: 8c398d048875934de75cd3c0054b8049390c4d33afee84b9ca72b4acac58df83
+    required: false
+  - id: cell_gds
+    kind: gds
+    path: gds/sky130_fd_sc_hd.gds
+    version: orfs-v3.0-181e91337761
+    sha256: 15240e34c50e42419336c0f3f498aaeac1e1e403c62134c0eee088225b69dc13
+    required: true
+  - id: cell_cdl
+    kind: cdl
+    path: cdl/sky130hd.cdl
+    version: orfs-v3.0-181e91337761
+    sha256: ae02cdc40c81943bbc3f4a16a6760e01afd12764a94e7836b7e168edf40ae29c
+    required: true
+  - id: drc_runset
+    kind: drc_runset
+    path: drc/sky130hd.lydrc
+    version: orfs-v3.0-181e91337761
+    sha256: 029722ea1fc2cf8c48f09fc670c0b72efb295f799c4eb236b7e9767930ecf772
+    required: true
+  - id: lvs_runset
+    kind: lvs_runset
+    path: lvs/sky130hd.lylvs
+    version: orfs-v3.0-181e91337761
+    sha256: 1afade11dd24ea4e64d1ffba54fc17a8f110286712ab942928d2f5e021bb3caf
+    required: true
+  - id: rcx_rules
+    kind: rc_rules
+    path: rcx_patterns.rules
+    version: orfs-v3.0-181e91337761
+    sha256: d5bd9b1077ceac9929416abca272a6d52e51cd9a575453a31d129817bb286476
+    required: true
+  - id: verilog_latch_map
+    kind: verilog_model
+    path: cells_latch_hd.v
+    version: orfs-v3.0-181e91337761
+    sha256: 5f28f158599cd6548fdf302fa3dbe2e306cf0aba431884f1c9b6305589cd560f
+    required: true
+  - id: verilog_clkgate_map
+    kind: verilog_model
+    path: cells_clkgate_hd.v
+    version: orfs-v3.0-181e91337761
+    sha256: d61aafde83ce8fa4b5a946095f8d4037caa1804564da157f9db521f495671d3b
+    required: true
+  - id: verilog_adder_map
+    kind: verilog_model
+    path: cells_adders_hd.v
+    version: orfs-v3.0-181e91337761
+    sha256: 96513c601a75e0f09b04d348af7a5c2183713c3ea8b3c2edf05adfe007dea1f5
+    required: true
+  - id: setrc_tcl
+    kind: rc_rules
+    path: setRC.tcl
+    version: orfs-v3.0-181e91337761
+    sha256: 2bc1d2994242220012d2dc49c4d958c0416ae49762bdc146c66e07c689adaf95
+    required: true
+  - id: fill_config
+    kind: density_runset
+    path: fill.json
+    version: orfs-v3.0-181e91337761
+    sha256: 42a7826959f8e3eea7c35004246a2123dc9e5d1134dca8e91c0840c3c4d365ff
+    required: true
+special_cells:
+  tie_high_low: sky130_fd_sc_hd__conb_1
+  tap: sky130_fd_sc_hd__tapvpwrvgnd_1
+  tap_variants: [sky130_fd_sc_hd__tap_1, sky130_fd_sc_hd__tap_2,
+                 sky130_fd_sc_hd__tapvgnd_1, sky130_fd_sc_hd__tapvgnd2_1]
+  filler: [sky130_fd_sc_hd__fill_1, sky130_fd_sc_hd__fill_2,
+           sky130_fd_sc_hd__fill_4, sky130_fd_sc_hd__fill_8]
+  decap: [sky130_fd_sc_hd__decap_3, sky130_fd_sc_hd__decap_4,
+          sky130_fd_sc_hd__decap_6, sky130_fd_sc_hd__decap_8]
+  antenna: sky130_fd_sc_hd__diode_2
+  cts_buffer: sky130_fd_sc_hd__clkbuf_1
+  cts_inverter: sky130_fd_sc_hd__inv_2
+  endcap: none declared in the ORFS sky130hd platform (see findings)
+scenarios:
+  - name: func_tt_estimate
+    pvt_corner: tt_025C_1v80
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_tt_extracted
+    pvt_corner: tt_025C_1v80
+    rc_corner: typical (rcx_patterns.rules)
+    parasitics: extracted
+known_gaps:
+  - Only the tt_025C_1v80 Liberty corner ships in the ORFS v3.0
+    sky130hd platform; ss and ff corners are absent from this
+    collateral set (findings F4).
+  - The cell CDL carries the macro_sparecell / conb_1 pin-count
+    defect recorded as finding F1; it is recorded, never patched.
 decks: {}
