@@ -525,5 +525,65 @@ TEST(EcoTransaction, FailedEditRollsBackAndReturnsTheError) {
   EXPECT_EQ(info.master, "BUF_X1");
 }
 
+// Unit 2.9: a caller-supplied before-analysis (the closure loop
+// holds one for the design as it stands) is judged against
+// exactly as the engine's own analysis would be: same verdict,
+// same before and after numbers.
+TEST(EcoTransaction, KnownBeforeIsJudgedLikeTheEnginesOwnAnalysis) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadFixture(db, dir);
+  EcoRequest request;
+  request.label = "size u1 BUF_X1 -> BUF_X2";
+  request.sdc_path =
+      dir.Write("top.sdc", "create_clock -name clk -period 1 [get_ports clk]\n");
+  request.scenes = {EstimateScene(1, "func_tt", "tt",
+                                  dir.Write("tt.lib", Liberty(0.05, 0.8, 0.2)))};
+  analysis::TimingService timing;
+  const auto before = timing.Analyze(db, request.sdc_path, request.scenes);
+  ASSERT_TRUE(before.ok()) << before.status().message();
+  request.known_before = before.value();
+  const auto outcome = RunEcoTransaction(
+      db, request, [](db::OdbDatabase& design) {
+        return ResizeInstance(design, "u1", "BUF_X2");
+      });
+  ASSERT_TRUE(outcome.ok()) << outcome.status().message();
+  EXPECT_TRUE(outcome.value().committed) << outcome.value().reason;
+  ASSERT_EQ(outcome.value().before.size(), 1u);
+  EXPECT_NEAR(Metric(outcome.value().before[0], "worst_slack_ns"), -0.1,
+              1e-6);
+  EXPECT_NEAR(Metric(outcome.value().after[0], "worst_slack_ns"), 0.5, 1e-6);
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(db.FindInstance("u1", &info));
+  EXPECT_EQ(info.master, "BUF_X2");
+}
+
+// Unit 2.9: a supplied before-analysis that does not cover the
+// request's scenes is refused before any edit runs.
+TEST(EcoTransaction, KnownBeforeWithMismatchedScenesIsRefused) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadFixture(db, dir);
+  EcoRequest request;
+  request.label = "size u1 BUF_X1 -> BUF_X2";
+  request.sdc_path =
+      dir.Write("top.sdc", "create_clock -name clk -period 1 [get_ports clk]\n");
+  request.scenes = {EstimateScene(1, "func_tt", "tt",
+                                  dir.Write("tt.lib", Liberty(0.05, 0.8, 0.2)))};
+  request.known_before = {MakeScene("func_ss", -0.1, -0.1, 0.5, 0.0)};
+  bool edit_ran = false;
+  const auto outcome = RunEcoTransaction(
+      db, request, [&edit_ran](db::OdbDatabase& design) {
+        edit_ran = true;
+        return ResizeInstance(design, "u1", "BUF_X2");
+      });
+  ASSERT_FALSE(outcome.ok());
+  EXPECT_EQ(outcome.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_FALSE(edit_ran);
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(db.FindInstance("u1", &info));
+  EXPECT_EQ(info.master, "BUF_X1");
+}
+
 }  // namespace
 }  // namespace eos::eco

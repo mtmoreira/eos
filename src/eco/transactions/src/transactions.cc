@@ -159,6 +159,38 @@ Result<EcoOutcome> RunEcoTransaction(
                          "an ECO transaction needs a design with a top "
                          "block");
   }
+  // A supplied before-analysis must cover exactly the request's
+  // scenes and carry the judged metrics, or the verdict would be
+  // judged against a different scene set than the after side.
+  if (!request.known_before.empty()) {
+    if (request.known_before.size() != request.scenes.size()) {
+      return Invalid(
+          "the supplied before-analysis covers " +
+          std::to_string(request.known_before.size()) +
+          " scene(s) but the request names " +
+          std::to_string(request.scenes.size()));
+    }
+    for (const analysis::SceneAnalysis& scene : request.scenes) {
+      const analysis::SceneResult* match = nullptr;
+      for (const analysis::SceneResult& result : request.known_before) {
+        if (result.scenario.name == scene.scenario.name) {
+          match = &result;
+          break;
+        }
+      }
+      if (match == nullptr) {
+        return Invalid("the supplied before-analysis has no scene " +
+                       scene.scenario.name);
+      }
+      for (const char* metric_name : kJudgedMetrics) {
+        if (match->metrics.find(metric_name) == match->metrics.end()) {
+          return Invalid("the supplied before-analysis scene " +
+                         scene.scenario.name + " carries no metric " +
+                         metric_name);
+        }
+      }
+    }
+  }
 
   // Checkpoint: the whole database in its binary form, in the temp
   // directory, removed when this call returns whatever happens.
@@ -174,15 +206,21 @@ Result<EcoOutcome> RunEcoTransaction(
   }
 
   analysis::TimingService timing;
-  const auto before = timing.Analyze(database, request.sdc_path,
-                                     request.scenes);
-  if (!before.ok()) {
-    return before.status();
+  std::vector<analysis::SceneResult> before_results;
+  if (!request.known_before.empty()) {
+    before_results = request.known_before;
+  } else {
+    const auto analyzed = timing.Analyze(database, request.sdc_path,
+                                         request.scenes);
+    if (!analyzed.ok()) {
+      return analyzed.status();
+    }
+    before_results = analyzed.value();
   }
 
   EcoOutcome outcome;
   outcome.label = request.label;
-  outcome.before = before.value();
+  outcome.before = before_results;
   outcome.parasitics_note =
       "after metrics are a full re-analysis of every required scene "
       "at estimate parasitics fidelity; no extracted re-analysis "
