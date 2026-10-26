@@ -91,6 +91,25 @@ namespace eos::session {
 using foundation::Result;
 using foundation::Status;
 
+// The resynthesis candidate configuration (Phase 2 unit 2.6).
+// When enabled, the loop also generates one resynthesis candidate
+// per net driven by a combinational instance: the cone behind the
+// net is remapped by the resynthesis adapter and screened through
+// the same ECO protocol. The adapter's mandatory equivalence
+// proof runs inside the edit; a candidate whose proof does not
+// pass restores the design inside the edit and is then rejected
+// by the protocol as no improvement, like any other screened
+// candidate that leaves the metrics unchanged. The fields are the
+// adapter's own request fields: the Liberty the cones are mapped
+// against, the sequential masters that bound every cone, and a
+// scratch directory for the adapter's working files.
+struct ResynthesisConfig {
+  bool enabled = false;
+  std::string liberty_path;
+  std::vector<std::string> sequential_masters;
+  std::string scratch_dir;
+};
+
 // Everything one closure run needs beyond the project and the
 // design database.
 struct CloseTimingRequest {
@@ -111,6 +130,10 @@ struct CloseTimingRequest {
   // used for every buffering candidate. May be empty (no
   // buffering candidates).
   std::vector<std::string> buffer_masters;
+  // Resynthesis candidates (unit 2.6). Disabled by default: a
+  // run that does not opt in generates exactly the sizing and
+  // buffering candidates it always did.
+  ResynthesisConfig resynthesis;
 };
 
 // One accepted iteration, as recorded in the ledger: the edit's

@@ -1,8 +1,11 @@
 [
   "tools/tests/test_check_layers.py::test_adopted_without_provenance_fails",
+  "tools/tests/test_check_layers.py::test_bundled_src_header_does_not_shadow_system_include",
   "tools/tests/test_check_layers.py::test_missing_tests_dir_fails",
   "tools/tests/test_check_layers.py::test_own_internal_include_from_src_passes",
+  "tools/tests/test_check_layers.py::test_path_include_does_not_match_unrelated_basename",
   "tools/tests/test_check_layers.py::test_public_header_including_internal_fails",
+  "tools/tests/test_check_layers.py::test_same_named_own_header_shadows_other_module",
   "tools/tests/test_check_layers.py::test_sideways_internal_include_fails",
   "tools/tests/test_check_layers.py::test_unregistered_module_fails",
   "tools/tests/test_check_layers.py::test_upward_include_fails",
