@@ -140,6 +140,94 @@ MACRO BUF_X4
     END
   END Y
 END BUF_X4
+MACRO BUF_X8
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Y
+END BUF_X8
+MACRO SBUF_X1
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Y
+END SBUF_X1
+MACRO SBUF_X2
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Y
+END SBUF_X2
+MACRO MBUF
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Y
+END MBUF
 MACRO WIDE
   CLASS CORE ;
   ORIGIN 0 0 ;
@@ -1089,6 +1177,350 @@ TEST(ClosureLoop, ResynthesisClosesTheDoubleInversionChain) {
       project.ledger.FindArtifact(binding->artifact_id);
   ASSERT_NE(artifact, nullptr);
   EXPECT_EQ(artifact->proof, ProofStatus::kPass);
+}
+
+}  // namespace
+}  // namespace eos::session
+
+// ---------------------------------------------------------------------------
+// Endpoint targeting and screening economics (unit 2.9).
+//
+// Targeted fixture: the violating chain r1 -> zbuf -> r2 (slack
+// -0.1 ns) shares the design with a clean side path from port d2
+// through a1, a2, a3 to r3 (slack +0.15 ns). Whole-design name
+// order would screen a1, a2, a3 first (each rejected: sizing a
+// side-path buffer moves only the clean endpoint's slack, which
+// no judged metric reports) and reach zbuf fourth. Targeted
+// generation aims at r2/D's fanin cone, which contains zbuf
+// alone as a sizing candidate, so closure takes one screening.
+//
+// Stale fixture: net wide fans b1 out to r2 (endpoint E1, slack
+// -0.1 ns) and, through c2, to r3 (endpoint E2, slack -0.5 ns); a
+// third chain r4 -> b3 -> r5 is endpoint E3 (slack -0.1 ns).
+// Sizing b1 closes E1 and E2 in one accepted step; E2's own
+// sizing candidate for c2 is never screened, and on the next
+// iteration E2 no longer violates, so that candidate is counted
+// as skipped stale while E3's candidate is screened and closes.
+//
+// Memory fixture: endpoint EA (rA2/D, slack -0.8 ns) is set by a
+// main path through mA, a master in no sizing family; its cone's
+// only sizing candidate sizes a1 on the secondary path, which
+// cannot move EA's worst slack, so it is rejected. Endpoint EB
+// (rB2/D, slack -0.5 ns) closes over two accepted steps on a
+// disjoint cone. On every later iteration EA is unchanged and
+// a1's candidate is skipped by the rejection memory instead of
+// screened again, until no screenable candidate remains.
+
+namespace eos::session {
+namespace {
+
+const char kTargetedDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 7 ;
+- r1 DFF + PLACED ( 1000 1000 ) N ;
+- zbuf BUF_X1 + PLACED ( 2000 1000 ) N ;
+- r2 DFF + PLACED ( 3000 1000 ) N ;
+- a1 SBUF_X1 + PLACED ( 4000 1000 ) N ;
+- a2 SBUF_X1 + PLACED ( 5000 1000 ) N ;
+- a3 SBUF_X1 + PLACED ( 6000 1000 ) N ;
+- r3 DFF + PLACED ( 7000 1000 ) N ;
+END COMPONENTS
+PINS 4 ;
+- clk + NET clk + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- d + NET d + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- d2 + NET d2 + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 7000 ) N ;
+- q + NET q + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 9 ;
+- clk ( PIN clk ) ( r1 CK ) ( r2 CK ) ( r3 CK ) ;
+- d ( PIN d ) ( r1 D ) ;
+- d2 ( PIN d2 ) ( a1 A ) ;
+- n1 ( r1 Q ) ( zbuf A ) ;
+- n2 ( zbuf Y ) ( r2 D ) ;
+- s1 ( a1 Y ) ( a2 A ) ;
+- s2 ( a2 Y ) ( a3 A ) ;
+- s3 ( a3 Y ) ( r3 D ) ;
+- q ( r2 Q ) ( PIN q ) ;
+END NETS
+END DESIGN
+)DEF";
+
+TEST(TargetedClosure, ConeAimingClosesInOneScreening) {
+  TempDir dir;
+  db::OdbDatabase db;
+  ASSERT_TRUE(db.ReadLef(dir.Write("cells.lef", kLef)).ok());
+  ASSERT_TRUE(db.ReadDef(dir.Write("top.def", kTargetedDef)).ok());
+  CloseTimingRequest request;
+  request.sdc_path =
+      dir.Write("top.sdc", "create_clock -name clk -period 1 [get_ports clk]\n");
+  request.scenes = {EstimateScene(
+      1, "func_tt", "tt",
+      dir.Write("tt.lib", ChainLiberty(0.05, {{"BUF_X1", 0.8},
+                                              {"BUF_X2", 0.2},
+                                              {"SBUF_X1", 0.25},
+                                              {"SBUF_X2", 0.05}})))};
+  request.max_iterations = 5;
+  request.sizing_families = {{"BUF_X1", "BUF_X2"}, {"SBUF_X1", "SBUF_X2"}};
+  Project project;
+  AddScenarios(project, request.scenes);
+
+  const auto outcome = RunTimingClosure(project, db, request);
+  ASSERT_TRUE(outcome.ok()) << outcome.status().message();
+  EXPECT_TRUE(outcome.value().closed) << outcome.value().stop_reason;
+  ASSERT_EQ(outcome.value().steps.size(), 1u);
+  EXPECT_EQ(outcome.value().steps[0].label, "size zbuf BUF_X1 -> BUF_X2");
+  // The asserted bound: strictly fewer screenings than the four
+  // whole-design name order would spend (a1, a2, a3 rejected,
+  // then zbuf). Targeted generation spends exactly one.
+  EXPECT_EQ(outcome.value().candidates_tried, 1u);
+  EXPECT_EQ(outcome.value().candidates_rejected, 0u);
+  EXPECT_EQ(outcome.value().candidates_skipped_stale, 0u);
+  EXPECT_EQ(outcome.value().candidates_skipped_memory, 0u);
+  EXPECT_NEAR(WorstSlack(outcome.value().initial[0]), -0.1, 1e-6);
+  EXPECT_NEAR(WorstSlack(outcome.value().final[0]), 0.5, 1e-6);
+}
+
+const char kStaleDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 8 ;
+- r1 DFF + PLACED ( 1000 1000 ) N ;
+- b1 BUF_X1 + PLACED ( 2000 1000 ) N ;
+- c2 BUF_X4 + PLACED ( 3000 1000 ) N ;
+- r2 DFF + PLACED ( 4000 1000 ) N ;
+- r3 DFF + PLACED ( 5000 1000 ) N ;
+- r4 DFF + PLACED ( 6000 1000 ) N ;
+- b3 SBUF_X1 + PLACED ( 7000 1000 ) N ;
+- r5 DFF + PLACED ( 8000 1000 ) N ;
+END COMPONENTS
+PINS 3 ;
+- clk + NET clk + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- d + NET d + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- q + NET q + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 8 ;
+- clk ( PIN clk ) ( r1 CK ) ( r2 CK ) ( r3 CK ) ( r4 CK ) ( r5 CK ) ;
+- d ( PIN d ) ( r1 D ) ( r4 D ) ;
+- nb1 ( r1 Q ) ( b1 A ) ;
+- wide ( b1 Y ) ( r2 D ) ( c2 A ) ;
+- nc2 ( c2 Y ) ( r3 D ) ;
+- nb3 ( r4 Q ) ( b3 A ) ;
+- nr5 ( b3 Y ) ( r5 D ) ;
+- q ( r2 Q ) ( PIN q ) ;
+END NETS
+END DESIGN
+)DEF";
+
+struct StaleRun {
+  ClosureOutcome outcome;
+  std::string b1_master;
+  std::string c2_master;
+  std::string b3_master;
+};
+
+StaleRun RunStaleScenario() {
+  TempDir dir;
+  db::OdbDatabase db;
+  EXPECT_TRUE(db.ReadLef(dir.Write("cells.lef", kLef)).ok());
+  EXPECT_TRUE(db.ReadDef(dir.Write("top.def", kStaleDef)).ok());
+  CloseTimingRequest request;
+  request.sdc_path =
+      dir.Write("top.sdc", "create_clock -name clk -period 1 [get_ports clk]\n");
+  request.scenes = {EstimateScene(
+      1, "func_tt", "tt",
+      dir.Write("tt.lib", ChainLiberty(0.05, {{"BUF_X1", 0.8},
+                                              {"BUF_X2", 0.2},
+                                              {"BUF_X4", 0.4},
+                                              {"BUF_X8", 0.1},
+                                              {"SBUF_X1", 0.8},
+                                              {"SBUF_X2", 0.2}})))};
+  request.max_iterations = 5;
+  request.sizing_families = {{"BUF_X1", "BUF_X2"},
+                             {"BUF_X4", "BUF_X8"},
+                             {"SBUF_X1", "SBUF_X2"}};
+  Project project;
+  AddScenarios(project, request.scenes);
+  const auto result = RunTimingClosure(project, db, request);
+  EXPECT_TRUE(result.ok()) << result.status().message();
+  StaleRun run;
+  run.outcome = result.value();
+  db::OdbInstanceInfo info;
+  EXPECT_TRUE(db.FindInstance("b1", &info));
+  run.b1_master = info.master;
+  EXPECT_TRUE(db.FindInstance("c2", &info));
+  run.c2_master = info.master;
+  EXPECT_TRUE(db.FindInstance("b3", &info));
+  run.b3_master = info.master;
+  return run;
+}
+
+TEST(TargetedClosure, StaleTargetSkipCountsOnlyDroppedEndpoints) {
+  const StaleRun run = RunStaleScenario();
+  const ClosureOutcome& outcome = run.outcome;
+  EXPECT_TRUE(outcome.closed) << outcome.stop_reason;
+  ASSERT_EQ(outcome.steps.size(), 2u);
+  EXPECT_EQ(outcome.steps[0].label, "size b1 BUF_X1 -> BUF_X2");
+  EXPECT_EQ(outcome.steps[1].label, "size b3 SBUF_X1 -> SBUF_X2");
+  EXPECT_EQ(outcome.candidates_tried, 2u);
+  EXPECT_EQ(outcome.candidates_rejected, 0u);
+  // Exactly one stale skip: c2's candidate, whose endpoint E2
+  // closed as a side effect of the b1 step. E3 was still
+  // violating on the second iteration, so its candidate was
+  // screened, never skipped: it is step 2 above.
+  EXPECT_EQ(outcome.candidates_skipped_stale, 1u);
+  EXPECT_EQ(outcome.candidates_skipped_memory, 0u);
+  EXPECT_EQ(run.b1_master, "BUF_X2");
+  EXPECT_EQ(run.c2_master, "BUF_X4");
+  EXPECT_EQ(run.b3_master, "SBUF_X2");
+  EXPECT_NEAR(WorstSlack(outcome.initial[0]), -0.5, 1e-6);
+}
+
+TEST(TargetedClosure, TargetedOrderIsDeterministic) {
+  const StaleRun first = RunStaleScenario();
+  const StaleRun second = RunStaleScenario();
+  ASSERT_EQ(first.outcome.steps.size(), second.outcome.steps.size());
+  for (std::size_t i = 0; i < first.outcome.steps.size(); ++i) {
+    EXPECT_EQ(first.outcome.steps[i].label, second.outcome.steps[i].label);
+  }
+  EXPECT_EQ(first.outcome.candidates_tried, second.outcome.candidates_tried);
+  EXPECT_EQ(first.outcome.candidates_skipped_stale,
+            second.outcome.candidates_skipped_stale);
+  EXPECT_NEAR(WorstSlack(first.outcome.final[0]),
+              WorstSlack(second.outcome.final[0]), 1e-9);
+}
+
+const char kMemoryDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 10 ;
+- rA0 DFF + PLACED ( 1000 1000 ) N ;
+- rA1 DFF + PLACED ( 2000 1000 ) N ;
+- mA MBUF + PLACED ( 3000 1000 ) N ;
+- a1 BUF_X1 + PLACED ( 4000 1000 ) N ;
+- g1 WIDE + PLACED ( 5000 1000 ) N ;
+- rA2 DFF + PLACED ( 6000 1000 ) N ;
+- rB1 DFF + PLACED ( 7000 1000 ) N ;
+- b1 BUF_X4 + PLACED ( 8000 1000 ) N ;
+- b2 SBUF_X1 + PLACED ( 9000 1000 ) N ;
+- rB2 DFF + PLACED ( 10000 1000 ) N ;
+END COMPONENTS
+PINS 3 ;
+- clk + NET clk + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- d + NET d + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- q + NET q + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 15000 5000 ) N ;
+END PINS
+NETS 11 ;
+- clk ( PIN clk ) ( rA0 CK ) ( rA1 CK ) ( rA2 CK ) ( rB1 CK ) ( rB2 CK ) ;
+- d ( PIN d ) ( rA0 D ) ( rA1 D ) ( rB1 D ) ;
+- na1 ( rA1 Q ) ( mA A ) ;
+- na2 ( mA Y ) ( g1 A ) ;
+- nb1 ( rA0 Q ) ( a1 A ) ;
+- nb2 ( a1 Y ) ( g1 B ) ;
+- ng ( g1 Y ) ( rA2 D ) ;
+- mb1 ( rB1 Q ) ( b1 A ) ;
+- mb2 ( b1 Y ) ( b2 A ) ;
+- mb3 ( b2 Y ) ( rB2 D ) ;
+- q ( rA2 Q ) ( PIN q ) ;
+END NETS
+END DESIGN
+)DEF";
+
+const char kWideLibertyCell[] = R"LIB(  cell (WIDE) {
+    area : 3.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (B) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A & B";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.1"); }
+        cell_fall (scalar) { values ("0.1"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.1"); }
+        cell_fall (scalar) { values ("0.1"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+)LIB";
+
+TEST(TargetedClosure, RejectionMemorySkipsUnchangedConeRepeats) {
+  TempDir dir;
+  db::OdbDatabase db;
+  ASSERT_TRUE(db.ReadLef(dir.Write("cells.lef", kLef)).ok());
+  ASSERT_TRUE(db.ReadDef(dir.Write("top.def", kMemoryDef)).ok());
+  std::string liberty = ChainLiberty(0.05, {{"MBUF", 1.4},
+                                            {"BUF_X1", 0.3},
+                                            {"BUF_X2", 0.05},
+                                            {"BUF_X4", 0.6},
+                                            {"BUF_X8", 0.25},
+                                            {"SBUF_X1", 0.6},
+                                            {"SBUF_X2", 0.2}});
+  liberty.insert(liberty.rfind('}'), kWideLibertyCell);
+  CloseTimingRequest request;
+  request.sdc_path =
+      dir.Write("top.sdc", "create_clock -name clk -period 1 [get_ports clk]\n");
+  request.scenes = {EstimateScene(1, "func_tt", "tt",
+                                  dir.Write("tt.lib", liberty))};
+  request.max_iterations = 5;
+  request.sizing_families = {{"BUF_X1", "BUF_X2"},
+                             {"BUF_X4", "BUF_X8"},
+                             {"SBUF_X1", "SBUF_X2"}};
+  Project project;
+  AddScenarios(project, request.scenes);
+
+  const auto outcome = RunTimingClosure(project, db, request);
+  ASSERT_TRUE(outcome.ok()) << outcome.status().message();
+  // EB closed in two accepted steps; EA never closes (its cone's
+  // only candidate cannot move its worst path), so the run ends
+  // unclosed when the memory has skipped the last screenable
+  // candidate.
+  EXPECT_FALSE(outcome.value().closed);
+  ASSERT_EQ(outcome.value().steps.size(), 2u);
+  EXPECT_EQ(outcome.value().steps[0].label, "size b1 BUF_X4 -> BUF_X8");
+  EXPECT_EQ(outcome.value().steps[1].label, "size b2 SBUF_X1 -> SBUF_X2");
+  // Screenings: a1 (rejected), b1 and b2 (accepted). a1 is never
+  // screened twice: iterations 2 and 3 each skip it by memory.
+  EXPECT_EQ(outcome.value().candidates_tried, 3u);
+  EXPECT_EQ(outcome.value().candidates_rejected, 1u);
+  EXPECT_EQ(outcome.value().candidates_skipped_memory, 2u);
+  EXPECT_EQ(outcome.value().candidates_skipped_stale, 0u);
+  EXPECT_NE(outcome.value().stop_reason.find("unchanged target cone"),
+            std::string::npos)
+      << outcome.value().stop_reason;
+  EXPECT_NEAR(WorstSlack(outcome.value().initial[0]), -0.8, 1e-6);
+  EXPECT_NEAR(WorstSlack(outcome.value().final[0]), -0.8, 1e-6);
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(db.FindInstance("a1", &info));
+  EXPECT_EQ(info.master, "BUF_X1");
+  ASSERT_TRUE(db.FindInstance("b1", &info));
+  EXPECT_EQ(info.master, "BUF_X8");
+  ASSERT_TRUE(db.FindInstance("b2", &info));
+  EXPECT_EQ(info.master, "SBUF_X2");
 }
 
 }  // namespace

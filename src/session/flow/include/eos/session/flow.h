@@ -14,20 +14,53 @@
 // src/eco/timing-eco, exactly as the code structure document
 // prescribes.
 //
-// Diagnosis, honestly scoped: the timing service reports the four
-// per-scene metrics (setup and hold worst slack and total
-// negative slack) and the STA facade exposes no per-endpoint path
-// detail, so the loop cannot name the critical endpoint of a
-// violating scene. Its diagnosis is therefore the violating scene
-// and metric set, and its candidate generation is exhaustive over
-// the editable design in a deterministic order (instances and
-// nets sorted by name), screened one candidate at a time until
-// the first all-scene improvement is found (first improvement,
-// not best improvement: the search is bounded by candidate count
-// times full re-analysis cost, and the record says which
-// candidate was taken). A facade that reports worst endpoints
-// would let a later version aim candidates at the violating
-// cones first; the screening protocol would not change.
+// Diagnosis and search order (unit 2.9): the timing service
+// reports, per scene, the four metrics (setup and hold worst
+// slack and total negative slack) and the violating endpoints of
+// each check kind (unit 2.8). Candidate generation aims first:
+// for the currently violating endpoints, worst endpoint first
+// (an endpoint's slack is its worst slack over every scene and
+// check kind; ties break by pin name), it generates the sizing,
+// resynthesis and buffering candidates of the endpoint's fanin
+// cone (the instances and nets connectivity reaches the endpoint
+// through), instances in path order (deepest fanin first, name
+// order within a depth). A candidate shared by several cones is
+// generated once, under the worst endpoint that claims it. The
+// whole-design name-order enumeration remains as the fallback,
+// appended after the targeted candidates with the targeted
+// labels excluded, for the case where targeted candidates are
+// exhausted without closure. Screening is unchanged in kind:
+// one candidate at a time through the ECO protocol until the
+// first all-scene improvement is found (first improvement, not
+// best improvement), and every accepted edit still passes the
+// full Section 9 protocol with all-scene re-analysis.
+//
+// Screening economics (unit 2.9), none of which changes
+// acceptance semantics:
+// - Rejection memory: a targeted candidate that was screened and
+//   rejected is not screened again while its target endpoint
+//   reports the same slack and no accepted edit since the
+//   rejection has touched its target cone. The verdict a
+//   screening reaches is decided by the metrics of the paths
+//   through the candidate's cone, so an identical edit against
+//   an unchanged cone at an unchanged endpoint slack reaches
+//   the same verdict; anything the memory cannot prove
+//   unchanged is screened again in full.
+// - Stale-target skip: a targeted candidate from the previous
+//   iteration whose endpoint no longer violates, that was never
+//   screened and is not generated again, is counted as skipped
+//   stale rather than screened against an endpoint that is
+//   already clean. A still-violating endpoint's candidates are
+//   never skipped by this rule: they are regenerated from the
+//   current endpoint report every iteration.
+// - The transaction's before-analysis: the loop hands each
+//   screening the analysis it already holds for the design as
+//   it stands (the ECO request's known_before), so a screening
+//   pays one full re-analysis (the after side) instead of two.
+//   The measurements that justify this are recorded with unit
+//   2.9: on the degraded gcd a screening cost about 8.1 s, of
+//   which the two full analyses were the overwhelming share and
+//   the checkpoint round trip was minor.
 //
 // Candidate knowledge: which drive variant is stronger is the
 // caller's Liberty knowledge, as it is for the sizing adapter
@@ -150,8 +183,13 @@ struct ClosureStep {
 // entry per accepted iteration, in order. candidates_tried counts
 // every candidate screened through the ECO protocol (accepted
 // and rejected); candidates_rejected counts the rejected ones.
-// stop_reason states in words why the loop stopped, naming the
-// deciding scene and metric where one decided it.
+// candidates_skipped_stale and candidates_skipped_memory count
+// the targeted candidates the screening economics (see the
+// banner) kept out of screening in this run; a skipped candidate
+// was neither accepted nor rejected, so the three counters do
+// not sum to the generated total. stop_reason states in words
+// why the loop stopped, naming the deciding scene and metric
+// where one decided it.
 struct ClosureOutcome {
   bool closed = false;
   std::string stop_reason;
@@ -161,6 +199,8 @@ struct ClosureOutcome {
   std::vector<ClosureStep> steps;
   std::size_t candidates_tried = 0;
   std::size_t candidates_rejected = 0;
+  std::size_t candidates_skipped_stale = 0;
+  std::size_t candidates_skipped_memory = 0;
 };
 
 // True when every scene meets the timing gate over the four

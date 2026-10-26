@@ -100,10 +100,28 @@ Result<EcoVerdict> EvaluateAllScenes(
 // One ECO to try: a label for the record, the SDC every scene is
 // analyzed under, and the required scenes (all at estimate
 // parasitics in v1, per the banner).
+//
+// known_before is an optional caller-supplied analysis of the
+// design exactly as it stands at the call (unit 2.9): a caller
+// that already holds a full TimingService analysis of the
+// unchanged design (the closure loop holds one per iteration)
+// may hand it in, and the transaction then skips its own
+// before-analysis and judges against the supplied numbers. The
+// analysis must cover exactly the request's scenes, by scenario
+// name, and carry the four judged metrics per scene, or the
+// call fails with kInvalidArgument before any checkpoint or
+// edit. The contract is the caller's word that the design has
+// not changed since the analysis ran: the engine cannot check
+// that cheaply (checking is the analysis itself), so a caller
+// that hands in numbers for a different design state gets a
+// verdict about that state, and the header says so rather than
+// implying a check ran. An empty known_before means the engine
+// runs the before-analysis itself, as it always did.
 struct EcoRequest {
   std::string label;
   std::string sdc_path;
   std::vector<analysis::SceneAnalysis> scenes;
+  std::vector<analysis::SceneResult> known_before;
 };
 
 // The outcome of one transaction. committed is the protocol's

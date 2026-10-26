@@ -13,5 +13,9 @@ crosses below the timing gate, or a violating metric that gets
 worse, is a regression in any scene and rolls the edit back. The
 ledger wrap is the caller's, because L5 owns the ledger: begin a
 ledger transaction, run the ECO inside it, commit or abort the
-ledger transaction with the outcome. The stable public API lives
-in include/eos/eco/transactions.h.
+ledger transaction with the outcome. Since unit 2.9 a caller
+that already holds a full analysis of the unchanged design may
+supply it as the request's before side (`known_before`), and
+the engine judges against it instead of re-analyzing; the
+contract and its validation are stated in the header. The
+stable public API lives in include/eos/eco/transactions.h.
