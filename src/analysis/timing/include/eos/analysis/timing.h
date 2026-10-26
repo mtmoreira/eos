@@ -19,6 +19,14 @@
 // plus the hold pair, all in nanoseconds, named exactly as the
 // session CostPolicy expects (worst_slack_ns first among them).
 //
+// Each scene's result also carries the scene's violating
+// endpoints for the setup and hold checks (pin path name and
+// worst slack in nanoseconds, worst first), surfaced from the STA
+// facade's endpoint reporting, so closure consumers can aim at
+// the endpoints that actually violate instead of enumerating the
+// whole design. The facade's worst-path query stays available
+// per engine session for callers that need a critical cone.
+//
 // Report registration is deliberately NOT here: bindings live in
 // L5 session state, which an L3 service may not reach up to. The
 // service returns the per-scene results; the caller (the L6
@@ -34,6 +42,7 @@
 #include <string>
 #include <vector>
 
+#include "eos/analysis/sta.h"
 #include "eos/db/odb.h"
 #include "eos/db/scenarios.h"
 #include "eos/foundation/errors.h"
@@ -67,10 +76,15 @@ struct SceneAnalysis {
 
 // One scene's outcome: the scenario it ran under and its metrics
 // (worst_slack_ns, total_negative_slack_ns, worst_hold_slack_ns,
-// total_negative_hold_slack_ns; all unit "ns").
+// total_negative_hold_slack_ns; all unit "ns"), plus the
+// violating endpoints of each check kind for that scene, in the
+// STA facade's EndpointSlack shape, worst first. An empty list
+// means no endpoint violates that check in this scene.
 struct SceneResult {
   db::Scenario scenario;
   TimingMetricMap metrics;
+  std::vector<EndpointSlack> setup_violating_endpoints;
+  std::vector<EndpointSlack> hold_violating_endpoints;
 };
 
 // A design in Verilog form: the netlist, its top cell, and the SDC

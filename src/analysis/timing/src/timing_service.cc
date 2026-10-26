@@ -110,6 +110,12 @@ Result<SceneResult> AnalyzeScene(const VerilogDesign& design,
   status = add("total_negative_hold_slack_ns",
                &StaEngine::TotalNegativeHoldSlackNs);
   if (!status.ok()) return status;
+  const auto setup_endpoints = engine.ViolatingEndpoints(CheckKind::kSetup);
+  if (!setup_endpoints.ok()) return SceneError(scene, setup_endpoints.status());
+  result.setup_violating_endpoints = setup_endpoints.value();
+  const auto hold_endpoints = engine.ViolatingEndpoints(CheckKind::kHold);
+  if (!hold_endpoints.ok()) return SceneError(scene, hold_endpoints.status());
+  result.hold_violating_endpoints = hold_endpoints.value();
   return result;
 }
 
