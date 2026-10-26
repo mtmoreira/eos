@@ -760,4 +760,66 @@ Status OdbDatabase::DisconnectInstancePin(const std::string& instance,
   return Status::Ok();
 }
 
+Status OdbDatabase::DeleteInstance(const std::string& instance) {
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "delete an instance before any DEF has been read");
+  }
+  odb::dbInst* inst = block->findInst(instance.c_str());
+  if (inst == nullptr) {
+    return NotFound("instance", instance);
+  }
+  try {
+    // Copy the term list first: disconnecting mutates it.
+    std::vector<odb::dbITerm*> terms;
+    for (odb::dbITerm* term : inst->getITerms()) {
+      terms.push_back(term);
+    }
+    for (odb::dbITerm* term : terms) {
+      if (term->getNet() != nullptr) {
+        odb::dbITerm::disconnect(term);
+      }
+    }
+    odb::dbInst::destroy(inst);
+  } catch (const std::exception&) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "could not delete instance " + instance);
+  }
+  return Status::Ok();
+}
+
+Status OdbDatabase::DeleteNet(const std::string& net_name) {
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "delete a net before any DEF has been read");
+  }
+  odb::dbNet* net = block->findNet(net_name.c_str());
+  if (net == nullptr) {
+    return NotFound("net", net_name);
+  }
+  try {
+    std::vector<odb::dbITerm*> iterms;
+    for (odb::dbITerm* term : net->getITerms()) {
+      iterms.push_back(term);
+    }
+    for (odb::dbITerm* term : iterms) {
+      odb::dbITerm::disconnect(term);
+    }
+    std::vector<odb::dbBTerm*> bterms;
+    for (odb::dbBTerm* term : net->getBTerms()) {
+      bterms.push_back(term);
+    }
+    for (odb::dbBTerm* term : bterms) {
+      term->disconnect();
+    }
+    odb::dbNet::destroy(net);
+  } catch (const std::exception&) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "could not delete net " + net_name);
+  }
+  return Status::Ok();
+}
+
 }  // namespace eos::db

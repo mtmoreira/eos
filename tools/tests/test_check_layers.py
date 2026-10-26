@@ -165,6 +165,42 @@ def test_same_named_own_header_shadows_other_module(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_path_include_does_not_match_unrelated_basename(tmp_path):
+    # Regression (Phase 2 unit 2.6): an L0 module that includes the
+    # system header "boost/random.hpp" must not be flagged for a
+    # same-named file at an unrelated path inside an L1 module
+    # (ABC bundles "sat/cadical/random.hpp"); a path-ful include
+    # only matches a file at that path.
+    def build(root):
+        build_two(root)
+        deep = root / "src/ui/tcl/src/sat/cadical"
+        deep.mkdir(parents=True)
+        (deep / "random.hpp").write_text("", encoding="utf-8")
+        (root / "src/foundation/types/src/types.cc").write_text(
+            '#include "boost/random.hpp"\n', encoding="utf-8")
+    repo = make_repo(tmp_path, TWO_MODULES, build)
+    result = run_checker(repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_bundled_src_header_does_not_shadow_system_include(tmp_path):
+    # Regression (Phase 2 unit 2.6): an L0 module that includes the
+    # system header "zlib.h" must not be flagged for the copy of
+    # zlib.h bundled deep inside an L1 module's src/ tree (ABC's
+    # src/misc/zlib/zlib.h); a bare name reaches another module's
+    # include/ or internal/ surface, never its src/ tree.
+    def build(root):
+        build_two(root)
+        deep = root / "src/ui/tcl/src/misc/zlib"
+        deep.mkdir(parents=True)
+        (deep / "zlib.h").write_text("", encoding="utf-8")
+        (root / "src/foundation/types/src/types.cc").write_text(
+            '#include "zlib.h"\n', encoding="utf-8")
+    repo = make_repo(tmp_path, TWO_MODULES, build)
+    result = run_checker(repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_sideways_internal_include_fails(tmp_path):
     def build(root):
         build_two(root)

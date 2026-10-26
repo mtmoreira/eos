@@ -80,9 +80,10 @@ struct Candidate {
   std::function<Status(db::OdbDatabase&)> edit;
 };
 
-// Generates the candidates for the design as it stands, in the
-// deterministic order the header states: sizing candidates by
-// instance name, then buffering candidates by net name.
+// Generates the candidates for the design as it stands, in a
+// deterministic order: sizing candidates by instance name, then
+// resynthesis candidates by net name (when enabled), then
+// buffering candidates by net name.
 std::vector<Candidate> GenerateCandidates(
     const db::OdbDatabase& database, const CloseTimingRequest& request,
     const std::map<std::string, std::pair<std::size_t, std::size_t>>&
@@ -112,6 +113,68 @@ std::vector<Candidate> GenerateCandidates(
       return eco::ResizeInstance(design, name, target);
     };
     candidates.push_back(std::move(candidate));
+  }
+  if (request.resynthesis.enabled) {
+    const std::set<std::string> sequential(
+        request.resynthesis.sequential_masters.begin(),
+        request.resynthesis.sequential_masters.end());
+    std::vector<std::string> nets = database.NetNames();
+    std::sort(nets.begin(), nets.end());
+    for (const std::string& net : nets) {
+      const std::vector<db::OdbNetConnection> connections =
+          database.NetConnections(net);
+      const db::OdbNetConnection* driver = nullptr;
+      std::size_t drivers = 0;
+      for (const db::OdbNetConnection& connection : connections) {
+        if (connection.is_driver) {
+          driver = &connection;
+          ++drivers;
+        }
+      }
+      if (drivers != 1 || driver == nullptr || driver->is_port) {
+        continue;
+      }
+      db::OdbInstanceInfo driver_info;
+      if (!database.FindInstance(driver->instance, &driver_info)) {
+        continue;
+      }
+      if (sequential.count(driver_info.master)) {
+        continue;
+      }
+      eco::ResynthesisRequest resynth;
+      resynth.target_net = net;
+      resynth.sequential_masters = request.resynthesis.sequential_masters;
+      resynth.liberty_path = request.resynthesis.liberty_path;
+      resynth.scratch_dir = request.resynthesis.scratch_dir;
+      Candidate candidate;
+      candidate.label = "resynthesize cone at net " + net;
+      candidate.edit = [resynth](db::OdbDatabase& design) -> Status {
+        const auto outcome = eco::ResynthesizeCone(design, resynth);
+        if (!outcome.ok()) {
+          // A capability refusal (an unmappable cone, a name the
+          // proof cannot carry) is a screening outcome, not a
+          // failure of the loop: present the design unchanged, so
+          // the protocol rejects the candidate as no improvement.
+          // The adapter has made no edit on a Status path before
+          // its checkpoint, and rolls back its own edits on the
+          // paths after it, so the design is as it was.
+          if (outcome.status().code() == ErrorCode::kUnsupported ||
+              outcome.status().code() == ErrorCode::kInvalidArgument ||
+              outcome.status().code() == ErrorCode::kNotFound) {
+            return Status::Ok();
+          }
+          return outcome.status();
+        }
+        if (!outcome.value().applied) {
+          // The proof did not pass; the adapter already rolled
+          // the splice back. Present the unchanged design to the
+          // protocol, which rejects the candidate.
+          return Status::Ok();
+        }
+        return Status::Ok();
+      };
+      candidates.push_back(std::move(candidate));
+    }
   }
   if (!request.buffer_masters.empty()) {
     const std::string buffer_master = request.buffer_masters.front();
@@ -229,6 +292,18 @@ Result<ClosureOutcome> RunTimingClosure(Project& project,
       }
     }
   }
+  if (request.resynthesis.enabled) {
+    if (request.resynthesis.liberty_path.empty()) {
+      return Invalid(
+          "resynthesis candidates need a Liberty library to map "
+          "against");
+    }
+    if (request.resynthesis.scratch_dir.empty()) {
+      return Invalid(
+          "resynthesis candidates need a scratch directory for the "
+          "adapter's working files");
+    }
+  }
   for (const std::string& master : request.buffer_masters) {
     const std::vector<db::OdbMasterPin> pins = database.MasterPins(master);
     if (pins.empty()) {
@@ -276,8 +351,9 @@ Result<ClosureOutcome> RunTimingClosure(Project& project,
         GenerateCandidates(database, request, family_of);
     if (candidates.empty()) {
       outcome.stop_reason =
-          "no sizing or buffering candidate can be generated for "
-          "the current design, and the gate is unmet: " +
+          "no sizing, resynthesis or buffering candidate can be "
+          "generated for the current design, and the gate is "
+          "unmet: " +
           FirstViolation(outcome.final);
       break;
     }

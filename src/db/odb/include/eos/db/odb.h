@@ -172,6 +172,17 @@ class OdbDatabase {
   // kInvalidState when the pin is not connected.
   Status DisconnectInstancePin(const std::string& instance,
                                const std::string& pin);
+  // Deletes one instance, disconnecting every pin first. Added for
+  // the resynthesis adapter (Phase 2 unit 2.6), which splices a
+  // remapped cone into the design: the cone's old instances are
+  // deleted and the remapped ones created in their place. Fails
+  // with kNotFound for an unknown instance. Nets the instance was
+  // connected to are left in place (possibly undriven or
+  // unloadable afterwards); deleting a net is DeleteNet's job.
+  Status DeleteInstance(const std::string& instance);
+  // Deletes one net, disconnecting every pin (instance or port)
+  // connected to it first. Fails with kNotFound for an unknown net.
+  Status DeleteNet(const std::string& net_name);
 
  private:
   struct Impl;

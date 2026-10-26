@@ -54,6 +54,11 @@ target_link_libraries(eda_eco_timing_eco_unit_test
           GTest::gtest GTest::gtest_main)
 add_test(NAME eco.timing_eco COMMAND eda_eco_timing_eco_unit_test)
 
+add_executable(eda_synth_abc_unit_test synth/abc/abc_test.cc)
+target_link_libraries(eda_synth_abc_unit_test
+  PRIVATE eda_synth_abc GTest::gtest GTest::gtest_main)
+add_test(NAME synth.abc COMMAND eda_synth_abc_unit_test)
+
 add_executable(eda_db_odb_unit_test db/odb/odb_test.cc)
 target_link_libraries(eda_db_odb_unit_test
   PRIVATE eda_db_odb GTest::gtest GTest::gtest_main)

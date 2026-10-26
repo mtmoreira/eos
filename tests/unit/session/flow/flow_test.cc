@@ -783,3 +783,313 @@ TEST(ClosureLoop, MalformedRequestsAreRefusedBeforeAnyEdit) {
 
 }  // namespace
 }  // namespace eos::session
+
+// ---------------------------------------------------------------------------
+// Resynthesis closure (unit 2.6): the chain design whose cone
+// (AND2 behind a double inversion, the timing-eco fixture) no
+// sizing family and no buffer can fix, closed by a resynthesis
+// candidate whose equivalence proof passes inside the edit. The
+// Liberty is the timing-eco resynthesis Liberty (scalar delays:
+// AND 0.6, INV 0.5, clock to Q 0.2, setup 0.1), the clock is
+// 1.5 ns, so the loop starts at -0.4 ns and the remapped cone
+// (the AND gate alone) closes it at +0.6 ns.
+
+namespace eos::session {
+namespace {
+
+const char kResynthLef[] = R"LEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MANUFACTURINGGRID 0.005 ;
+SITE core
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END core
+LAYER metal1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal1
+MACRO DFF
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN D
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END D
+  PIN CK
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END CK
+  PIN Q
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Q
+END DFF
+MACRO INV_X1
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Y
+END INV_X1
+MACRO AND2_X1
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END B
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Y
+END AND2_X1
+END LIBRARY
+)LEF";
+
+const char kResynthDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 5 ;
+- r1 DFF + PLACED ( 1000 1000 ) N ;
+- u1 AND2_X1 + PLACED ( 2000 1000 ) N ;
+- u2 INV_X1 + PLACED ( 3000 1000 ) N ;
+- u3 INV_X1 + PLACED ( 4000 1000 ) N ;
+- r2 DFF + PLACED ( 5000 1000 ) N ;
+END COMPONENTS
+PINS 4 ;
+- clk + NET clk + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- d + NET d + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- b + NET nb + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 7000 ) N ;
+- q + NET q + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 8 ;
+- clk ( PIN clk ) ( r1 CK ) ( r2 CK ) ;
+- d ( PIN d ) ( r1 D ) ;
+- nb ( PIN b ) ( u1 B ) ;
+- n1 ( r1 Q ) ( u1 A ) ;
+- n2 ( u1 Y ) ( u2 A ) ;
+- n3 ( u2 Y ) ( u3 A ) ;
+- n4 ( u3 Y ) ( r2 D ) ;
+- q ( r2 Q ) ( PIN q ) ;
+END NETS
+END DESIGN
+)DEF";
+
+const char kResynthLiberty[] = R"LIB(library (eos_resynth_fixture) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) {
+      direction : input;
+      capacitance : 0.001;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (scalar) { values ("0.05"); }
+        fall_constraint (scalar) { values ("0.05"); }
+      }
+    }
+    pin (CK) {
+      direction : input;
+      capacitance : 0.001;
+      clock : true;
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+
+  cell (INV_X1) {
+    area : 1.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      timing () {
+        related_pin : "A";
+        timing_sense : negative_unate;
+        cell_rise (scalar) { values ("0.5"); }
+        cell_fall (scalar) { values ("0.5"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+
+  cell (AND2_X1) {
+    area : 2.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (B) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A & B";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.6"); }
+        cell_fall (scalar) { values ("0.6"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.6"); }
+        cell_fall (scalar) { values ("0.6"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+TEST(ClosureLoop, ResynthesisClosesTheDoubleInversionChain) {
+  TempDir dir;
+  db::OdbDatabase db;
+  ASSERT_TRUE(db.ReadLef(dir.Write("resynth.lef", kResynthLef)).ok());
+  ASSERT_TRUE(db.ReadDef(dir.Write("resynth.def", kResynthDef)).ok());
+  const std::string liberty = dir.Write("resynth.lib", kResynthLiberty);
+  CloseTimingRequest request;
+  request.sdc_path = dir.Write(
+      "top.sdc", "create_clock -name clk -period 1.5 [get_ports clk]\n");
+  request.scenes = {EstimateScene(1, "func_tt", "tt", liberty)};
+  request.max_iterations = 3;
+  // No sizing families and no buffer masters: the only candidates
+  // this run can generate are resynthesis candidates.
+  request.resynthesis.enabled = true;
+  request.resynthesis.liberty_path = liberty;
+  request.resynthesis.sequential_masters = {"DFF"};
+  request.resynthesis.scratch_dir =
+      std::filesystem::path(dir.Write("marker", "")).parent_path().string();
+  Project project;
+  AddScenarios(project, request.scenes);
+
+  const auto outcome = RunTimingClosure(project, db, request);
+  ASSERT_TRUE(outcome.ok()) << outcome.status().message();
+  EXPECT_TRUE(outcome.value().closed) << outcome.value().stop_reason;
+  ASSERT_EQ(outcome.value().steps.size(), 1u);
+  EXPECT_NE(outcome.value().steps[0].label.find("resynthesize cone"),
+            std::string::npos);
+  EXPECT_NEAR(WorstSlack(outcome.value().initial[0]), -0.4, 0.01);
+  EXPECT_NEAR(WorstSlack(outcome.value().final[0]), 0.6, 0.01);
+  // The cone is gone; the design is the two flops and the one
+  // remapped gate, and the accepted iteration is one ledger
+  // transaction with a passing closure binding.
+  EXPECT_EQ(db.InstanceCount(), 3u);
+  EXPECT_EQ(project.ledger.current_revision(), 1u);
+  ReportRegistry reports;
+  const ReportBinding* binding =
+      reports.FindByName(project, "timing_closure");
+  ASSERT_NE(binding, nullptr);
+  const ArtifactRecord* artifact =
+      project.ledger.FindArtifact(binding->artifact_id);
+  ASSERT_NE(artifact, nullptr);
+  EXPECT_EQ(artifact->proof, ProofStatus::kPass);
+}
+
+}  // namespace
+}  // namespace eos::session

@@ -21,8 +21,18 @@ internal/ directory. When the including module itself owns a matching
 file, only its own files are candidates: a quoted include resolves in
 the including file's own directories first, exactly as the compiler
 resolves it, so a same-named header in another module is not the file
-being included. Unresolvable quoted includes are ignored in this
-version (system and third-party headers are not the checker's business).
+being included. Two reachability limits keep the resolution honest
+about what a compiler could actually find. An include that names a
+path ("boost/random.hpp") only matches a file at that path, never a
+same-named file at an unrelated path (a bundled "sat/cadical/random.hpp"
+is not the system header "boost/random.hpp"). And a bare name only
+reaches another module's include/ or internal/ surface, never a
+header buried in its src/ tree: no include path of the including
+module points there (the copy of "zlib.h" bundled inside an adopted
+engine's sources does not turn every other module's system zlib
+include into a dependency on that engine). Unresolvable quoted
+includes are ignored in this version (system and third-party headers
+are not the checker's business).
 
 Usage: check_layers.py [--root PATH]   (default root: the repository
 root, derived from this file's location). Exit code 0 means clean.
@@ -131,16 +141,35 @@ def build_file_index(root, reg):
     return index
 
 
-def resolve_include(index, inc):
-    """Find candidate owner files for a quoted include string."""
-    candidates = []
+def resolve_include(index, inc, including_mod=None):
+    """Find candidate owner files for a quoted include string.
+
+    An exact relative-path match (a candidate whose path ends with
+    the include string) is always a candidate. Basename matches are
+    added only for a bare include name, and only where a compiler
+    for the including module could reach them: anywhere in the
+    including module itself, or another module's include/ or
+    internal/ surface.
+    """
+    pool = []
     for key in (inc, Path(inc).name):
         for hit in index.get(key, []):
+            if hit not in pool:
+                pool.append(hit)
+    if "/" in inc:
+        exact = [hit for hit in pool
+                 if hit[2].as_posix().endswith("/" + inc)]
+        return exact
+    candidates = []
+    for hit in pool:
+        owner, owner_sub, _path = hit
+        if including_mod is not None and owner is including_mod:
             if hit not in candidates:
                 candidates.append(hit)
-    # Prefer an exact relative-path match when one exists.
-    exact = [hit for hit in candidates if hit[2].as_posix().endswith("/" + inc)]
-    return exact if exact else candidates
+        elif owner_sub in ("include", "internal"):
+            if hit not in candidates:
+                candidates.append(hit)
+    return candidates
 
 
 def check_includes(root, reg, violations):
@@ -159,7 +188,7 @@ def check_includes(root, reg, violations):
                     if not match:
                         continue
                     inc = match.group(1)
-                    candidates = resolve_include(index, inc)
+                    candidates = resolve_include(index, inc, mod)
                     # A quoted include resolves inside the including
                     # module first (the compiler searches the including
                     # file's own directories before other include
