@@ -45,6 +45,24 @@
 // has nothing to judge yet; that is stated here rather than
 // implied.
 //
+// Electrical judging (unit F5, the bounded part of P2-4) sits
+// immediately below timing in that lexicographic order. The
+// timing service now also reports, per scene, the max
+// transition, max capacitance and max fanout checks (worst value
+// and violating-pin count). The exact rule: a candidate
+// regresses when, in any scene and for any of the three checks,
+// its violating-pin count is higher than the before side's
+// count, or its count is the same nonzero count and its worst
+// value is worse than the before side's worst value by more
+// than the check's float-noise epsilon (1e-9 in the check's own
+// unit). A check absent from either side is not judged (the
+// service emits the metrics on every scene it produces, so
+// real analyses always carry them on both sides). An
+// electrical improvement never by itself accepts a candidate:
+// acceptance still requires a timing improvement, and an
+// electrical regression rejects a candidate whose timing
+// improved. Power and area judging remain out of scope.
+//
 // The ledger wrap: a transaction in the L5 ledger spans engines,
 // so the ledger is the caller's to drive (the structure document:
 // L5 owns the ledger, L4 never decides validity). The caller

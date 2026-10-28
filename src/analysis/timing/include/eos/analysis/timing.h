@@ -18,6 +18,16 @@
 // SDC. The metrics are setup worst slack and total negative slack
 // plus the hold pair, all in nanoseconds, named exactly as the
 // session CostPolicy expects (worst_slack_ns first among them).
+// Each scene also carries the three electrical limit checks of
+// unit F5 (the bounded part of limitation P2-4), from the STA
+// facade's ElectricalCheck results: for max transition, max
+// capacitance and max fanout, the worst checked value in the
+// check's own unit (max_transition_ns in ns, max_capacitance_pf
+// in pF, max_fanout in the dimensionless fanout load) and the
+// violating-pin count (max_transition_violations,
+// max_capacitance_violations and max_fanout_violations, unit
+// "pins"). A check no pin carries a limit for reports a worst
+// value of 0 and a count of 0, exactly as the facade reports it.
 //
 // Each scene's result also carries the scene's violating
 // endpoints for the setup and hold checks (pin path name and
@@ -76,7 +86,8 @@ struct SceneAnalysis {
 
 // One scene's outcome: the scenario it ran under and its metrics
 // (worst_slack_ns, total_negative_slack_ns, worst_hold_slack_ns,
-// total_negative_hold_slack_ns; all unit "ns"), plus the
+// total_negative_hold_slack_ns; all unit "ns"; plus the six
+// electrical metrics named in the banner above), plus the
 // violating endpoints of each check kind for that scene, in the
 // STA facade's EndpointSlack shape, worst first. An empty list
 // means no endpoint violates that check in this scene.

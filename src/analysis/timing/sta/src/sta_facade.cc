@@ -202,6 +202,95 @@ struct StaEngine::Impl {
     return in_unit * static_cast<double>(unit->scale()) * 1e9;
   }
 
+  // Converts an upstream capacitance (farads internally, the SI
+  // unit the analyzer stores) to picofarads.
+  double ToPf(double capacitance) const { return capacitance * 1e12; }
+
+  // The three electrical checks (unit F5). Each asks the
+  // upstream analyzer for the worst checked pin (smallest limit
+  // slack) and for the violating-pin count, and converts the
+  // values into the facade's documented unit. A null worst pin
+  // means no pin carries a limit for the check: the result then
+  // reports has_limit false with zero value and count, per the
+  // header. The upstream violation-count calls use the
+  // violators form of the check, which collects every violating
+  // pin (the count argument of that form is not a cap), so the
+  // count is the full count, not a truncated one.
+  Result<ElectricalCheck> MaxTransition() {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      const sta::Pin* pin = nullptr;
+      sta::Slew slew = 0.0F;
+      float slack = 0.0F;
+      float limit = 0.0F;
+      sta->maxSlewCheck(pin, slew, slack, limit);
+      ElectricalCheck check;
+      check.violation_count = sta->maxSlewViolationCount();
+      if (pin != nullptr) {
+        check.has_limit = true;
+        check.worst_pin = sta->network()->pathName(pin);
+        check.worst_value = ToNs(slew);
+        check.worst_limit = ToNs(limit);
+        check.worst_slack = ToNs(slack);
+      }
+      return check;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
+  Result<ElectricalCheck> MaxCapacitance() {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      const sta::Pin* pin = nullptr;
+      float capacitance = 0.0F;
+      float slack = 0.0F;
+      float limit = 0.0F;
+      sta->maxCapacitanceCheck(pin, capacitance, slack, limit);
+      ElectricalCheck check;
+      check.violation_count = sta->maxCapacitanceViolationCount();
+      if (pin != nullptr) {
+        check.has_limit = true;
+        check.worst_pin = sta->network()->pathName(pin);
+        check.worst_value = ToPf(capacitance);
+        check.worst_limit = ToPf(limit);
+        check.worst_slack = ToPf(slack);
+      }
+      return check;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
+  Result<ElectricalCheck> MaxFanout() {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      const sta::Pin* pin = nullptr;
+      float fanout = 0.0F;
+      float limit = 0.0F;
+      float slack = 0.0F;
+      const sta::Mode* mode = nullptr;
+      sta->maxFanoutMinSlackPin(sta->modes(), pin, fanout, limit, slack,
+                                mode);
+      ElectricalCheck check;
+      check.violation_count =
+          sta->fanoutViolationCount(sta::MinMax::max(), sta->modes());
+      if (pin != nullptr) {
+        check.has_limit = true;
+        check.worst_pin = sta->network()->pathName(pin);
+        check.worst_value = static_cast<double>(fanout);
+        check.worst_limit = static_cast<double>(limit);
+        check.worst_slack = static_cast<double>(slack);
+      }
+      return check;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
   Status Ready() const {
     if (sta == nullptr) {
       return Status::Error(
@@ -377,6 +466,18 @@ Result<std::vector<EndpointSlack>> StaEngine::ViolatingEndpoints(
 Result<std::vector<PathPoint>> StaEngine::WorstPath(
     CheckKind kind, const std::string& endpoint_pin) {
   return impl_->WorstPath(kind == CheckKind::kHold, endpoint_pin);
+}
+
+Result<ElectricalCheck> StaEngine::MaxTransitionCheck() {
+  return impl_->MaxTransition();
+}
+
+Result<ElectricalCheck> StaEngine::MaxCapacitanceCheck() {
+  return impl_->MaxCapacitance();
+}
+
+Result<ElectricalCheck> StaEngine::MaxFanoutCheck() {
+  return impl_->MaxFanout();
 }
 
 }  // namespace eos::analysis

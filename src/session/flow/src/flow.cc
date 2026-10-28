@@ -32,6 +32,19 @@ const char* const kJudgedMetrics[] = {
     "total_negative_hold_slack_ns",
 };
 
+// The electrical violating-pin counts (unit F5). The gate
+// requires each count present in a scene to be zero. A scene
+// that does not carry a count is not failed for its absence:
+// the timing service emits all three counts on every scene it
+// produces, so real closure scenes always carry them, and a
+// hand-built scene without them is gated on timing alone, as
+// before F5.
+const char* const kElectricalCounts[] = {
+    "max_transition_violations",
+    "max_capacitance_violations",
+    "max_fanout_violations",
+};
+
 Status Invalid(const std::string& message) {
   return Status::Error(ErrorCode::kInvalidArgument, message);
 }
@@ -60,6 +73,14 @@ std::string FirstViolation(
         return "scene " + scene.scenario.name + " metric " + metric_name +
                " is " + std::to_string(metric->second.value) +
                " ns, below the gate at 0 ns";
+      }
+    }
+    for (const char* count_name : kElectricalCounts) {
+      const auto count = scene.metrics.find(count_name);
+      if (count != scene.metrics.end() && count->second.value > 0.5) {
+        return "scene " + scene.scenario.name + " metric " + count_name +
+               " is " + std::to_string(count->second.value) +
+               " violating pins, above the gate at 0";
       }
     }
   }
