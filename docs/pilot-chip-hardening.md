@@ -275,3 +275,186 @@ Unit 3.5 assembles the Phase 3 exit report against the plan's Section
 17 checklist. The gated remainder (checklist items 1, 8, 9, 10) stays
 exactly as recorded in Section 8: documented, not performed, awaiting
 a separate decision, with TTSKY26d closing 2026-11-30.
+
+## 12. Addendum, fix track unit F0: the slew and fanout fix (P3-5)
+
+This addendum is the evidence record for unit F0 of the post-Phase-3
+fix track. It re-hardens the pilot with the changes below, at the
+same pins as unit 3.4 (LibreLane 3.0.14 in its official devshell,
+PDK open_pdks `8afc8346a57fe1ab7934ba5a6056ea8b43078e71`, the GDS
+action's own invocation of LibreLane on `src/config_merged.json`),
+and re-runs the full local verification chain of Sections 4 to 7.
+The pilot tree stays local with zero remotes and was not published;
+nothing was submitted, purchased or licensed in this unit either.
+Sections 1 to 11 stand as the record of the unit 3.4 run; this
+addendum supersedes their quality-of-results numbers and corrects
+one attribution, as follows.
+
+### 12.1 A correction to Section 5's attribution
+
+Section 5 attributes the max slew violations to "the reset
+distribution net driven from `rst_n`". Re-reading the unit 3.4
+run's own post-route STA violator list (`report_check_types
+-max_slew -max_cap -max_fanout -violators`, nom_ss_100C_1v60)
+shows that attribution was wrong. None of the 167 violating pins
+is a reset pin. The violators are the load pins of 15 buffer
+groups inserted by OpenROAD `repair_design` after global
+placement (instances named `fanout12` to `fanout35`, all
+`sky130_fd_sc_hd__clkdlybuf4s25_1`, a weak clock delay buffer),
+each driving about 10 loads at output slews between 0.758 ns and
+1.196 ns against the 0.75 ns limit. The nets they buffer are the
+design's control distribution: the gcd control outputs
+(`b_mux_sel`, the `a_mux_sel` and register-enable decodes) and
+the wrapper's request-load decode, whose loads are the datapath
+mux select and gating pins. The reset net itself, after the same
+repair pass buffered it, measured 0.200 ns slew at the flop
+`RESET_B` pins in that report: clean. The 11 tt-corner violators
+are one of the same groups (the wrapper request-load decode net,
+1.196 ns at ss and 0.761 ns at tt). The slew problem was
+therefore not a reset problem; it was high-fanout control nets
+buffered at placement time, from estimated parasitics, with a
+buffer cell too weak for the routed loads at the slow corner.
+
+### 12.2 The changes (pilot local commits on top of `2cfda96`)
+
+Pilot HEAD is now `88b35c43902b93932cad37bfdf00ba56f885bf31`.
+`src/gcd.v` is untouched in this unit (last changed in `2cfda96`).
+
+- Wrapper reset buffering, in `src/project.v` (SHA-256
+  `94ad09e93b5ca3cd501cb77a6f2eaab91d4b5759ca4a6613034712b2d67a8477`):
+  the gcd core reset is no longer the combinational `~rst_n`.
+  A two-flop reset synchronizer asserts the core reset
+  asynchronously with `rst_n` and releases it synchronously two
+  clocks after `rst_n` rises, so the core reset distribution is
+  driven by one registered output inside the tile. The core
+  reset is synchronous, so the release delay is functionally
+  invisible (the wrapper itself resets asynchronously and
+  cannot issue a request in that window); the RTL cocotb result
+  below is identical to unit 3.4's, including simulated time.
+- Flow configuration, in `src/config.json` (SHA-256
+  `5e0c779928f32a529595c63442d276056d553edcd09649b03f0093f7631415c2`),
+  four variables, each commented in the file:
+  `SYNTH_ABC_BUFFERING` true (ABC buffers high-fanout nets
+  during mapping and sizes gates; both were off in the unit 3.4
+  configuration); `MAX_FANOUT_CONSTRAINT` 6 (the flow default
+  is 10), so synthesis and ABC split control nets into smaller
+  groups; `RUN_POST_GRT_DESIGN_REPAIR` true, so design repair
+  runs a second time after global routing, where parasitics are
+  realistic rather than placement estimates; and
+  `DESIGN_REPAIR_MAX_SLEW_PCT` 50 with
+  `GRT_DESIGN_REPAIR_MAX_SLEW_PCT` 50 (defaults 20 and 10), so
+  both repair passes target half the liberty slew limit,
+  leaving headroom for the gap between repair-stage estimates
+  and the final extracted SPEF.
+- One lever was tried and dropped: `CTS_MAX_CAP` 0.03 pF
+  reached the CTS characterization call but left the clock
+  tree unchanged (Section 12.5). It is not in the final
+  configuration.
+
+An intermediate hardening with the synchronizer, ABC buffering,
+post-GRT repair at the default margins and the CTS cap measured
+max slew 18 at ss (11 at min_ss) and 0 at tt, down from 167 and
+11: the residuals were one `buf_1` group on `b_mux_sel` at
+1.040 ns and one wrapper decode net at 0.755 ns. The final
+configuration above (fanout constraint 6, slew margins 50)
+clears both. The final configuration was hardened once, end to
+end, from a clean run directory; every number below is from
+that run.
+
+### 12.3 Quality of results (final run, compared with unit 3.4)
+
+| Metric | Unit 3.4 | Unit F0 |
+|---|---|---|
+| Flow errors | 0 | 0 |
+| Die area | 17,954.7 um2 | 17,954.7 um2 (unchanged) |
+| Core area | 16,493.28 um2 | 16,493.3 um2 |
+| Instances, total | 3,237 (659 logic and other, 225 tap, 2,353 fill) | 3,084 (787 logic and other, 225 tap, 2,072 fill) |
+| Instance utilization (metrics) | 0.5093 | 0.5750 |
+| tt_tool routing summary | utilisation 41.043 %, wire length 16,665 um | utilisation 44.204 %, wire length 17,950 um |
+| Synthesis chip area (Yosys) | 5,885.64 um2, 48.81 % sequential | 6,511.24 um2, 44.93 % sequential |
+| Setup worst slack, 9 corners | +7.7016 ns (max_ss_100C_1v60) | +11.2696 ns (max_ss_100C_1v60) |
+| Hold worst slack, 9 corners | +0.1036 ns | +0.1074 ns (min_ff_n40C_1v95) |
+| Setup or hold violations | 0 in all corners | 0 in all corners |
+| Total power (nom) | 5.196e-4 W | 8.852e-4 W (internal 7.158e-4, switching 1.694e-4, leakage 1.91e-8) |
+| Final route DRC errors | 0 | 0 |
+| Total vias | 4,452 | 4,984 |
+
+Physical verification inside the flow, re-measured: Magic DRC 0
+errors; LVS clean, zero on every difference and unmatched
+counter; antenna 0 violating nets and 0 violating pins; power
+grid 0 violations on VPWR and VGND. Lint: 0 errors and the same
+14 warnings as unit 3.4.
+
+Raw per-corner STA violation counts (post-route, all nine
+corners): max slew 0 in every corner (unit 3.4: 167 at ss, 11
+at tt); max cap 0 in every corner (unchanged); max fanout 1 in
+every corner (unchanged count, the single residual named in
+Section 12.5).
+
+### 12.4 Functional verification and precheck, re-run
+
+- RTL simulation (Icarus Verilog 13.0, cocotb 2.1.0): PASS,
+  TESTS=1 PASS=1 FAIL=0 SKIP=0, simulated time 60,600 ns,
+  identical to unit 3.4.
+- Gate-level simulation against the new hardened netlist, same
+  method as Section 4: PASS, TESTS=1 PASS=1 FAIL=0 SKIP=0, and
+  results.xml contains no failure or error element (errors=0,
+  failures=0).
+- Tiny Tapeout precheck, same method and pins as Section 6
+  (tt-support-tools `01d5d281`, PDK `0536d02d`, Magic 8.3.623
+  and KLayout 0.30.7 from the devshell): precheck passed, all
+  15 checks for sky130A green.
+- The tt_tool post-flow steps all exit 0: `--print-warnings`
+  (no warnings listed), `--print-stats`, `--print-cell-category`
+  (787 cells excluding fill and tap, agreeing with the instance
+  counts above), `--create-tt-submission` and `--create-png`.
+  Docs checks: `--check-docs` passed and `--create-pdf`
+  produced the datasheet (hash in Section 12.6) with typst
+  0.13.1. The run's `pdk.json` and `commit_id.json` records
+  were again written by hand in tt_tool's exact schema, for the
+  reason given in Section 5, now naming pilot HEAD `88b35c4`.
+
+### 12.5 The named residual: one max fanout violation
+
+The single remaining raw violation is the clock tree root,
+unchanged in structure from unit 3.4: `clkbuf_0_clk/X`
+(`sky130_fd_sc_hd__clkbuf_16`) drives 16 `clkbuf_8` leaf
+buffers, 16 against the liberty max fanout of 10 that the
+sky130 library places on every output pin. Its measured load
+is 0.1041 pF with an output slew of 0.1818 ns at nom_ss, far
+inside the electrical limits; the violation is against the
+generic pin fanout count, not against a slew or capacitance
+limit. TritonCTS as configured by this flow does not enforce a
+per-buffer fanout count. In the final tree the levels below
+the root are clean (16 first-level `clkbuf_8` buffers, 32
+second-level buffers, 130 clock endpoints, maximum leaf
+fanout 5); only the root count is 16, and no setting this flow
+exposes caps the first level at 10 (the characterization cap
+was tried, Section 12.2, and left the tree unchanged). The
+residual is therefore reported, not rounded away: one pin,
+named, with its measured electrical context.
+
+### 12.6 Artifacts (new submission package)
+
+SHA-256 of the submission package contents (the GDS hash is
+identical in the run's final views, as expected for a copy):
+
+| Artifact | SHA-256 |
+|---|---|
+| tt_um_mtmoreira_gcd.gds (1,745,744 bytes) | `c85361e45bdb49c0758309c36c36df8a242b0b77563e93afebc0312ea7b24c1d` |
+| tt_um_mtmoreira_gcd.oas | `326dc82d3316967562c074bd0592d0633519ece386cf78bc01f6f9ec9f42fa2e` |
+| tt_um_mtmoreira_gcd.lef | `0e3b4c173b05522cb270d54c0ba0529c91323dee96bad3404b8f0b0a040d1059` |
+| Gate-level netlist (.v) | `002315bd8236158b73aa7e22fffee243527c319cd32a38352effe7c7b4dcba02` |
+| Nom-corner SPEF | `a0da248b950eb8f25da7dbd3363e48a4197ac4fa193a64982789038fb741881e` |
+| Final metrics.json | `110e774f29fbd5480cc44fa467aaf45c7b9253f924e2359f7129dcdc48590193` |
+| datasheet.pdf (41,451 bytes) | `9d77b2d9d515e399f0dade5cfb4b9f5905ac99b00053c87c0a35f91c6eaed0d5` |
+
+### 12.7 Verdict on P3-5
+
+As measured on the final run: the max slew half of P3-5 is
+closed (zero violations in all nine corners, from 167 at ss
+and 11 at tt). P3-5 as a whole is reported still open on the
+single named residual of Section 12.5: a max fanout count of
+1, the clock tree root pin, electrically comfortable and
+structurally explained. No stronger claim is made, and the
+route's flow still does not gate either metric.
