@@ -1,4 +1,5 @@
-# Sky130 technology package manifest (unit 3.0, Phase 3).
+# Sky130 technology package manifest (unit 3.0, Phase 3;
+# multi-corner Liberty extension unit F1, fix track).
 # Formalizes the plan Section 11 package for sky130hd as data:
 # every collateral item EOS or the reference flow consumes, with
 # an immutable version identifier and a content hash. Payloads are
@@ -6,7 +7,7 @@
 # computed on 2026-10-26 from the local ORFS v3.0 platform tree
 # (flow/platforms/sky130hd) pinned by the Phase 0 baseline.
 name: sky130hd
-package_version: "3.0.1"
+package_version: "3.1.0"
 support_tier: experimental
 pdk:
   source: open_pdks (fossi-foundation/open-pdks)
@@ -25,6 +26,114 @@ collateral:
     version: orfs-v3.0-181e91337761
     sha256: ec0e1067a35c8bf20b11e58d1e8ac53326067e4dac84a125cc1b917a3518d0d9
     required: true
+  - id: liberty_ss_100c_1v60
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ss_100C_1v60.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 9b24f0db3967ac67b4cae1f74bb480fd47922d18d0ed577e3c121739b412c361
+    required: false
+  - id: liberty_ss_100c_1v40
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ss_100C_1v40.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 88c8ce95b6a7f333bd9e618fc765c3005fbeccfca2727226bd821c0d16fcaac8
+    required: false
+  - id: liberty_ss_n40c_1v60
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ss_n40C_1v60.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 23cba893b985a950a7951e3f29ae66ae6a639aaef75c1478e2306fb68d4a7ee5
+    required: false
+  - id: liberty_ss_n40c_1v76
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ss_n40C_1v76.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: f4f16d4f7040623afb60d0480a035e4128c5c1212361ae3bd13c3a52d9692a84
+    required: false
+  - id: liberty_ss_n40c_1v44
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ss_n40C_1v44.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 88814187f8226bb6e7ad394a1afef161eb1c4006ed1f095cc31ab0da7dae1f0f
+    required: false
+  - id: liberty_ss_n40c_1v40
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ss_n40C_1v40.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 2c6c61b165c313a6eb18d805431f981cebf9cf138cec39a67d01ea99f63a4717
+    required: false
+  - id: liberty_ss_n40c_1v35
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ss_n40C_1v35.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 8fd5aefd2053feef0a9bd3a5a972680dd77ddb8dda744836611656f37f969855
+    required: false
+  - id: liberty_ss_n40c_1v28
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ss_n40C_1v28.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: afd8201328f73996b7c80bf13909674ba7b483ec413dea3fca74831cec712578
+    required: false
+  - id: liberty_ff_n40c_1v95
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ff_n40C_1v95.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: fb61d91c55a7f85b1989e8149d040b13ba5e7f5478f5bf0c3c16c5da30720139
+    required: false
+  - id: liberty_ff_n40c_1v76
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ff_n40C_1v76.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 0f5b7ceef23114c3834870f86c2f90ea24d597622fcd5abd2916b1fb604e8a26
+    required: false
+  - id: liberty_ff_n40c_1v65
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ff_n40C_1v65.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: dd777cb159bf2fc853773d74a3c3e8269b73869d25aae49d0f80f117df9631ee
+    required: false
+  - id: liberty_ff_n40c_1v56
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ff_n40C_1v56.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: d64f38f3e67f8adab818531901385dbd29c6a4805e6166f7166bcc3e9370ef88
+    required: false
+  - id: liberty_ff_100c_1v95
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ff_100C_1v95.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 15c9ccefec536ff35d694314af5812e7c03b4e5a356ec8ea28f2e40bbeec04e7
+    required: false
+  - id: liberty_ff_100c_1v65
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ff_100C_1v65.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 913e67fc551be7e4e97fc031f3e72e5ef3251438ceeb44753f73b68df58f5650
+    required: false
+  - id: liberty_tt_100c_1v80
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_100C_1v80.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 7c6b9fc62d7e83b8317cdca883d79107d8f2ff1061b04519fda7d3088560015b
+    required: false
+  - id: liberty_tt_025c_1v80_openpdks
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 8e78e14442062dba34d414fca6490b2f6b96038d4510d1438ca44fee31487135
+    required: false
+  - id: liberty_ss_n40c_1v60_ccsnoise
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ss_n40C_1v60_ccsnoise.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 699555a07af7b05393dd7cc2b3f5cfdbe4ddebc4efbf2b1a06ac68950c78c90f
+    required: false
+  - id: liberty_ff_n40c_1v95_ccsnoise
+    kind: liberty
+    path: libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__ff_n40C_1v95_ccsnoise.lib
+    version: open_pdks-8afc8346a57fe1ab7934ba5a6056ea8b43078e71
+    sha256: 425315ca7a49debcb1c715daf6e5e5a27bb78587cac6f3b358b1fe114c787132
+    required: false
   - id: liberty_dummy_io
     kind: liberty
     path: lib/sky130_dummy_io.lib
@@ -131,10 +240,91 @@ scenarios:
     pvt_corner: tt_025C_1v80
     rc_corner: typical (rcx_patterns.rules)
     parasitics: extracted
+  - name: func_ss_100c_1v60_estimate
+    pvt_corner: ss_100C_1v60
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ss_100c_1v40_estimate
+    pvt_corner: ss_100C_1v40
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ss_n40c_1v60_estimate
+    pvt_corner: ss_n40C_1v60
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ss_n40c_1v76_estimate
+    pvt_corner: ss_n40C_1v76
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ss_n40c_1v44_estimate
+    pvt_corner: ss_n40C_1v44
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ss_n40c_1v40_estimate
+    pvt_corner: ss_n40C_1v40
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ss_n40c_1v35_estimate
+    pvt_corner: ss_n40C_1v35
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ss_n40c_1v28_estimate
+    pvt_corner: ss_n40C_1v28
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ff_n40c_1v95_estimate
+    pvt_corner: ff_n40C_1v95
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ff_n40c_1v76_estimate
+    pvt_corner: ff_n40C_1v76
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ff_n40c_1v65_estimate
+    pvt_corner: ff_n40C_1v65
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ff_n40c_1v56_estimate
+    pvt_corner: ff_n40C_1v56
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ff_100c_1v95_estimate
+    pvt_corner: ff_100C_1v95
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ff_100c_1v65_estimate
+    pvt_corner: ff_100C_1v65
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_tt_100c_1v80_estimate
+    pvt_corner: tt_100C_1v80
+    rc_corner: typical (setRC.tcl / rcx_patterns.rules)
+    parasitics: estimate
+  - name: func_ss_100c_1v60_extracted
+    pvt_corner: ss_100C_1v60
+    rc_corner: typical (rcx_patterns.rules)
+    parasitics: extracted
+  - name: func_ff_n40c_1v95_extracted
+    pvt_corner: ff_n40C_1v95
+    rc_corner: typical (rcx_patterns.rules)
+    parasitics: extracted
 known_gaps:
-  - Only the tt_025C_1v80 Liberty corner ships in the ORFS v3.0
-    sky130hd platform; ss and ff corners are absent from this
-    collateral set (findings F4).
+  - The ORFS v3.0 sky130hd platform ships only the tt_025C_1v80
+    Liberty corner (findings F4); unit F1 records the additional
+    corners from the pinned open_pdks build (see
+    docs/sky130-package-multicorner.md). The RC collateral is
+    still typical only. No ss or ff RC corner ships in either
+    pinned tree, so every scenario pairs its PVT corner with
+    the typical RC corner.
+  - The two pinned tt_025C_1v80 Liberty files (ORFS platform and
+    open_pdks build) are not byte-identical and disagree on
+    pg_type for 850 of 1729 pg pins (finding M3 in the unit F1
+    record); both are recorded with distinct hashes and are
+    never substituted for each other.
+  - The ccsnoise Liberty variants are recorded as collateral
+    but define no scenario. They carry noise models for the
+    ss_n40C_1v60 and ff_n40C_1v95 operating conditions, not
+    separate PVT corners.
   - The cell CDL carries the macro_sparecell / conb_1 pin-count
     defect recorded as finding F1; it is recorded, never patched.
 decks: {}
