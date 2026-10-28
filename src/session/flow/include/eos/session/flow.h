@@ -78,10 +78,16 @@
 // timing service reports: in every required scene, worst setup
 // slack at or above zero, setup total negative slack zero, worst
 // hold slack at or above zero and hold total negative slack
-// zero. The plan's gate also names max transition, capacitance
-// and fanout violations; the facade exposes no such metrics in
-// this version, so the gate covers the four reported metrics and
-// this header says so rather than implying electrical checks ran.
+// zero. Since unit F5 (the bounded part of P2-4) the gate also
+// covers the plan's electrical checks: the timing service
+// reports max transition, max capacitance and max fanout
+// violating-pin counts per scene, and the gate requires every
+// count a scene carries to be zero. A scene that carries no
+// electrical counts is gated on the four timing metrics alone
+// (the service emits the counts on every scene it produces, so
+// real closure scenes always carry them). Power and area are
+// not in the gate, and this header says so rather than implying
+// they are judged.
 //
 // Ledger and reports: every accepted iteration is one ledger
 // transaction, begun and committed by this service around the
@@ -204,7 +210,8 @@ struct ClosureOutcome {
 };
 
 // True when every scene meets the timing gate over the four
-// reported metrics (see the banner). An empty scene list is not
+// reported timing metrics and every electrical violating-pin
+// count it carries (see the banner). An empty scene list is not
 // closed: there is nothing the gate was checked over.
 bool TimingGateMet(const std::vector<analysis::SceneResult>& scenes);
 

@@ -28,6 +28,22 @@ const char* const kJudgedMetrics[] = {
 // difference at this scale is not a design change.
 constexpr double kEpsilonNs = 1e-9;
 
+// The electrical checks (unit F5), judged after the timing
+// metrics within each scene, in this order. Each entry names
+// the violating-pin count metric, the worst-value metric it
+// belongs to, and the epsilon for the worst value in that
+// metric's own unit (float-reporting noise, as above).
+struct ElectricalMetric {
+  const char* count_name;
+  const char* value_name;
+  double epsilon;
+};
+const ElectricalMetric kElectricalMetrics[] = {
+    {"max_transition_violations", "max_transition_ns", 1e-9},
+    {"max_capacitance_violations", "max_capacitance_pf", 1e-9},
+    {"max_fanout_violations", "max_fanout", 1e-9},
+};
+
 Status Invalid(const std::string& message) {
   return Status::Error(ErrorCode::kInvalidArgument, message);
 }
@@ -119,6 +135,52 @@ Result<EcoVerdict> EvaluateAllScenes(
               " ns -> " + std::to_string(after_value) +
               " ns, and no scene regressed";
         }
+      }
+    }
+    // Electrical judging (unit F5), after the timing metrics of
+    // this scene: a candidate regresses when, for any of the
+    // three checks, the after side carries more violating pins
+    // than the before side, or the same nonzero number of
+    // violating pins with a worst value worse than the before
+    // side's by more than the check's epsilon. A check present
+    // on only one side, or on neither, is not judged here: the
+    // timing service emits all six electrical metrics on every
+    // scene it produces, so real before and after analyses
+    // always carry them on both sides, and a hand-built scene
+    // without them is judged on timing alone, as before F5.
+    // An electrical improvement never by itself accepts a
+    // candidate: acceptance still requires a timing
+    // improvement, per the header.
+    for (const ElectricalMetric& electrical : kElectricalMetrics) {
+      const auto b_count = before_scene.metrics.find(electrical.count_name);
+      const auto a_count = after_scene->metrics.find(electrical.count_name);
+      const auto b_value = before_scene.metrics.find(electrical.value_name);
+      const auto a_value = after_scene->metrics.find(electrical.value_name);
+      if (b_count == before_scene.metrics.end() ||
+          a_count == after_scene->metrics.end() ||
+          b_value == before_scene.metrics.end() ||
+          a_value == after_scene->metrics.end()) {
+        continue;
+      }
+      const bool regressed =
+          a_count->second.value > b_count->second.value + 0.5 ||
+          (a_count->second.value == b_count->second.value &&
+           a_count->second.value > 0.5 &&
+           a_value->second.value >
+               b_value->second.value + electrical.epsilon);
+      if (regressed && !verdict.regressed) {
+        verdict.regressed = true;
+        verdict.scene_name = before_scene.scenario.name;
+        verdict.metric_name = electrical.count_name;
+        verdict.reason =
+            "scene " + before_scene.scenario.name + " metric " +
+            electrical.count_name +
+            " regressed: " + std::to_string(b_count->second.value) +
+            " -> " + std::to_string(a_count->second.value) +
+            " violating pins, worst " + electrical.value_name + " " +
+            std::to_string(b_value->second.value) + " -> " +
+            std::to_string(a_value->second.value) + " " +
+            a_value->second.unit;
       }
     }
   }

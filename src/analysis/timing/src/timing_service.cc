@@ -110,6 +110,32 @@ Result<SceneResult> AnalyzeScene(const VerilogDesign& design,
   status = add("total_negative_hold_slack_ns",
                &StaEngine::TotalNegativeHoldSlackNs);
   if (!status.ok()) return status;
+  // The electrical checks (unit F5): worst value in the check's
+  // own unit and the violating-pin count, per scene.
+  const auto add_electrical =
+      [&result, &engine, &scene](
+          const char* value_name, const char* unit,
+          const char* count_name,
+          Result<ElectricalCheck> (StaEngine::*query)()) -> Status {
+    Result<ElectricalCheck> value = (engine.*query)();
+    if (!value.ok()) return SceneError(scene, value.status());
+    result.metrics[value_name] = TimingMetric{value.value().worst_value, unit};
+    result.metrics[count_name] =
+        TimingMetric{static_cast<double>(value.value().violation_count),
+                     "pins"};
+    return Status::Ok();
+  };
+  status = add_electrical("max_transition_ns", "ns",
+                          "max_transition_violations",
+                          &StaEngine::MaxTransitionCheck);
+  if (!status.ok()) return status;
+  status = add_electrical("max_capacitance_pf", "pF",
+                          "max_capacitance_violations",
+                          &StaEngine::MaxCapacitanceCheck);
+  if (!status.ok()) return status;
+  status = add_electrical("max_fanout", "fanout", "max_fanout_violations",
+                          &StaEngine::MaxFanoutCheck);
+  if (!status.ok()) return status;
   const auto setup_endpoints = engine.ViolatingEndpoints(CheckKind::kSetup);
   if (!setup_endpoints.ok()) return SceneError(scene, setup_endpoints.status());
   result.setup_violating_endpoints = setup_endpoints.value();

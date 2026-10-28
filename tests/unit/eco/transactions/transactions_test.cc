@@ -390,6 +390,70 @@ TEST(EcoVerdict, NoImprovementIsNotAccepted) {
   EXPECT_FALSE(verdict.value().improved);
 }
 
+// A scene with electrical metrics (unit F5): the four timing
+// metrics of MakeScene plus one electrical check (transition:
+// violating-pin count and worst value in ns). The other two
+// checks are clean (count 0) on both sides of every test below.
+analysis::SceneResult MakeElectricalScene(const std::string& name,
+                                          double setup, double setup_tns,
+                                          double hold, double hold_tns,
+                                          double transition_violations,
+                                          double max_transition_ns) {
+  analysis::SceneResult scene =
+      MakeScene(name, setup, setup_tns, hold, hold_tns);
+  scene.metrics["max_transition_ns"] = {max_transition_ns, "ns"};
+  scene.metrics["max_transition_violations"] = {transition_violations,
+                                                "pins"};
+  scene.metrics["max_capacitance_pf"] = {0.0, "pF"};
+  scene.metrics["max_capacitance_violations"] = {0.0, "pins"};
+  scene.metrics["max_fanout"] = {0.0, "fanout"};
+  scene.metrics["max_fanout_violations"] = {0.0, "pins"};
+  return scene;
+}
+
+TEST(EcoVerdict, NewElectricalViolationRejectsATimingImprovement) {
+  const auto verdict = EvaluateAllScenes(
+      {MakeElectricalScene("func_tt", -0.1, -0.1, 0.5, 0.0, 0.0, 0.03)},
+      {MakeElectricalScene("func_tt", 0.5, 0.0, 0.5, 0.0, 1.0, 0.05)});
+  ASSERT_TRUE(verdict.ok()) << verdict.status().message();
+  EXPECT_FALSE(verdict.value().accepted);
+  EXPECT_TRUE(verdict.value().regressed);
+  EXPECT_EQ(verdict.value().scene_name, "func_tt");
+  EXPECT_EQ(verdict.value().metric_name, "max_transition_violations");
+}
+
+TEST(EcoVerdict, WorseningAnExistingElectricalViolationIsARegression) {
+  const auto verdict = EvaluateAllScenes(
+      {MakeElectricalScene("func_tt", -0.1, -0.1, 0.5, 0.0, 1.0, 0.05)},
+      {MakeElectricalScene("func_tt", 0.5, 0.0, 0.5, 0.0, 1.0, 0.08)});
+  ASSERT_TRUE(verdict.ok());
+  EXPECT_FALSE(verdict.value().accepted);
+  EXPECT_TRUE(verdict.value().regressed);
+  EXPECT_EQ(verdict.value().metric_name, "max_transition_violations");
+}
+
+TEST(EcoVerdict, UnchangedBaselineViolationDoesNotBlockATimingFix) {
+  // The baseline violation persists at the same count and the
+  // same worst value: nothing was introduced beyond the
+  // recorded baseline, so the timing improvement is accepted.
+  const auto verdict = EvaluateAllScenes(
+      {MakeElectricalScene("func_tt", -0.1, -0.1, 0.5, 0.0, 1.0, 0.05)},
+      {MakeElectricalScene("func_tt", 0.5, 0.0, 0.5, 0.0, 1.0, 0.05)});
+  ASSERT_TRUE(verdict.ok());
+  EXPECT_TRUE(verdict.value().accepted);
+  EXPECT_FALSE(verdict.value().regressed);
+}
+
+TEST(EcoVerdict, ElectricalImprovementAloneIsNotAccepted) {
+  const auto verdict = EvaluateAllScenes(
+      {MakeElectricalScene("func_tt", 0.5, 0.0, 0.5, 0.0, 1.0, 0.05)},
+      {MakeElectricalScene("func_tt", 0.5, 0.0, 0.5, 0.0, 0.0, 0.03)});
+  ASSERT_TRUE(verdict.ok());
+  EXPECT_FALSE(verdict.value().accepted);
+  EXPECT_FALSE(verdict.value().regressed);
+  EXPECT_FALSE(verdict.value().improved);
+}
+
 TEST(EcoVerdict, MismatchedScenesAndMetricsAreErrors) {
   const auto missing_scene = EvaluateAllScenes(
       {MakeScene("func_tt", 0.5, 0.0, 0.5, 0.0)},

@@ -589,6 +589,18 @@ TEST(TimingGate, GateNeedsEveryMetricCleanInEveryScene) {
   incomplete.scenario.name = "func_tt";
   incomplete.metrics["worst_slack_ns"] = {0.5, "ns"};
   EXPECT_FALSE(TimingGateMet({incomplete}));
+
+  // Unit F5: a scene whose timing is clean but which carries a
+  // nonzero electrical violating-pin count does not meet the
+  // gate; the same scene with zero counts does.
+  analysis::SceneResult electrical = scene(0.5, 0.0, 0.4, 0.0);
+  electrical.metrics["max_transition_ns"] = {0.05, "ns"};
+  electrical.metrics["max_transition_violations"] = {1.0, "pins"};
+  electrical.metrics["max_capacitance_violations"] = {0.0, "pins"};
+  electrical.metrics["max_fanout_violations"] = {0.0, "pins"};
+  EXPECT_FALSE(TimingGateMet({electrical}));
+  electrical.metrics["max_transition_violations"] = {0.0, "pins"};
+  EXPECT_TRUE(TimingGateMet({electrical}));
 }
 
 TEST(ClosureLoop, SizingClosesTheViolationAndRecordsTheLedger) {

@@ -113,6 +113,94 @@ const char kLiberty[] = R"LIB(library (eos_fixture) {
 }
 )LIB";
 
+const char kLibertyElectrical[] = R"LIB(library (eos_fixture_timing_elec) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      fanout_load : 2.0;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (scalar) { values ("0.05"); }
+        fall_constraint (scalar) { values ("0.05"); }
+      }
+    }
+    pin (CK) {
+      direction : input;
+      capacitance : 0.001;
+      clock : true;
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+
+  cell (BUF) {
+    area : 2.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      max_transition : 0.04;
+      max_capacitance : 0.001;
+      max_fanout : 1.0;
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
 const char kVerilog[] = R"V(module top (clk, d, q);
   input clk, d;
   output q;
@@ -334,6 +422,56 @@ TEST(TimingService, TightClockShowsViolationPerScene) {
   EXPECT_NEAR(tight.setup_violating_endpoints[0].slack_ns, -0.1,
               1e-6 * 0.1 + 1e-7);
   EXPECT_TRUE(tight.hold_violating_endpoints.empty());
+}
+
+
+TEST(TimingService, ElectricalMetricsAreReportedPerScene) {
+  // The electrical fixture (unit F5): the buffer output violates
+  // all three limits by construction (see the STA facade tests),
+  // so the scene must carry the worst values and a count of 1
+  // for each check, in the check's own unit.
+  TempDir dir;
+  const std::string liberty = dir.Write("cells_elec.lib", kLibertyElectrical);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  const auto results = service.Analyze(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)});
+  ASSERT_TRUE(results.ok()) << results.status().message();
+  ASSERT_EQ(results.value().size(), 1u);
+  const SceneResult& scene = results.value()[0];
+  const auto metric = [&scene](const std::string& name,
+                               const std::string& unit) {
+    const auto it = scene.metrics.find(name);
+    EXPECT_NE(it, scene.metrics.end()) << "missing metric " << name;
+    if (it == scene.metrics.end()) return 0.0;
+    EXPECT_EQ(it->second.unit, unit) << "metric " << name;
+    return it->second.value;
+  };
+  EXPECT_NEAR(metric("max_transition_ns", "ns"), 0.05, 1e-6);
+  EXPECT_NEAR(metric("max_transition_violations", "pins"), 1.0, 1e-9);
+  EXPECT_NEAR(metric("max_capacitance_pf", "pF"), 0.01, 1e-9);
+  EXPECT_NEAR(metric("max_capacitance_violations", "pins"), 1.0, 1e-9);
+  EXPECT_NEAR(metric("max_fanout", "fanout"), 2.0, 1e-9);
+  EXPECT_NEAR(metric("max_fanout_violations", "pins"), 1.0, 1e-9);
+}
+
+TEST(TimingService, ElectricalMetricsAreZeroWithoutLimits) {
+  // The plain fixture library carries no electrical limit: the
+  // metrics are present, with worst value 0 and count 0.
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  const auto results = service.Analyze(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)});
+  ASSERT_TRUE(results.ok()) << results.status().message();
+  const SceneResult& scene = results.value()[0];
+  EXPECT_EQ(scene.metrics.at("max_transition_violations").value, 0.0);
+  EXPECT_EQ(scene.metrics.at("max_capacitance_violations").value, 0.0);
+  EXPECT_EQ(scene.metrics.at("max_fanout_violations").value, 0.0);
+  EXPECT_EQ(scene.metrics.at("max_transition_ns").value, 0.0);
 }
 
 TEST(TimingService, OdbDesignAnalyzedThroughNetlist) {
