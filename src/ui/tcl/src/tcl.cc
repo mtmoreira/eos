@@ -7,6 +7,12 @@
 
 #ifdef EOS_HAS_TCL
 #include <tcl.h>
+
+#include <cerrno>
+#include <cstdlib>
+#include <unistd.h>
+
+#include "linenoise.h"
 #endif
 
 namespace eos::ui {
@@ -43,10 +49,48 @@ int CommandProc(ClientData client_data, Tcl_Interp* interp, int objc,
   return TCL_ERROR;
 }
 
+// The command registry the completion callback completes against.
+// linenoise takes a plain function pointer, so the callback reads
+// this file-static, set for the duration of the interactive loop.
+// Only one shell runs per process, and the loop is single-threaded.
+const CommandRegistry* g_completion_registry = nullptr;
+
+// Tab completion for ::eos:: command names. An empty or partial
+// namespace prefix completes to "eos::"; a partial command name
+// completes to every command it prefixes. linenoise replaces the
+// whole line with the completion, so completions carry the full
+// "eos::<name>" text. Option names are not completed: that is a
+// later step, once commands expose their options to the shell.
+void CompleteCommand(const char* buffer, linenoiseCompletions* completions) {
+  if (g_completion_registry == nullptr) return;
+  const std::string line = buffer;
+  const std::string marker = "eos::";
+  if (line.size() < marker.size() && marker.rfind(line, 0) == 0) {
+    linenoiseAddCompletion(completions, "eos::");
+    return;
+  }
+  if (line.rfind(marker, 0) != 0) return;
+  const std::string rest = line.substr(marker.size());
+  for (const std::string& name : g_completion_registry->Names()) {
+    if (name.rfind(rest, 0) == 0) {
+      linenoiseAddCompletion(completions, ("eos::" + name).c_str());
+    }
+  }
+}
+
+// The persistent history file, or empty when HOME is unset: history
+// then lives for the session only, and the shell never fails for it.
+std::string HistoryPath() {
+  const char* home = std::getenv("HOME");
+  if (home == nullptr || home[0] == '\0') return "";
+  return std::string(home) + "/.eos_history";
+}
+
 }  // namespace
 
 struct TclShell::Impl {
   Tcl_Interp* interp = nullptr;
+  const CommandRegistry* registry = nullptr;
   std::vector<std::unique_ptr<Binding>> bindings;
   ~Impl() {
     if (interp != nullptr) {
@@ -59,6 +103,7 @@ foundation::Result<std::unique_ptr<TclShell>> TclShell::Create(
     CommandRegistry& registry, CommandContext& context) {
   std::unique_ptr<TclShell> shell(new TclShell());
   shell->impl_ = std::make_unique<Impl>();
+  shell->impl_->registry = &registry;
   shell->impl_->interp = Tcl_CreateInterp();
   if (shell->impl_->interp == nullptr) {
     return foundation::Status::Error(foundation::ErrorCode::kIoError,
@@ -110,21 +155,45 @@ int TclShell::RunFiles(const std::vector<std::string>& files) {
 }
 
 int TclShell::RunInteractive() {
-  std::string line;
+  // Line editing, history and completion come from linenoise. On a
+  // terminal it prints the prompt itself and handles arrow keys,
+  // Ctrl-C (cancel the line, errno EAGAIN) and Ctrl-D on an empty
+  // line (end of input, errno ENOENT); on a pipe it reads lines
+  // plainly and prints no prompt, so piped runs keep working.
+  // History is a terminal-only feature: piped runs neither read
+  // nor write the history file.
+  const bool tty = isatty(STDIN_FILENO) != 0;
+  linenoiseSetCompletionCallback(&CompleteCommand);
+  linenoiseHistorySetMaxLen(1000);
+  const std::string history_path = tty ? HistoryPath() : "";
+  if (!history_path.empty()) {
+    linenoiseHistoryLoad(history_path.c_str());
+  }
+  g_completion_registry = impl_->registry;
   for (;;) {
-    std::printf("eos> ");
-    std::fflush(stdout);
-    if (!std::getline(std::cin, line)) {
+    errno = 0;
+    char* line = linenoise("eos> ");
+    if (line == nullptr) {
+      if (errno == EAGAIN) continue;
       std::printf("\n");
-      return 0;
+      break;
+    }
+    if (tty && line[0] != '\0') {
+      linenoiseHistoryAdd(line);
     }
     const foundation::Result<std::string> result = Eval(line);
+    linenoiseFree(line);
     if (!result.ok()) {
       std::fprintf(stderr, "error: %s\n", result.status().message().c_str());
     } else if (!result.value().empty()) {
       std::printf("%s\n", result.value().c_str());
     }
   }
+  if (!history_path.empty()) {
+    linenoiseHistorySave(history_path.c_str());
+  }
+  g_completion_registry = nullptr;
+  return 0;
 }
 
 #else  // EOS_HAS_TCL

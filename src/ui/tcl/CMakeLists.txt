@@ -2,7 +2,11 @@
 # When no Tcl development package is found, the module builds its
 # stub implementation instead: the shell API reports
 # kUnsupportedFeature rather than failing the build.
-add_library(eda_ui_tcl STATIC src/tcl.cc)
+# The vendored linenoise line editor is C, and the top-level project
+# is CXX-only, so this module enables C the same way the sta module
+# does for its vendored CUDD closure.
+enable_language(C)
+add_library(eda_ui_tcl STATIC src/tcl.cc src/linenoise.c)
 target_include_directories(eda_ui_tcl PUBLIC include)
 target_link_libraries(eda_ui_tcl PUBLIC eda_ui_registry)
 if(TCL_FOUND)

@@ -55,10 +55,11 @@ TEST(Registry, UnknownCommandIsAnInvalidCommandDiagnostic) {
 TEST(Registry, CoreSetIsComplete) {
   Shell shell;
   // The count is a contract: adding a command means updating it.
-  EXPECT_EQ(shell.registry.Names().size(), 37u);
+  EXPECT_EQ(shell.registry.Names().size(), 38u);
   EXPECT_NE(shell.registry.Find("create_design"), nullptr);
   EXPECT_NE(shell.registry.Find("restore"), nullptr);
   EXPECT_NE(shell.registry.Find("report_timing"), nullptr);
+  EXPECT_NE(shell.registry.Find("help"), nullptr);
 }
 
 TEST(CoreCommands, DesignLifecycleAndUnclosedDesignDiagnostic) {
@@ -1020,6 +1021,41 @@ TEST(CoreCommands, ReportTimingRejectsBadOptions) {
       shell.Run("report_timing", {"-to", "r2/D", "-max_paths", "2"}).ok);
   EXPECT_FALSE(shell.Run("report_timing", {"-max_paths", "0"}).ok);
   EXPECT_FALSE(shell.Run("report_timing", {"-path_type", "wide"}).ok);
+}
+
+TEST(CoreCommands, HelpListsAndDescribesCommands) {
+  Shell shell;
+  const CommandResult all = shell.Run("help", {});
+  ASSERT_TRUE(all.ok) << all.message;
+  EXPECT_NE(all.payload.find("report_timing"), std::string::npos);
+  EXPECT_NE(all.payload.find("-columns"), std::string::npos);
+  const CommandResult one = shell.Run("help", {"report_timing"});
+  ASSERT_TRUE(one.ok) << one.message;
+  EXPECT_NE(one.payload.find("report_timing [-delay_type"),
+            std::string::npos);
+  // The ::eos:: prefix is accepted and stripped.
+  const CommandResult prefixed =
+      shell.Run("help", {"eos::report_timing"});
+  ASSERT_TRUE(prefixed.ok) << prefixed.message;
+  EXPECT_EQ(prefixed.payload, one.payload);
+  const CommandResult unknown = shell.Run("help", {"bogus"});
+  EXPECT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidCommand);
+  EXPECT_FALSE(shell.Run("help", {"a", "b"}).ok);
+}
+
+TEST(CoreCommands, ReportTimingHelpFlags) {
+  Shell shell;
+  for (const char* flag : {"-help", "--help", "-h"}) {
+    const CommandResult help = shell.Run("report_timing", {flag});
+    ASSERT_TRUE(help.ok) << help.message;
+    EXPECT_NE(help.payload.find("-columns"), std::string::npos);
+    EXPECT_NE(help.payload.find("-path_type"), std::string::npos);
+  }
+  // A help flag wins over other arguments without running anything.
+  const CommandResult mixed =
+      shell.Run("report_timing", {"-delay_type", "sideways", "-help"});
+  ASSERT_TRUE(mixed.ok) << mixed.message;
 }
 
 TEST(CoreCommands, CloseTimingClosesTheImportedDesign) {

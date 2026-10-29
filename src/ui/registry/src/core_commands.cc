@@ -341,6 +341,14 @@ const ReportColumn kReportColumns[] = {
     {"incr", "Incr"}, {"arrival", "Arrival"},
 };
 
+// The report_timing usage line, shared by the command registration
+// and its -help output so the two can never drift apart.
+const char* kReportTimingUsage =
+    "report_timing [-delay_type max|min] [-max_paths N] [-to "
+    "<endpoint>] [-slack_lesser_than X] [-columns <list>] "
+    "[-path_type end|summary|full] [-digits N] [-file <path>] "
+    "[-scene <name>]";
+
 std::string ColumnValue(const ReportColumn& column,
                         const analysis::PathPoint& point, int digits) {
   const std::string name = column.name;
@@ -1246,13 +1254,19 @@ void RegisterCoreCommands(CommandRegistry& registry) {
   // active scenario instead of all of them. Per-endpoint path
   // enumeration is not implemented: -to with -max_paths above 1
   // fails rather than silently reporting one path.
-  add("report_timing",
-      "report_timing [-delay_type max|min] [-max_paths N] [-to "
-      "<endpoint>] [-slack_lesser_than X] [-columns <list>] "
-      "[-path_type end|summary|full] [-digits N] [-file <path>] "
-      "[-scene <name>]",
+  add("report_timing", kReportTimingUsage,
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
+        // A help flag anywhere in the arguments prints the usage
+        // and succeeds, without running anything: this is the only
+        // command that takes -key options, so it is the only one
+        // with a flag-level help path. Every command is covered by
+        // eos::help instead.
+        for (const std::string& arg : args) {
+          if (arg == "-help" || arg == "--help" || arg == "-h") {
+            return CommandResult::Ok(kReportTimingUsage);
+          }
+        }
         std::map<std::string, std::string> options;
         if (auto bad = ParseReportOptions(args, options)) return *bad;
         analysis::PathReportRequest request;
@@ -1535,6 +1549,39 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           result.diag = Diag::kVerifiedPass;
         }
         return result;
+      });
+
+  // Per-command help. With no argument it prints every command's
+  // usage line, the same list list_commands prints; with a command
+  // name it prints just that command's usage. The "eos::" namespace
+  // prefix is accepted and stripped. This is the discoverability
+  // entry point the shell's tab completion points at: list_commands
+  // stays as the script-friendly full listing.
+  add("help", "help [command]",
+      [&registry](CommandContext&, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (args.size() > 1) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "usage: eos::help [command]");
+        }
+        if (args.empty()) {
+          std::string out;
+          for (const std::string& name : registry.Names()) {
+            if (!out.empty()) out += "\n";
+            out += name + " " + registry.Find(name)->usage;
+          }
+          return CommandResult::Ok(out);
+        }
+        std::string name = args[0];
+        if (name.rfind("eos::", 0) == 0) {
+          name = name.substr(5);
+        }
+        const CommandInfo* info = registry.Find(name);
+        if (info == nullptr) {
+          return CommandResult::Fail(Diag::kInvalidCommand,
+                                     "unknown command: " + args[0]);
+        }
+        return CommandResult::Ok(info->name + " " + info->usage);
       });
 
   add("list_commands", "list_commands",
