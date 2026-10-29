@@ -37,16 +37,18 @@ components:
     note: The only release tag is v2.2.0 (2020), so EOS pins commits.
   - name: opendb
     upstream: https://github.com/The-OpenROAD-Project/OpenROAD (src/odb)
-    version: v2.0 (commit a5a56584fed1)
+    version: commit ead3236e56d57
     licence: BSD-3-Clause
     module: src/db/odb
     patches: 0
+    note: "Re-pinned 2026-10-28 by fix track unit REPIN (authorized by the project owner the same day) from v2.0 (commit a5a56584fed1), per docs/odb-repin-decision.md Sections 5 and 6: the v2.0 reader rejects ORFS v3.0 database binaries (schema minor 74 against its 51), and ead3236 is the OpenROAD pin of ORFS v3.0, the writer of the subject file. EOS WriteDb checkpoints move from schema 51 to 74 with this pin; none are stored."
   - name: openroad-modules
     upstream: https://github.com/The-OpenROAD-Project/OpenROAD
     version: v2.0 (commit a5a56584fed1)
     licence: BSD-3-Clause
     module: src/pd and src/pv (per-pass provenance at import time)
     patches: 0
+    note: "Stays at v2.0 while opendb moves to ead3236 (fix track unit REPIN, 2026-10-28): its only imported-as-planned consumer, src/synth/openroad-syn, is a planned adoption not yet imported, so the split costs a note, not code."
   - name: klayout
     upstream: https://github.com/KLayout/klayout
     version: v0.30.12
