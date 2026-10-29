@@ -12,7 +12,8 @@
 # Every hard build dependency is checked here:
 #   Tcl headers and library (the real shell needs them; without
 #     them the build succeeds but eda reports the shell is
-#     unavailable), BISON, FLEX, SWIG, Eigen3, ZLIB, spdlog, fmt
+#     unavailable), BISON, FLEX, SWIG, Eigen3, Boost headers
+#     (OpenDB's polygon code), ZLIB, spdlog, fmt
 #     (OpenSTA's fallback when the compiler lacks std::format),
 #     the Python3 interpreter, and objcopy.
 # GTest is deliberately not a hard dependency: the test tree falls
@@ -34,14 +35,14 @@ option(EOS_AUTO_INSTALL_DEPS
   "Automatically install missing build dependencies at configure time"
   OFF)
 
-# On macOS, Homebrew's keg-only formulae live outside the default
-# search paths. Add their prefixes so find_package and find_program
+# On macOS, Homebrew formulae live outside CMake's default search
+# paths. Add their prefixes so find_package and find_program
 # can see them without the user passing CMAKE_PREFIX_PATH by hand.
 if(APPLE)
   find_program(EOS_BREW_PROGRAM brew)
   if(EOS_BREW_PROGRAM)
     execute_process(
-      COMMAND ${EOS_BREW_PROGRAM} --prefix tcl-tk bison flex zlib eigen spdlog fmt llvm
+      COMMAND ${EOS_BREW_PROGRAM} --prefix tcl-tk bison flex zlib eigen spdlog fmt llvm boost
       OUTPUT_VARIABLE _eos_brew_prefixes
       OUTPUT_STRIP_TRAILING_WHITESPACE
       ERROR_QUIET)
@@ -77,6 +78,7 @@ function(eos_check_dependencies)
   unset(SWIG_EXECUTABLE CACHE)
   unset(SWIG_DIR CACHE)
   unset(EIGEN3_INCLUDE_DIR CACHE)
+  unset(Boost_DIR CACHE)
   unset(ZLIB_LIBRARY CACHE)
   unset(ZLIB_INCLUDE_DIR CACHE)
   unset(spdlog_DIR CACHE)
@@ -120,6 +122,13 @@ function(eos_check_dependencies)
     list(APPEND _missing "Eigen3 headers")
     list(APPEND _brew "eigen")
     list(APPEND _apt "libeigen3-dev")
+  endif()
+
+  find_package(Boost QUIET)
+  if(NOT Boost_FOUND)
+    list(APPEND _missing "Boost headers (OpenDB polygon code)")
+    list(APPEND _brew "boost")
+    list(APPEND _apt "libboost-dev")
   endif()
 
   find_package(ZLIB QUIET)
