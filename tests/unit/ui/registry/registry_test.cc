@@ -843,6 +843,39 @@ TEST(CoreCommands, ImportOdbLoadsTheDatabase) {
   EXPECT_EQ(missing.diag, Diag::kIoError);
 }
 
+TEST(CoreCommands, CollateralReadsFailFastOnMissingFiles) {
+  TimingTempDir dir;
+  Shell shell;
+  // A missing collateral file is an io_error at the read command,
+  // not a deferred surprise at run_timing time, and it records
+  // nothing.
+  const CommandResult liberty =
+      shell.Run("read_liberty", {"tt", dir.Path("no_such.lib")});
+  EXPECT_FALSE(liberty.ok);
+  EXPECT_EQ(liberty.diag, Diag::kIoError);
+  EXPECT_TRUE(shell.ctx.timing.liberty_by_corner.empty());
+  const CommandResult verilog =
+      shell.Run("read_verilog", {dir.Path("no_such.v"), "top"});
+  EXPECT_FALSE(verilog.ok);
+  EXPECT_EQ(verilog.diag, Diag::kIoError);
+  EXPECT_TRUE(shell.ctx.timing.verilog_path.empty());
+  const CommandResult sdc =
+      shell.Run("read_sdc", {dir.Path("no_such.sdc")});
+  EXPECT_FALSE(sdc.ok);
+  EXPECT_EQ(sdc.diag, Diag::kIoError);
+  EXPECT_TRUE(shell.ctx.timing.sdc_path.empty());
+  const CommandResult spef =
+      shell.Run("set_spef", {dir.Path("no_such.spef")});
+  EXPECT_FALSE(spef.ok);
+  EXPECT_EQ(spef.diag, Diag::kIoError);
+  EXPECT_TRUE(shell.ctx.timing.spef_path.empty());
+  // A directory is not a readable collateral file either.
+  const CommandResult dir_as_liberty =
+      shell.Run("read_liberty", {"tt", dir.Path("")});
+  EXPECT_FALSE(dir_as_liberty.ok);
+  EXPECT_EQ(dir_as_liberty.diag, Diag::kIoError);
+}
+
 TEST(CoreCommands, CloseTimingClosesTheImportedDesign) {
   TimingTempDir dir;
   db::OdbDatabase database;

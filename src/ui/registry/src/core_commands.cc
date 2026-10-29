@@ -12,6 +12,8 @@
 #include <cctype>
 #include <charconv>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <optional>
 #include <sstream>
@@ -51,6 +53,24 @@ std::optional<CommandResult> ExpectCount(
   if (args.size() != count) {
     return CommandResult::Fail(Diag::kInvalidConfiguration,
                                "usage: eos::" + usage);
+  }
+  return std::nullopt;
+}
+
+// Collateral reads fail fast: a path that cannot be opened is an
+// error here, not a deferred surprise at run_timing time. The
+// commands below only recorded the path string, so a missing file
+// reported success and the failure surfaced one command later.
+std::optional<CommandResult> CheckReadable(const std::string& path) {
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(path, ec)) {
+    return CommandResult::Fail(Diag::kIoError,
+                               "could not read file: " + path);
+  }
+  std::ifstream in(path);
+  if (!in) {
+    return CommandResult::Fail(Diag::kIoError,
+                               "could not read file: " + path);
   }
   return std::nullopt;
 }
@@ -921,6 +941,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                 ExpectCount(args, 2, "read_liberty <corner> <path>")) {
           return *bad;
         }
+        if (auto bad = CheckReadable(args[1])) return *bad;
         ctx.timing.liberty_by_corner[args[0]] = args[1];
         return CommandResult::Ok("corner=" + args[0] +
                                  " liberty=" + args[1]);
@@ -933,6 +954,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                 ExpectCount(args, 2, "read_verilog <path> <top>")) {
           return *bad;
         }
+        if (auto bad = CheckReadable(args[0])) return *bad;
         ctx.timing.verilog_path = args[0];
         ctx.timing.top_cell = args[1];
         return CommandResult::Ok("verilog=" + args[0] + " top=" + args[1]);
@@ -944,6 +966,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = ExpectCount(args, 1, "read_sdc <path>")) {
           return *bad;
         }
+        if (auto bad = CheckReadable(args[0])) return *bad;
         ctx.timing.sdc_path = args[0];
         return CommandResult::Ok("sdc=" + args[0]);
       });
@@ -954,6 +977,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = ExpectCount(args, 1, "set_spef <path>")) {
           return *bad;
         }
+        if (auto bad = CheckReadable(args[0])) return *bad;
         ctx.timing.spef_path = args[0];
         return CommandResult::Ok("spef=" + args[0]);
       });
