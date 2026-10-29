@@ -67,6 +67,13 @@ components:
     licence: GPL-1.0 (per the Copying file; per-file headers rechecked at import)
     module: src/pv/lvs (planned)
     patches: 0
+  - name: linenoise
+    upstream: https://github.com/antirez/linenoise
+    version: commit a473823d74b93eab2ba83480df16ed37617493f2
+    licence: BSD-2-Clause
+    module: src/ui/tcl
+    patches: 0
+    note: "Pinned 2026-10-29 for the interactive shell's line editing (history, tab completion of ::eos:: command names, persistent history file). GNU readline was deliberately not chosen: it is GPL-3.0 and would put a GPL component in the eos binary while the EOS licence is still deferred."
 baseline_only:
   - name: orfs
     upstream: https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts
