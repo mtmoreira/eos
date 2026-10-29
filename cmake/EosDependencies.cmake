@@ -21,7 +21,7 @@
 # option EOS_AUTO_INSTALL_DEPS (default OFF): when ON, missing
 # dependencies are installed automatically before failing:
 #   macOS: scripts/setup-macos.sh (Homebrew; it also links
-#     Homebrew's gobjcopy as objcopy).
+#     Homebrew's LLVM objcopy as objcopy).
 #   Debian/Ubuntu: apt-get install (requires passwordless sudo;
 #     otherwise the report prints the exact command to run).
 # After an install attempt the checks re-run; anything still
@@ -48,6 +48,15 @@ if(APPLE)
     foreach(_prefix IN LISTS _eos_brew_prefixes)
       if(IS_DIRECTORY "${_prefix}")
         list(APPEND CMAKE_PREFIX_PATH "${_prefix}")
+      endif()
+      # Homebrew's tcl-tk formula installs headers under
+      # include/tcl-tk/, which CMake's FindTCL never searches (its
+      # suffixes are the versioned include/tcl8.x dirs). Point
+      # FindTCL at the real header dir as a normal variable, so the
+      # cache-clearing in eos_check_dependencies below does not
+      # wipe it, and a user-supplied TCL_INCLUDE_PATH still wins.
+      if(NOT TCL_INCLUDE_PATH AND EXISTS "${_prefix}/include/tcl-tk/tcl.h")
+        set(TCL_INCLUDE_PATH "${_prefix}/include/tcl-tk")
       endif()
     endforeach()
   endif()

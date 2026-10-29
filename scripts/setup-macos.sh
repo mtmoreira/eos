@@ -62,14 +62,24 @@ echo "Verifying..."
 command -v cmake
 command -v objcopy
 objcopy --version | head -1
-if [[ ! -f "$(brew --prefix tcl-tk)/include/tcl.h" ]]; then
-  echo "setup-macos.sh: tcl.h not found under $(brew --prefix tcl-tk)" >&2
+# Homebrew's tcl-tk formula configures Tcl with
+# --includedir=<prefix>/include/tcl-tk, so the headers live under
+# include/tcl-tk/, not include/. Accept both layouts; plain
+# include/ is what a non-Homebrew Tcl install uses.
+TCLTK_PREFIX="$(brew --prefix tcl-tk)"
+if [[ -f "$TCLTK_PREFIX/include/tcl-tk/tcl.h" ]]; then
+  echo "tcl.h found under $TCLTK_PREFIX/include/tcl-tk"
+elif [[ -f "$TCLTK_PREFIX/include/tcl.h" ]]; then
+  echo "tcl.h found under $TCLTK_PREFIX/include"
+else
+  echo "setup-macos.sh: tcl.h not found under $TCLTK_PREFIX/include/tcl-tk or $TCLTK_PREFIX/include" >&2
   exit 1
 fi
-echo "tcl.h found under $(brew --prefix tcl-tk)"
 
 echo
 echo "Prerequisites installed. Build with:"
-echo "  cmake -S . -B build -DEOS_BUILD_TESTS=OFF -DCMAKE_PREFIX_PATH=\$(brew --prefix tcl-tk)"
+echo "  cmake -S . -B build -DEOS_BUILD_TESTS=OFF"
 echo "  cmake --build build --target eda -j"
 echo "Then run ./build/apps/eda/eda for the interactive shell."
+echo "(cmake/EosDependencies.cmake adds the Homebrew prefixes at"
+echo "configure time, so no CMAKE_PREFIX_PATH flag is needed.)"
