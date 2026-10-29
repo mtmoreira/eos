@@ -77,6 +77,15 @@ if(NOT HAVE_CXX_STD_FORMAT)
       "${_eos_sta_fmt_dir}/fmt" SYMBOLIC)
   endif()
 endif()
+if(NOT HAVE_CXX_STD_FORMAT AND NOT MSVC)
+  # With fmt 11+, <fmt/core.h> alone no longer declares
+  # fmt::format/fmt::vformat, yet the imported sta/Format.hh
+  # includes only core.h. Force-include <fmt/format.h> for every
+  # C++ translation unit in this module instead of patching the
+  # imported header. The generator expression keeps the flag off
+  # the C sources (CUDD), which must not see a C++ header.
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-include;fmt/format.h>")
+endif()
 configure_file(src/util/StaConfig.hh.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/include/sta/StaConfig.hh)
 
@@ -533,14 +542,6 @@ if(TCL_FOUND)
 endif()
 if(NOT HAVE_CXX_STD_FORMAT)
   target_include_directories(eos_sta_swig PRIVATE "${_eos_sta_fmt_dir}")
-endif()
-if(NOT HAVE_CXX_STD_FORMAT AND NOT MSVC)
-  # The SWIG wrapper is the one translation unit that includes
-  # sta/Format.hh without any other header that pulls in
-  # <fmt/format.h> first. With fmt 11+, <fmt/core.h> alone no
-  # longer declares fmt::format/fmt::vformat, so force-include
-  # format.h here. This keeps the imported header untouched.
-  target_compile_options(eos_sta_swig PRIVATE "-include" "fmt/format.h")
 endif()
 set_target_properties(eos_sta_swig PROPERTIES
   POSITION_INDEPENDENT_CODE ON CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON
