@@ -69,9 +69,16 @@ def main():
     with tempfile.TemporaryDirectory(prefix="eos-abc-ns-",
                                      dir=scratch_root) as scratch:
         subprocess.run(["ar", "x", archive], cwd=scratch, check=True)
+        # Only real object files are members. macOS ar extracts
+        # its archive index as a regular file named __.SYMDEF
+        # (and possibly __.SYMDEF SORTED); feeding that to objcopy
+        # fails with "not a valid object file". The rebuild plus
+        # ranlib below regenerates the index, so dropping the
+        # extracted index here loses nothing.
         members = sorted(
             f for f in os.listdir(scratch)
-            if os.path.isfile(os.path.join(scratch, f)))
+            if os.path.isfile(os.path.join(scratch, f))
+            and f.endswith(".o"))
         missing = cudd_members - set(members)
         if missing:
             sys.exit("abc namespace step: CUDD members missing "
