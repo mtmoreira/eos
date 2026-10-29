@@ -9,7 +9,6 @@
 #include <tcl.h>
 
 #include <cerrno>
-#include <cstdlib>
 #include <unistd.h>
 
 #include "linenoise.h"
@@ -78,13 +77,15 @@ void CompleteCommand(const char* buffer, linenoiseCompletions* completions) {
   }
 }
 
-// The persistent history file, or empty when HOME is unset: history
-// then lives for the session only, and the shell never fails for it.
-std::string HistoryPath() {
-  const char* home = std::getenv("HOME");
-  if (home == nullptr || home[0] == '\0') return "";
-  return std::string(home) + "/.eos_history";
-}
+// The history file lives in the directory the shell is launched
+// from, not in the user's home: history belongs to the workspace
+// being worked in, and one file per working directory keeps
+// sessions from different projects apart. It is saved after every
+// command, not only at exit, so the session's history survives any
+// exit path: Ctrl-D, Tcl's exit command, or the terminal window
+// closing. A failed save is silently ignored: history must never
+// break the shell.
+const char* kHistoryFile = ".eos_history";
 
 }  // namespace
 
@@ -165,9 +166,8 @@ int TclShell::RunInteractive() {
   const bool tty = isatty(STDIN_FILENO) != 0;
   linenoiseSetCompletionCallback(&CompleteCommand);
   linenoiseHistorySetMaxLen(1000);
-  const std::string history_path = tty ? HistoryPath() : "";
-  if (!history_path.empty()) {
-    linenoiseHistoryLoad(history_path.c_str());
+  if (tty) {
+    linenoiseHistoryLoad(kHistoryFile);
   }
   g_completion_registry = impl_->registry;
   for (;;) {
@@ -180,6 +180,7 @@ int TclShell::RunInteractive() {
     }
     if (tty && line[0] != '\0') {
       linenoiseHistoryAdd(line);
+      linenoiseHistorySave(kHistoryFile);
     }
     const foundation::Result<std::string> result = Eval(line);
     linenoiseFree(line);
@@ -188,9 +189,6 @@ int TclShell::RunInteractive() {
     } else if (!result.value().empty()) {
       std::printf("%s\n", result.value().c_str());
     }
-  }
-  if (!history_path.empty()) {
-    linenoiseHistorySave(history_path.c_str());
   }
   g_completion_registry = nullptr;
   return 0;
