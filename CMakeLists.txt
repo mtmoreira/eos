@@ -80,4 +80,4 @@ if(EOS_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
-add_subdirectory(apps/eda)
+add_subdirectory(apps/eos)
