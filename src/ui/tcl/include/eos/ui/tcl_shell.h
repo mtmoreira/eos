@@ -46,10 +46,12 @@ class TclShell {
 
   // Interactive loop with an "eos> " prompt: line editing with
   // history (arrow keys) and tab completion of ::eos:: command
-  // names, backed by a persistent history file (~/.eos_history)
-  // when stdin is a terminal. Piped stdin reads plainly with no
-  // prompt and touches no history. Returns 0 at EOF; Ctrl-C
-  // cancels the current line without leaving the shell.
+  // names, backed by a persistent history file (.eos_history in
+  // the launch directory) when stdin is a terminal. The file is
+  // saved after every command, so history survives any exit path.
+  // Piped stdin reads plainly with no prompt and touches no
+  // history. Returns 0 at EOF; Ctrl-C cancels the current line
+  // without leaving the shell.
   int RunInteractive();
 
  private:
