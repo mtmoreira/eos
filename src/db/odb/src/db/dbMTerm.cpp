@@ -32,6 +32,8 @@
 
 #include "dbMTerm.h"
 
+#include <spdlog/fmt/ostr.h>
+
 #include "db.h"
 #include "dbDatabase.h"
 #include "dbLib.h"
@@ -53,6 +55,9 @@ bool _dbMTerm::operator==(const _dbMTerm& rhs) const
     return false;
 
   if (_flags._sig_type != rhs._flags._sig_type)
+    return false;
+
+  if (_flags._shape_type != rhs._flags._shape_type)
     return false;
 
   if (_order_id != rhs._order_id)
@@ -104,6 +109,7 @@ void _dbMTerm::differences(dbDiff& diff,
   DIFF_BEGIN
   DIFF_FIELD(_flags._io_type);
   DIFF_FIELD(_flags._sig_type);
+  DIFF_FIELD(_flags._shape_type);
   DIFF_FIELD(_order_id);
   DIFF_FIELD(_name);
   DIFF_FIELD(_next_entry);
@@ -124,6 +130,7 @@ void _dbMTerm::out(dbDiff& diff, char side, const char* field) const
   DIFF_OUT_BEGIN
   DIFF_OUT_FIELD(_flags._io_type);
   DIFF_OUT_FIELD(_flags._sig_type);
+  DIFF_OUT_FIELD(_flags._shape_type);
   DIFF_OUT_FIELD(_order_id);
   DIFF_OUT_FIELD(_name);
   DIFF_OUT_FIELD(_next_entry);
@@ -148,7 +155,7 @@ void _dbMTerm::out(dbDiff& diff, char side, const char* field) const
 _dbMTerm::_dbMTerm(_dbDatabase*, const _dbMTerm& m)
     : _flags(m._flags),
       _order_id(m._order_id),
-      _name(NULL),
+      _name(nullptr),
       _next_entry(m._next_entry),
       _next_mterm(m._next_mterm),
       _pins(m._pins),
@@ -166,26 +173,22 @@ _dbMTerm::_dbMTerm(_dbDatabase*, const _dbMTerm& m)
 
   for (itr = m._par_met_area.begin(); itr != m._par_met_area.end(); ++itr) {
     _dbTechAntennaAreaElement* e = new _dbTechAntennaAreaElement(*(*itr));
-    ZALLOCATED(e);
     _par_met_area.push_back(e);
   }
 
   for (itr = m._par_met_sidearea.begin(); itr != m._par_met_sidearea.end();
        ++itr) {
     _dbTechAntennaAreaElement* e = new _dbTechAntennaAreaElement(*(*itr));
-    ZALLOCATED(e);
     _par_met_sidearea.push_back(e);
   }
 
   for (itr = m._par_cut_area.begin(); itr != m._par_cut_area.end(); ++itr) {
     _dbTechAntennaAreaElement* e = new _dbTechAntennaAreaElement(*(*itr));
-    ZALLOCATED(e);
     _par_cut_area.push_back(e);
   }
 
   for (itr = m._diffarea.begin(); itr != m._diffarea.end(); ++itr) {
     _dbTechAntennaAreaElement* e = new _dbTechAntennaAreaElement(*(*itr));
-    ZALLOCATED(e);
     _diffarea.push_back(e);
   }
 }
@@ -312,6 +315,12 @@ dbIoType dbMTerm::getIoType()
   return dbIoType(mterm->_flags._io_type);
 }
 
+dbMTermShapeType dbMTerm::getShape()
+{
+  _dbMTerm* mterm = (_dbMTerm*) this;
+  return dbMTermShapeType(mterm->_flags._shape_type);
+}
+
 void dbMTerm::setMark(uint v)
 {
   _dbMTerm* mterm = (_dbMTerm*) this;
@@ -404,7 +413,7 @@ dbTechAntennaPinModel* dbMTerm::createDefaultAntennaModel()
       = (_dbTechAntennaPinModel*) getDefaultAntennaModel();
 
   // Reinitialize the object to its default state...
-  if (m != NULL) {
+  if (m != nullptr) {
     m->~_dbTechAntennaPinModel();
     new (m) _dbTechAntennaPinModel(mterm->getDatabase());
     m->_mterm = getImpl()->getOID();
@@ -424,7 +433,7 @@ dbTechAntennaPinModel* dbMTerm::createOxide2AntennaModel()
   _dbTechAntennaPinModel* m = (_dbTechAntennaPinModel*) getOxide2AntennaModel();
 
   // Reinitialize the object to its default state...
-  if (m != NULL) {
+  if (m != nullptr) {
     m->~_dbTechAntennaPinModel();
     new (m) _dbTechAntennaPinModel(mterm->getDatabase());
     m->_mterm = getImpl()->getOID();
@@ -455,7 +464,7 @@ dbTechAntennaPinModel* dbMTerm::getDefaultAntennaModel() const
   _dbMTerm* mterm = (_dbMTerm*) this;
 
   if (mterm->_oxide1 == 0)
-    return NULL;
+    return nullptr;
 
   _dbMaster* master = (_dbMaster*) mterm->getOwner();
   return (dbTechAntennaPinModel*) master->_antenna_pin_model_tbl->getPtr(
@@ -467,7 +476,7 @@ dbTechAntennaPinModel* dbMTerm::getOxide2AntennaModel() const
   _dbMTerm* mterm = (_dbMTerm*) this;
 
   if (mterm->_oxide2 == 0)
-    return NULL;
+    return nullptr;
 
   _dbMaster* master = (_dbMaster*) mterm->getOwner();
   return (dbTechAntennaPinModel*) master->_antenna_pin_model_tbl->getPtr(
@@ -514,7 +523,7 @@ void dbMTerm::writeAntennaLef(lefout& writer) const
     getDefaultAntennaModel()->writeLef(tech, writer);
 
   if (hasOxide2AntennaModel()) {
-    fprintf(writer.out(), "        ANTENNAMODEL OXIDE2 ;\n");
+    fmt::print(writer.out(), "        ANTENNAMODEL OXIDE2 ;\n");
     getOxide2AntennaModel()->writeLef(tech, writer);
   }
 }
@@ -522,18 +531,20 @@ void dbMTerm::writeAntennaLef(lefout& writer) const
 dbMTerm* dbMTerm::create(dbMaster* master_,
                          const char* name_,
                          dbIoType io_type_,
-                         dbSigType sig_type_)
+                         dbSigType sig_type_,
+                         dbMTermShapeType shape_type_)
 {
   _dbMaster* master = (_dbMaster*) master_;
 
   if (master->_flags._frozen || master->_mterm_hash.hasMember(name_))
-    return NULL;
+    return nullptr;
 
   _dbMTerm* mterm = master->_mterm_tbl->create();
   mterm->_name = strdup(name_);
   ZALLOCATED(mterm->_name);
-  mterm->_flags._io_type = io_type_;
-  mterm->_flags._sig_type = sig_type_;
+  mterm->_flags._io_type = io_type_.getValue();
+  mterm->_flags._sig_type = sig_type_.getValue();
+  mterm->_flags._shape_type = shape_type_;
   if (sig_type_ == dbSigType::CLOCK)
     master_->setSequential(1);
   master->_mterm_hash.insert(mterm);

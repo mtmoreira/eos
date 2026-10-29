@@ -30,12 +30,12 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-#include "defout.h"
+#include "odb/defout.h"
 
 #include <stdio.h>
 
-#include "db.h"
 #include "defout_impl.h"
+#include "odb/db.h"
 
 namespace odb {
 

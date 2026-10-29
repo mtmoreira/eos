@@ -32,8 +32,7 @@
 
 #pragma once
 
-#include <string.h>
-
+#include <cstring>
 #include <new>
 
 #include "ZException.h"
@@ -121,7 +120,7 @@ void dbArrayTable<T>::clear()
   _page_tbl_size = 0;
   _alloc_cnt = 0;
   _free_list = 0;
-  _pages = NULL;
+  _pages = nullptr;
 }
 
 template <class T>
@@ -141,7 +140,7 @@ dbArrayTable<T>::dbArrayTable(_dbDatabase* db,
   _alloc_cnt = 0;
   _objects_per_alloc = array_size;
   _free_list = 0;
-  _pages = NULL;
+  _pages = nullptr;
 }
 
 template <class T>
@@ -156,7 +155,7 @@ dbArrayTable<T>::dbArrayTable(_dbDatabase* db,
       _alloc_cnt(t._alloc_cnt),
       _objects_per_alloc(t._objects_per_alloc),
       _free_list(t._free_list),
-      _pages(NULL)
+      _pages(nullptr)
 {
   copy_pages(t);
 }
@@ -176,13 +175,12 @@ void dbArrayTable<T>::resizePageTbl()
   _page_tbl_size *= 2;
 
   _pages = new dbArrayTablePage*[_page_tbl_size];
-  ZALLOCATED(_pages);
 
   for (i = 0; i < old_tbl_size; ++i)
     _pages[i] = old_tbl[i];
 
   for (; i < _page_tbl_size; ++i)
-    _pages[i] = NULL;
+    _pages[i] = nullptr;
 
   delete[] old_tbl;
 }
@@ -199,7 +197,6 @@ void dbArrayTable<T>::newPage()
 
   if (_page_tbl_size == 0) {
     _pages = new dbArrayTablePage*[1];
-    ZALLOCATED(_pages);
     _page_tbl_size = 1;
   } else if (_page_tbl_size == _page_cnt) {
     resizePageTbl();
@@ -360,12 +357,11 @@ template <class T>
 void dbArrayTable<T>::copy_pages(const dbArrayTable<T>& t)
 {
   _pages = new dbArrayTablePage*[_page_tbl_size];
-  ZALLOCATED(_pages);
 
   uint i;
 
   for (i = 0; i < _page_tbl_size; ++i)
-    _pages[i] = NULL;
+    _pages[i] = nullptr;
 
   for (i = 0; i < _page_cnt; ++i) {
     dbArrayTablePage* page = t._pages[i];
@@ -432,10 +428,9 @@ dbIStream& operator>>(dbIStream& stream, dbArrayTable<T>& table)
   stream >> table._free_list;
 
   if (table._page_tbl_size == 0)
-    table._pages = NULL;
+    table._pages = nullptr;
   else {
     table._pages = new dbArrayTablePage*[table._page_tbl_size];
-    ZALLOCATED(table._pages);
   }
 
   uint i;
@@ -451,7 +446,7 @@ dbIStream& operator>>(dbIStream& stream, dbArrayTable<T>& table)
   }
 
   for (; i < table._page_tbl_size; ++i)
-    table._pages[i] = NULL;
+    table._pages[i] = nullptr;
 
   return stream;
 }
@@ -529,15 +524,15 @@ void dbArrayTable<T>::differences(dbDiff& diff,
     if (lhs_valid_o && rhs_valid_o) {
       T* l = lhs.getPtr(i);
       T* r = rhs.getPtr(i);
-      l->differences(diff, NULL, *r);
+      l->differences(diff, nullptr, *r);
     } else if (lhs_valid_o) {
       T* l = lhs.getPtr(i);
-      l->out(diff, dbDiff::LEFT, NULL);
+      l->out(diff, dbDiff::LEFT, nullptr);
       diff.report("> %s [%u] FREE\n", name, i);
     } else if (rhs_valid_o) {
       T* r = rhs.getPtr(i);
       diff.report("< %s [%u] FREE\n", name, i);
-      r->out(diff, dbDiff::RIGHT, NULL);
+      r->out(diff, dbDiff::RIGHT, nullptr);
     }
   }
 }
@@ -550,7 +545,7 @@ void dbArrayTable<T>::out(dbDiff& diff, char side) const
   for (i = 1; i < _alloc_cnt; ++i) {
     if (validId(i)) {
       T* o = getPtr(i);
-      o->out(diff, side, NULL);
+      o->out(diff, side, nullptr);
     }
   }
 }

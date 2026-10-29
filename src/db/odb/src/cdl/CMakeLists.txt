@@ -4,7 +4,7 @@ add_library(cdl
 
 target_include_directories(cdl
     PUBLIC
-        ${PROJECT_SOURCE_DIR}/include/opendb
+        ${PROJECT_SOURCE_DIR}/include
         ${TCL_INCLUDE_PATH}
 )
 
@@ -12,4 +12,10 @@ set_target_properties(cdl
   PROPERTIES
     # python requirement
     POSITION_INDEPENDENT_CODE ON
+)
+
+target_link_libraries(cdl
+  PUBLIC
+    db
+    utl_lib
 )

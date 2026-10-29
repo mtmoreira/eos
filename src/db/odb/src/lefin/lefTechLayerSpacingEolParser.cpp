@@ -25,46 +25,15 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <boost/algorithm/string/classification.hpp>
-#include <boost/algorithm/string/split.hpp>
-#include <boost/algorithm/string/trim_all.hpp>
-#include <boost/bind.hpp>
-#include <boost/config/warning_disable.hpp>
-#include <boost/fusion/algorithm.hpp>
-#include <boost/fusion/container.hpp>
-#include <boost/fusion/include/adapt_struct.hpp>
-#include <boost/fusion/include/at_c.hpp>
-#include <boost/fusion/include/io.hpp>
-#include <boost/fusion/sequence.hpp>
-#include <boost/fusion/sequence/intrinsic/at_c.hpp>
-#include <boost/lambda/lambda.hpp>
-#include <boost/optional/optional_io.hpp>
-#include <boost/spirit/include/phoenix_core.hpp>
-#include <boost/spirit/include/phoenix_operator.hpp>
-#include <boost/spirit/include/qi.hpp>
-#include <boost/spirit/include/qi_alternative.hpp>
 #include <iostream>
 #include <string>
 
+#include "boostParser.h"
 #include "db.h"
 #include "lefLayerPropParser.h"
 #include "lefin.h"
 
 namespace lefTechLayerSpacingEol {
-namespace qi = boost::spirit::qi;
-namespace ascii = boost::spirit::ascii;
-namespace phoenix = boost::phoenix;
-
-using boost::fusion::at_c;
-using boost::spirit::ascii::space_type;
-using boost::spirit::ascii::string;
-using boost::spirit::qi::lit;
-
-using qi::double_;
-using qi::int_;
-// using qi::_1;
-using ascii::space;
-using phoenix::ref;
 
 void parallelEdgeParser(
     const boost::fusion::vector<
@@ -492,13 +461,13 @@ bool parse(Iterator first,
 
 namespace odb {
 
-void lefTechLayerSpacingEolParser::parse(std::string s,
+void lefTechLayerSpacingEolParser::parse(const std::string& s,
                                          dbTechLayer* layer,
                                          odb::lefin* l)
 {
   std::vector<std::string> rules;
   boost::split(rules, s, boost::is_any_of(";"));
-  for (auto rule : rules) {
+  for (auto& rule : rules) {
     boost::algorithm::trim(rule);
     if (rule.empty())
       continue;

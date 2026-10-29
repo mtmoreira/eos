@@ -36,6 +36,7 @@
 #include "dbBox.h"
 #include "dbBoxItr.h"
 #include "dbDatabase.h"
+#include "dbMetalWidthViaMap.h"
 #include "dbNameCache.h"
 #include "dbProperty.h"
 #include "dbPropertyItr.h"
@@ -90,6 +91,9 @@ bool _dbTech::operator==(const _dbTech& rhs) const
     return false;
 
   if (strcmp(_version_buf, rhs._version_buf) != 0)
+    return false;
+
+  if (_name != rhs._name)
     return false;
 
   if (_via_cnt != rhs._via_cnt)
@@ -158,6 +162,9 @@ bool _dbTech::operator==(const _dbTech& rhs) const
   if (*_prop_tbl != *rhs._prop_tbl)
     return false;
 
+  if (*_metal_width_via_map_tbl != *rhs._metal_width_via_map_tbl)
+    return false;
+
   if (*_name_cache != *rhs._name_cache)
     return false;
 
@@ -183,6 +190,7 @@ void _dbTech::differences(dbDiff& diff,
   DIFF_FIELD(_flags._minsppin);
   DIFF_FIELD(_version);
   DIFF_FIELD(_version_buf);
+  DIFF_FIELD(_name);
   DIFF_FIELD(_via_cnt);
   DIFF_FIELD(_layer_cnt);
   DIFF_FIELD(_rlayer_cnt);
@@ -208,6 +216,7 @@ void _dbTech::differences(dbDiff& diff,
   DIFF_TABLE_NO_DEEP(_via_layer_rule_tbl);
   DIFF_TABLE_NO_DEEP(_via_generate_rule_tbl);
   DIFF_TABLE_NO_DEEP(_prop_tbl);
+  DIFF_TABLE_NO_DEEP(_metal_width_via_map_tbl);
   DIFF_NAME_CACHE(_name_cache);
   DIFF_END
 }
@@ -226,6 +235,7 @@ void _dbTech::out(dbDiff& diff, char side, const char* field) const
   DIFF_OUT_FIELD(_flags._minsppin);
   DIFF_OUT_FIELD(_version);
   DIFF_OUT_FIELD(_version_buf);
+  DIFF_OUT_FIELD(_name);
   DIFF_OUT_FIELD(_via_cnt);
   DIFF_OUT_FIELD(_layer_cnt);
   DIFF_OUT_FIELD(_rlayer_cnt);
@@ -251,6 +261,7 @@ void _dbTech::out(dbDiff& diff, char side, const char* field) const
   DIFF_OUT_TABLE_NO_DEEP(_via_layer_rule_tbl);
   DIFF_OUT_TABLE_NO_DEEP(_via_generate_rule_tbl);
   DIFF_OUT_TABLE_NO_DEEP(_prop_tbl);
+  DIFF_OUT_TABLE_NO_DEEP(_metal_width_via_map_tbl);
   DIFF_OUT_NAME_CACHE(_name_cache);
   DIFF_END
 }
@@ -284,11 +295,9 @@ _dbTech::_dbTech(_dbDatabase* db)
 
   _layer_tbl = new dbTable<_dbTechLayer>(
       db, this, (GetObjTbl_t) &_dbTech::getObjectTable, dbTechLayerObj);
-  ZALLOCATED(_layer_tbl);
 
   _via_tbl = new dbTable<_dbTechVia>(
       db, this, (GetObjTbl_t) &_dbTech::getObjectTable, dbTechViaObj);
-  ZALLOCATED(_via_tbl);
 
   _non_default_rule_tbl = new dbTable<_dbTechNonDefaultRule>(
       db,
@@ -297,7 +306,6 @@ _dbTech::_dbTech(_dbDatabase* db)
       dbTechNonDefaultRuleObj,
       4,
       2);
-  ZALLOCATED(_non_default_rule_tbl);
 
   _layer_rule_tbl
       = new dbTable<_dbTechLayerRule>(db,
@@ -306,11 +314,9 @@ _dbTech::_dbTech(_dbDatabase* db)
                                       dbTechLayerRuleObj,
                                       4,
                                       2);
-  ZALLOCATED(_layer_rule_tbl);
 
   _box_tbl = new dbTable<_dbBox>(
       db, this, (GetObjTbl_t) &_dbTech::getObjectTable, dbBoxObj);
-  ZALLOCATED(_box_tbl);
 
   _samenet_rule_tbl
       = new dbTable<_dbTechSameNetRule>(db,
@@ -319,7 +325,6 @@ _dbTech::_dbTech(_dbDatabase* db)
                                         dbTechSameNetRuleObj,
                                         16,
                                         4);
-  ZALLOCATED(_samenet_rule_tbl);
 
   _antenna_rule_tbl = new dbTable<_dbTechLayerAntennaRule>(
       db,
@@ -328,7 +333,6 @@ _dbTech::_dbTech(_dbDatabase* db)
       dbTechLayerAntennaRuleObj,
       16,
       4);
-  ZALLOCATED(_antenna_rule_tbl);
 
   _via_rule_tbl
       = new dbTable<_dbTechViaRule>(db,
@@ -337,7 +341,6 @@ _dbTech::_dbTech(_dbDatabase* db)
                                     dbTechViaRuleObj,
                                     16,
                                     4);
-  ZALLOCATED(_via_rule_tbl);
 
   _via_layer_rule_tbl
       = new dbTable<_dbTechViaLayerRule>(db,
@@ -346,7 +349,6 @@ _dbTech::_dbTech(_dbDatabase* db)
                                          dbTechViaLayerRuleObj,
                                          16,
                                          4);
-  ZALLOCATED(_via_layer_rule_tbl);
 
   _via_generate_rule_tbl = new dbTable<_dbTechViaGenerateRule>(
       db,
@@ -355,30 +357,28 @@ _dbTech::_dbTech(_dbDatabase* db)
       dbTechViaGenerateRuleObj,
       16,
       4);
-  ZALLOCATED(_via_generate_rule_tbl);
 
   _prop_tbl = new dbTable<_dbProperty>(
       db, this, (GetObjTbl_t) &_dbTech::getObjectTable, dbPropertyObj);
-  ZALLOCATED(_prop_tbl);
+
+  _metal_width_via_map_tbl = new dbTable<_dbMetalWidthViaMap>(
+      db, this, (GetObjTbl_t) &_dbTech::getObjectTable, dbMetalWidthViaMapObj);
 
   _via_hash.setTable(_via_tbl);
 
   _name_cache
       = new _dbNameCache(db, this, (GetObjTbl_t) &_dbTech::getObjectTable);
-  ZALLOCATED(_name_cache);
 
   _layer_itr = new dbTechLayerItr(_layer_tbl);
-  ZALLOCATED(_layer_itr);
 
   _box_itr = new dbBoxItr(_box_tbl);
-  ZALLOCATED(_box_itr);
 
   _prop_itr = new dbPropertyItr(_prop_tbl);
-  ZALLOCATED(_prop_itr);
 }
 
 _dbTech::_dbTech(_dbDatabase* db, const _dbTech& t)
     : _version(t._version),
+      _name(t._name),
       _via_cnt(t._via_cnt),
       _layer_cnt(t._layer_cnt),
       _rlayer_cnt(t._rlayer_cnt),
@@ -396,56 +396,44 @@ _dbTech::_dbTech(_dbDatabase* db, const _dbTech& t)
   strncpy(_version_buf, t._version_buf, sizeof(_version_buf));
 
   _layer_tbl = new dbTable<_dbTechLayer>(db, this, *t._layer_tbl);
-  ZALLOCATED(_layer_tbl);
 
   _via_tbl = new dbTable<_dbTechVia>(db, this, *t._via_tbl);
-  ZALLOCATED(_via_tbl);
 
   _non_default_rule_tbl
       = new dbTable<_dbTechNonDefaultRule>(db, this, *t._non_default_rule_tbl);
-  ZALLOCATED(_non_default_rule_tbl);
 
   _layer_rule_tbl = new dbTable<_dbTechLayerRule>(db, this, *t._layer_rule_tbl);
-  ZALLOCATED(_layer_rule_tbl);
 
   _box_tbl = new dbTable<_dbBox>(db, this, *t._box_tbl);
-  ZALLOCATED(_box_tbl);
 
   _samenet_rule_tbl
       = new dbTable<_dbTechSameNetRule>(db, this, *t._samenet_rule_tbl);
-  ZALLOCATED(_samenet_rule_tbl);
 
   _antenna_rule_tbl
       = new dbTable<_dbTechLayerAntennaRule>(db, this, *t._antenna_rule_tbl);
-  ZALLOCATED(_antenna_rule_tbl);
 
   _via_rule_tbl = new dbTable<_dbTechViaRule>(db, this, *t._via_rule_tbl);
-  ZALLOCATED(_via_rule_tbl);
 
   _via_layer_rule_tbl
       = new dbTable<_dbTechViaLayerRule>(db, this, *t._via_layer_rule_tbl);
-  ZALLOCATED(_via_layer_rule_tbl);
 
   _via_generate_rule_tbl = new dbTable<_dbTechViaGenerateRule>(
       db, this, *t._via_generate_rule_tbl);
-  ZALLOCATED(_via_generate_rule_tbl);
 
   _prop_tbl = new dbTable<_dbProperty>(db, this, *t._prop_tbl);
-  ZALLOCATED(_prop_tbl);
+
+  _metal_width_via_map_tbl
+      = new dbTable<_dbMetalWidthViaMap>(db, this, *t._metal_width_via_map_tbl);
 
   _via_hash.setTable(_via_tbl);
 
   _name_cache = new _dbNameCache(db, this, *t._name_cache);
-  ZALLOCATED(_name_cache);
 
   _layer_itr = new dbTechLayerItr(_layer_tbl);
-  ZALLOCATED(_layer_itr);
 
   _box_itr = new dbBoxItr(_box_tbl);
-  ZALLOCATED(_box_itr);
 
   _prop_itr = new dbPropertyItr(_prop_tbl);
-  ZALLOCATED(_prop_itr);
 }
 
 _dbTech::~_dbTech()
@@ -461,20 +449,16 @@ _dbTech::~_dbTech()
   delete _via_layer_rule_tbl;
   delete _via_generate_rule_tbl;
   delete _prop_tbl;
+  delete _metal_width_via_map_tbl;
   delete _name_cache;
-  /******************************************* dimitri_fix
-  dbTech.cpp:363:12: warning: deleting object of polymorphic class type
-  ‘dbTechLayerItr’ which has non-virtual destructor might cause undefined
-  behavior [-Wdelete-non-virtual-dtor] delete _layer_itr;
-
-      delete _layer_itr;
-      delete _box_itr;
-      delete _prop_itr;
-  */
+  delete _layer_itr;
+  delete _box_itr;
+  delete _prop_itr;
 }
 
 dbOStream& operator<<(dbOStream& stream, const _dbTech& tech)
 {
+  stream << tech._name;
   stream << tech._via_cnt;
   stream << tech._layer_cnt;
   stream << tech._rlayer_cnt;
@@ -502,6 +486,7 @@ dbOStream& operator<<(dbOStream& stream, const _dbTech& tech)
   stream << *tech._via_layer_rule_tbl;
   stream << *tech._via_generate_rule_tbl;
   stream << *tech._prop_tbl;
+  stream << *tech._metal_width_via_map_tbl;
   stream << *tech._name_cache;
   stream << tech._via_hash;
   return stream;
@@ -509,6 +494,12 @@ dbOStream& operator<<(dbOStream& stream, const _dbTech& tech)
 
 dbIStream& operator>>(dbIStream& stream, _dbTech& tech)
 {
+  _dbDatabase* db = tech.getImpl()->getDatabase();
+  if (db->isSchema(db_schema_block_tech)) {
+    stream >> tech._name;
+  } else {
+    tech._name = "";
+  }
   stream >> tech._via_cnt;
   stream >> tech._layer_cnt;
   stream >> tech._rlayer_cnt;
@@ -539,10 +530,17 @@ dbIStream& operator>>(dbIStream& stream, _dbTech& tech)
   stream >> *tech._via_layer_rule_tbl;
   stream >> *tech._via_generate_rule_tbl;
   stream >> *tech._prop_tbl;
+  stream >> *tech._metal_width_via_map_tbl;
   stream >> *tech._name_cache;
   stream >> tech._via_hash;
 
   return stream;
+}
+
+std::string dbTech::getName()
+{
+  auto tech = (_dbTech*) this;
+  return tech->_name;
 }
 
 double _dbTech::_getLefVersion() const
@@ -602,6 +600,8 @@ dbObjectTable* _dbTech::getObjectTable(dbObjectType type)
       return _via_generate_rule_tbl;
     case dbPropertyObj:
       return _prop_tbl;
+    case dbMetalWidthViaMapObj:
+      return _metal_width_via_map_tbl;
     default:
       break;  // WAll
   }
@@ -633,7 +633,7 @@ dbTechLayer* dbTech::findLayer(const char* name)
       return (dbTechLayer*) layer;
   }
 
-  return NULL;
+  return nullptr;
 }
 
 dbTechLayer* dbTech::findLayer(int layer_number)
@@ -648,7 +648,7 @@ dbTechLayer* dbTech::findLayer(int layer_number)
       return (dbTechLayer*) layer;
   }
 
-  return NULL;
+  return nullptr;
 }
 
 dbTechLayer* dbTech::findRoutingLayer(int level_number)
@@ -663,7 +663,7 @@ dbTechLayer* dbTech::findRoutingLayer(int level_number)
       return (dbTechLayer*) layer;
   }
 
-  return NULL;
+  return nullptr;
 }
 
 void dbTech::setDbUnitsPerMicron(int value)
@@ -869,7 +869,7 @@ dbTechNonDefaultRule* dbTech::findNonDefaultRule(const char* name)
       return (dbTechNonDefaultRule*) r;
   }
 
-  return NULL;
+  return nullptr;
 }
 
 dbTechSameNetRule* dbTech::findSameNetRule(dbTechLayer* l1_, dbTechLayer* l2_)
@@ -881,7 +881,7 @@ dbTechSameNetRule* dbTech::findSameNetRule(dbTechLayer* l1_, dbTechLayer* l2_)
       = tech->_samenet_matrix(l1->_number, l2->_number);
 
   if (rule == 0)
-    return NULL;
+    return nullptr;
 
   return (dbTechSameNetRule*) tech->_samenet_rule_tbl->getPtr(rule);
 }
@@ -911,6 +911,12 @@ dbSet<dbTechViaGenerateRule> dbTech::getViaGenerateRules()
   return dbSet<dbTechViaGenerateRule>(tech, tech->_via_generate_rule_tbl);
 }
 
+dbSet<dbMetalWidthViaMap> dbTech::getMetalWidthViaMap()
+{
+  _dbTech* tech = (_dbTech*) this;
+  return dbSet<dbMetalWidthViaMap>(tech, tech->_metal_width_via_map_tbl);
+}
+
 dbTechViaRule* dbTech::findViaRule(const char* name)
 {
   dbSet<dbTechViaRule> rules = getViaRules();
@@ -923,7 +929,7 @@ dbTechViaRule* dbTech::findViaRule(const char* name)
       return (dbTechViaRule*) rule;
   }
 
-  return NULL;
+  return nullptr;
 }
 
 dbTechViaGenerateRule* dbTech::findViaGenerateRule(const char* name)
@@ -938,7 +944,7 @@ dbTechViaGenerateRule* dbTech::findViaGenerateRule(const char* name)
       return (dbTechViaGenerateRule*) rule;
   }
 
-  return NULL;
+  return nullptr;
 }
 
 void dbTech::checkLayer(bool typeChk,
@@ -965,8 +971,6 @@ void dbTech::checkLayer(bool typeChk,
     if (type.getValue() == dbTechLayerType::CUT)
       continue;
     if (typeChk && type.getValue() != dbTechLayerType::ROUTING) {
-      // TODO: remove this line
-      warning(0, "Layer %s is not a routing layer!\n", layer->getConstName());
       getImpl()->getLogger()->warn(utl::ODB,
                                    58,
                                    "Layer {} is not a routing layer!",
@@ -1005,16 +1009,13 @@ void dbTech::checkLayer(bool typeChk,
 
   return;
 }
-dbTech* dbTech::create(dbDatabase* db_, int dbu_per_micron)
+dbTech* dbTech::create(dbDatabase* db_, const char* name, int dbu_per_micron)
 {
   _dbDatabase* db = (_dbDatabase*) db_;
 
-  if (db->_tech != 0)
-    return NULL;
-
   _dbTech* tech = db->_tech_tbl->create();
-  db->_tech = tech->getOID();
   tech->_dbu_per_micron = dbu_per_micron;
+  tech->_name = name;
   return (dbTech*) tech;
 }
 
@@ -1030,7 +1031,6 @@ void dbTech::destroy(dbTech* tech_)
   _dbDatabase* db = tech->getDatabase();
   dbProperty::destroyProperties(tech);
   db->_tech_tbl->destroy(tech);
-  db->_tech = 0;
 }
 
 }  // namespace odb

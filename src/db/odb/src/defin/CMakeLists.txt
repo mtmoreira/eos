@@ -2,6 +2,7 @@ add_library(defin
     definNet.cpp 
     definSNet.cpp 
     definComponent.cpp 
+    definComponentMaskShift.cpp
     definVia.cpp 
     definPin.cpp 
     definBlockage.cpp 
@@ -10,6 +11,7 @@ add_library(defin
     definGCell.cpp 
     definRow.cpp 
     definRegion.cpp 
+    definGroup.cpp 
     definNonDefaultRule.cpp 
     definReader.cpp 
     definBase.cpp 
@@ -22,16 +24,17 @@ add_library(defin
 
 target_include_directories(defin
   PUBLIC
-    ${PROJECT_SOURCE_DIR}/include/opendb
+    ${PROJECT_SOURCE_DIR}/include
     ${TCL_INCLUDE_PATH}
 )
 
 target_link_libraries(defin
     PUBLIC
+        db
         zutil
         def
         defzlib
-        utl
+        utl_lib
 )
 
 set_target_properties(defin

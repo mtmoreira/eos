@@ -33,6 +33,7 @@
 #pragma once
 
 #include <list>
+#include <vector>
 
 #include "dbCore.h"
 #include "dbHashTable.h"
@@ -44,14 +45,7 @@
 #include "geom.h"
 #include "odb.h"
 
-/*DELETE
-#include "ISdb.h"
-*/
 namespace odb {
-
-// class ISdb : public ZObject
-//{
-//};
 
 template <class T>
 class dbTable;
@@ -85,11 +79,22 @@ class _dbFill;
 class _dbRegion;
 class _dbHier;
 class _dbBPin;
+class _dbTech;
+class _dbTechLayer;
 class _dbTechLayerRule;
 class _dbTechNonDefaultRule;
 class _dbModule;
+class _dbPowerDomain;
+class _dbLogicPort;
+class _dbPowerSwitch;
+class _dbIsolation;
+class _dbLevelShifter;
 class _dbModInst;
 class _dbGroup;
+class _dbAccessPoint;
+class _dbGlobalConnect;
+class _dbGuide;
+class _dbNetTrack;
 class dbJournal;
 
 class dbNetBTermItr;
@@ -99,12 +104,13 @@ class dbInstITermItr;
 class dbRegionInstItr;
 class dbModuleInstItr;
 class dbModuleModInstItr;
+class dbRegionGroupItr;
+class dbGlobalConnect;
 class dbGroupItr;
 class dbGroupInstItr;
 class dbGroupModInstItr;
 class dbGroupPowerNetItr;
 class dbGroupGroundNetItr;
-class dbRegionItr;
 class dbSWireItr;
 class dbNameServer;
 class dbBoxItr;
@@ -118,25 +124,13 @@ class dbOStream;
 class dbDiff;
 class dbBlockSearch;
 class dbBlockCallBackObj;
-
-struct _dbBTermPin
-{
-  _dbBTerm* _bterm;
-  int _x;
-  int _y;
-  uint _pin;
-  dbPlacementStatus::Value _status;
-  dbOrientType::Value _orient;
-};
+class dbGuideItr;
+class dbNetTrackItr;
 
 struct _dbBlockFlags
 {
   uint _valid_bbox : 1;
-  uint _buffer_altered : 1;
-  uint _active_pins : 1;
-  uint _mme : 1;
-  uint _skip_hier_stream : 1;
-  uint _spare_bits_27 : 27;
+  uint _spare_bits : 31;
 };
 
 class _dbBlock : public _dbObject
@@ -145,8 +139,7 @@ class _dbBlock : public _dbObject
   enum Field  // dbJournal field names
   {
     CORNERCOUNT,
-    WRITEDB,
-    INVALIDATETIMING,
+    WRITEDB
   };
 
   // PERSISTANT-MEMBERS
@@ -161,6 +154,7 @@ class _dbBlock : public _dbObject
   char* _corner_name_list;
   char* _name;
   Rect _die_area;
+  dbId<_dbTech> _tech;
   dbId<_dbChip> _chip;
   dbId<_dbBox> _bbox;
   dbId<_dbBlock> _parent;
@@ -173,15 +167,19 @@ class _dbBlock : public _dbObject
   dbHashTable<_dbInst> _inst_hash;
   dbHashTable<_dbModule> _module_hash;
   dbHashTable<_dbModInst> _modinst_hash;
+  dbHashTable<_dbPowerDomain> _powerdomain_hash;
+  dbHashTable<_dbLogicPort> _logicport_hash;
+  dbHashTable<_dbPowerSwitch> _powerswitch_hash;
+  dbHashTable<_dbIsolation> _isolation_hash;
+  dbHashTable<_dbLevelShifter> _levelshifter_hash;
   dbHashTable<_dbGroup> _group_hash;
   dbIntHashTable<_dbInstHdr> _inst_hdr_hash;
   dbHashTable<_dbBTerm> _bterm_hash;
   uint _maxCapNodeId;
   uint _maxRSegId;
   uint _maxCCSegId;
-  int _minExtModelIndex;
-  int _maxExtModelIndex;
   dbVector<dbId<_dbBlock>> _children;
+  dbVector<dbId<_dbTechLayer>> _component_mask_shift;
   uint _currentCcAdjOrder;
 
   // NON-PERSISTANT-STREAMED-MEMBERS
@@ -208,8 +206,17 @@ class _dbBlock : public _dbObject
   dbTable<_dbTechLayerRule>* _layer_rule_tbl;
   dbTable<_dbProperty>* _prop_tbl;
   dbTable<_dbModule>* _module_tbl;
+  dbTable<_dbPowerDomain>* _powerdomain_tbl;
+  dbTable<_dbLogicPort>* _logicport_tbl;
+  dbTable<_dbPowerSwitch>* _powerswitch_tbl;
+  dbTable<_dbIsolation>* _isolation_tbl;
+  dbTable<_dbLevelShifter>* _levelshifter_tbl;
   dbTable<_dbModInst>* _modinst_tbl;
   dbTable<_dbGroup>* _group_tbl;
+  dbTable<_dbAccessPoint>* ap_tbl_;
+  dbTable<_dbGlobalConnect>* global_connect_tbl_;
+  dbTable<_dbGuide>* _guide_tbl;
+  dbTable<_dbNetTrack>* _net_tracks_tbl;
   _dbNameCache* _name_cache;
 
   dbPagedVector<float, 4096, 12>* _r_val_tbl;
@@ -233,38 +240,35 @@ class _dbBlock : public _dbObject
   dbRegionInstItr* _region_inst_itr;
   dbModuleInstItr* _module_inst_itr;
   dbModuleModInstItr* _module_modinst_itr;
+  dbRegionGroupItr* _region_group_itr;
   dbGroupItr* _group_itr;
+  dbGuideItr* _guide_itr;
+  dbNetTrackItr* _net_track_itr;
   dbGroupInstItr* _group_inst_itr;
   dbGroupModInstItr* _group_modinst_itr;
   dbGroupPowerNetItr* _group_power_net_itr;
   dbGroupGroundNetItr* _group_ground_net_itr;
   dbBPinItr* _bpin_itr;
-  dbRegionItr* _region_itr;
   dbPropertyItr* _prop_itr;
   dbBlockSearch* _searchDb;
 
-  float _WNS[2];
-  float _TNS[2];
   unsigned char _num_ext_dbs;
 
   std::list<dbBlockCallBackObj*> _callbacks;
   void* _extmi;
-  FILE* _ptFile;
 
   dbJournal* _journal;
   dbJournal* _journal_pending;
-
-  // This is a temporary vector to fix bterm pins pre dbBPin...
-  std::vector<_dbBTermPin>* _bterm_pins;
 
   _dbBlock(_dbDatabase* db);
   _dbBlock(_dbDatabase* db, const _dbBlock& block);
   ~_dbBlock();
   void add_rect(const Rect& rect);
-  void add_geom_shape(GeomShape* shape);
+  void add_oct(const Oct& oct);
   void remove_rect(const Rect& rect);
   void invalidate_bbox() { _flags._valid_bbox = 0; }
   void initialize(_dbChip* chip,
+                  _dbTech* tech,
                   _dbBlock* parent,
                   const char* name,
                   char delimeter);
@@ -273,6 +277,9 @@ class _dbBlock : public _dbObject
   bool operator!=(const _dbBlock& rhs) const { return !operator==(rhs); }
   void differences(dbDiff& diff, const char* field, const _dbBlock& rhs) const;
   void out(dbDiff& diff, char side, const char* field) const;
+
+  int globalConnect(const std::vector<dbGlobalConnect*>& connects);
+  _dbTech* getTech();
 
   dbObjectTable* getObjectTable(dbObjectType type);
 };

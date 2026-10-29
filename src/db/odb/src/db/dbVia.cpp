@@ -72,6 +72,9 @@ bool _dbVia::operator==(const _dbVia& rhs) const
   if (_flags._orient != rhs._flags._orient)
     return false;
 
+  if (_flags.default_ != rhs._flags.default_)
+    return false;
+
   if (_name && rhs._name) {
     if (strcmp(_name, rhs._name) != 0)
       return false;
@@ -120,6 +123,7 @@ void _dbVia::differences(dbDiff& diff,
   DIFF_FIELD(_flags._is_tech_via);
   DIFF_FIELD(_flags._has_params);
   DIFF_FIELD(_flags._orient);
+  DIFF_FIELD(_flags.default_);
   DIFF_FIELD(_pattern);
   DIFF_OBJECT(_bbox, lhs_block->_box_tbl, rhs_block->_box_tbl);
   DIFF_SET(_boxes, lhs_block->_box_itr, rhs_block->_box_itr);
@@ -140,6 +144,7 @@ void _dbVia::out(dbDiff& diff, char side, const char* field) const
   DIFF_OUT_FIELD(_flags._is_tech_via);
   DIFF_OUT_FIELD(_flags._has_params);
   DIFF_OUT_FIELD(_flags._orient);
+  DIFF_OUT_FIELD(_flags.default_);
   DIFF_OUT_FIELD(_pattern);
   DIFF_OUT_OBJECT(_bbox, block->_box_tbl);
   DIFF_OUT_SET(_boxes, block->_box_itr);
@@ -153,8 +158,8 @@ void _dbVia::out(dbDiff& diff, char side, const char* field) const
 
 _dbVia::_dbVia(_dbDatabase*, const _dbVia& v)
     : _flags(v._flags),
-      _name(NULL),
-      _pattern(NULL),
+      _name(nullptr),
+      _pattern(nullptr),
       _bbox(v._bbox),
       _boxes(v._boxes),
       _top(v._top),
@@ -180,6 +185,7 @@ _dbVia::_dbVia(_dbDatabase*)
   _flags._is_tech_via = 0;
   _flags._has_params = 0;
   _flags._orient = dbOrientType::R0;
+  _flags.default_ = false;
   _flags._spare_bits = 0;
   _name = 0;
   _pattern = 0;
@@ -192,6 +198,12 @@ _dbVia::~_dbVia()
 
   if (_pattern)
     free((void*) _pattern);
+}
+
+_dbTech* _dbVia::getTech()
+{
+  _dbBlock* block = (_dbBlock*) getOwner();
+  return block->getTech();
 }
 
 dbOStream& operator<<(dbOStream& stream, const _dbVia& v)
@@ -278,7 +290,7 @@ dbBox* dbVia::getBBox()
   _dbVia* via = (_dbVia*) this;
 
   if (via->_bbox == 0)
-    return NULL;
+    return nullptr;
 
   _dbBlock* block = (_dbBlock*) via->getOwner();
   return (dbBox*) block->_box_tbl->getPtr(via->_bbox);
@@ -302,10 +314,9 @@ dbTechVia* dbVia::getTechVia()
   _dbVia* via = (_dbVia*) this;
 
   if ((via->_flags._is_rotated == 0) || (via->_flags._is_tech_via == 0))
-    return NULL;
+    return nullptr;
 
-  _dbDatabase* db = via->getDatabase();
-  _dbTech* tech = db->_tech_tbl->getPtr(db->_tech);
+  _dbTech* tech = via->getTech();
   _dbTechVia* v = tech->_via_tbl->getPtr(via->_rotated_via_id);
   return (dbTechVia*) v;
 }
@@ -315,7 +326,7 @@ dbVia* dbVia::getBlockVia()
   _dbVia* via = (_dbVia*) this;
 
   if ((via->_flags._is_rotated == 0) || (via->_flags._is_tech_via == 1))
-    return NULL;
+    return nullptr;
 
   _dbBlock* block = (_dbBlock*) via->getOwner();
   _dbVia* v = block->_via_tbl->getPtr(via->_rotated_via_id);
@@ -334,10 +345,9 @@ dbTechLayer* dbVia::getTopLayer()
   _dbVia* via = (_dbVia*) this;
 
   if (via->_top == 0)
-    return NULL;
+    return nullptr;
 
-  _dbDatabase* db = via->getDatabase();
-  _dbTech* tech = db->_tech_tbl->getPtr(db->_tech);
+  _dbTech* tech = via->getTech();
   return (dbTechLayer*) tech->_layer_tbl->getPtr(via->_top);
 }
 
@@ -346,10 +356,9 @@ dbTechLayer* dbVia::getBottomLayer()
   _dbVia* via = (_dbVia*) this;
 
   if (via->_bottom == 0)
-    return NULL;
+    return nullptr;
 
-  _dbDatabase* db = via->getDatabase();
-  _dbTech* tech = db->_tech_tbl->getPtr(db->_tech);
+  _dbTech* tech = via->getTech();
   return (dbTechLayer*) tech->_layer_tbl->getPtr(via->_bottom);
 }
 
@@ -370,12 +379,10 @@ dbTechViaGenerateRule* dbVia::getViaGenerateRule()
   _dbVia* via = (_dbVia*) this;
 
   if (via->_generate_rule == 0)
-    return NULL;
+    return nullptr;
 
-  _dbDatabase* db = via->getDatabase();
-  _dbTech* tech = db->_tech_tbl->getPtr(db->_tech);
-  _dbTechViaGenerateRule* rule
-      = tech->_via_generate_rule_tbl->getPtr(via->_generate_rule);
+  _dbTech* tech = via->getTech();
+  auto rule = tech->_via_generate_rule_tbl->getPtr(via->_generate_rule);
   return (dbTechViaGenerateRule*) rule;
 }
 
@@ -412,16 +419,26 @@ void dbVia::getViaParams(dbViaParams& params)
     params = dbViaParams();
   else {
     params = via->_via_params;
-    _dbDatabase* db = via->getDatabase();
-    _dbTech* tech = db->_tech_tbl->getPtr(db->_tech);
-    params._tech = (dbTech*) tech;
+    params._tech = (dbTech*) via->getTech();
   }
+}
+
+void dbVia::setDefault(bool val)
+{
+  _dbVia* via = (_dbVia*) this;
+  via->_flags.default_ = val;
+}
+
+bool dbVia::isDefault()
+{
+  _dbVia* via = (_dbVia*) this;
+  return via->_flags.default_;
 }
 
 dbVia* dbVia::create(dbBlock* block_, const char* name_)
 {
   if (block_->findVia(name_))
-    return NULL;
+    return nullptr;
 
   _dbBlock* block = (_dbBlock*) block_;
   _dbVia* via = block->_via_tbl->create();
@@ -437,8 +454,8 @@ dbVia* dbVia::create(dbBlock* block,
 {
   _dbVia* via = (_dbVia*) dbVia::create(block, name);
 
-  if (via == NULL)
-    return NULL;
+  if (via == nullptr)
+    return nullptr;
 
   via->_flags._is_rotated = 1;
   via->_flags._orient = orient;
@@ -466,8 +483,8 @@ dbVia* dbVia::create(dbBlock* block,
 {
   _dbVia* via = (_dbVia*) dbVia::create(block, name);
 
-  if (via == NULL)
-    return NULL;
+  if (via == nullptr)
+    return nullptr;
 
   via->_flags._is_rotated = 1;
   via->_flags._is_tech_via = 1;
@@ -526,7 +543,7 @@ dbVia* copyVia(dbBlock* block_, dbVia* via_, bool copyRotatedVia)
       _dbVia* bv = (_dbVia*) via_->getBlockVia();
       _dbVia* cbv = (_dbVia*) block_->findVia(bv->_name);
 
-      if (copyRotatedVia && (cbv == NULL))
+      if (copyRotatedVia && (cbv == nullptr))
         cbv = (_dbVia*) copyVia(block_, (dbVia*) bv, true);
 
       assert(cbv);

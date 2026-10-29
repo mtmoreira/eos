@@ -76,6 +76,9 @@ class _dbSWire : public _dbObject
 
   ~_dbSWire() {}
 
+  void addSBox(_dbSBox* box);
+  void removeSBox(_dbSBox* box);
+
   bool operator==(const _dbSWire& rhs) const;
   bool operator!=(const _dbSWire& rhs) const { return !operator==(rhs); }
   bool operator<(const _dbSWire& rhs) const;

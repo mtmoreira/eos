@@ -5,11 +5,12 @@ add_library(defout
 
 target_include_directories(defout
     PUBLIC
-        ${PROJECT_SOURCE_DIR}/include/opendb
+        ${PROJECT_SOURCE_DIR}/include
         ${TCL_INCLUDE_PATH}
 )
 target_link_libraries(defout
-    utl
+    db
+    utl_lib
 )
 
 set_target_properties(defout

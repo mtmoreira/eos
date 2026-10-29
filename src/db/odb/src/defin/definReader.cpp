@@ -42,8 +42,10 @@
 #include "dbShape.h"
 #include "definBlockage.h"
 #include "definComponent.h"
+#include "definComponentMaskShift.h"
 #include "definFill.h"
 #include "definGCell.h"
+#include "definGroup.h"
 #include "definNet.h"
 #include "definNonDefaultRule.h"
 #include "definPin.h"
@@ -73,7 +75,7 @@ namespace odb {
 definReader::definReader(dbDatabase* db, utl::Logger* logger, defin::MODE mode)
 {
   _db = db;
-  _block_name = NULL;
+  _block_name = nullptr;
   parent_ = nullptr;
   _continue_on_errors = false;
   version_ = nullptr;
@@ -86,6 +88,7 @@ definReader::definReader(dbDatabase* db, utl::Logger* logger, defin::MODE mode)
 
   _blockageR = new definBlockage;
   _componentR = new definComponent;
+  _componentMaskShift = new definComponentMaskShift;
   _fillR = new definFill;
   _gcellR = new definGCell;
   _netR = new definNet;
@@ -95,12 +98,14 @@ definReader::definReader(dbDatabase* db, utl::Logger* logger, defin::MODE mode)
   _tracksR = new definTracks;
   _viaR = new definVia;
   _regionR = new definRegion;
+  _groupR = new definGroup;
   _non_default_ruleR = new definNonDefaultRule;
   _prop_defsR = new definPropDefs;
   _pin_propsR = new definPinProps;
 
   _interfaces.push_back(_blockageR);
   _interfaces.push_back(_componentR);
+  _interfaces.push_back(_componentMaskShift);
   _interfaces.push_back(_fillR);
   _interfaces.push_back(_gcellR);
   _interfaces.push_back(_netR);
@@ -110,6 +115,7 @@ definReader::definReader(dbDatabase* db, utl::Logger* logger, defin::MODE mode)
   _interfaces.push_back(_tracksR);
   _interfaces.push_back(_viaR);
   _interfaces.push_back(_regionR);
+  _interfaces.push_back(_groupR);
   _interfaces.push_back(_non_default_ruleR);
   _interfaces.push_back(_prop_defsR);
   _interfaces.push_back(_pin_propsR);
@@ -120,6 +126,7 @@ definReader::~definReader()
 {
   delete _blockageR;
   delete _componentR;
+  delete _componentMaskShift;
   delete _fillR;
   delete _gcellR;
   delete _netR;
@@ -129,6 +136,7 @@ definReader::~definReader()
   delete _tracksR;
   delete _viaR;
   delete _regionR;
+  delete _groupR;
   delete _non_default_ruleR;
   delete _prop_defsR;
   delete _pin_propsR;
@@ -329,19 +337,23 @@ int definReader::designCallback(defrCallbackType_e /* unused: type */,
             "Block with name \"{}\" already exists, renaming too \"{}\"",
             block_name.c_str(),
             new_name.c_str());
-        reader->_block = dbBlock::create(
-            reader->parent_, new_name.c_str(), reader->hier_delimeter_);
+        reader->_block = dbBlock::create(reader->parent_,
+                                         new_name.c_str(),
+                                         reader->_tech,
+                                         reader->hier_delimeter_);
       }
     } else
-      reader->_block = dbBlock::create(
-          reader->parent_, block_name.c_str(), reader->hier_delimeter_);
+      reader->_block = dbBlock::create(reader->parent_,
+                                       block_name.c_str(),
+                                       reader->_tech,
+                                       reader->hier_delimeter_);
   } else {
     dbChip* chip = reader->_db->getChip();
     if (reader->_mode != defin::DEFAULT)
       reader->_block = chip->getBlock();
     else
-      reader->_block
-          = dbBlock::create(chip, block_name.c_str(), reader->hier_delimeter_);
+      reader->_block = dbBlock::create(
+          chip, block_name.c_str(), reader->_tech, reader->hier_delimeter_);
   }
   if (reader->_mode == defin::DEFAULT)
     reader->_block->setBusDelimeters(reader->left_bus_delimeter_,
@@ -360,10 +372,6 @@ int definReader::blockageCallback(defrCallbackType_e /* unused: type */,
   CHECKBLOCK
   definBlockage* blockageR = reader->_blockageR;
 
-  if (blockage->hasExceptpgnet()) {
-    UNSUPPORTED("EXCEPTPGNET on blockage is unsupported");
-  }
-
   if (blockage->hasMask()) {
     UNSUPPORTED("MASK on blockage is unsupported");
   }
@@ -378,6 +386,10 @@ int definReader::blockageCallback(defrCallbackType_e /* unused: type */,
 
     if (blockage->hasFills()) {
       blockageR->blockageRoutingFills();
+    }
+
+    if (blockage->hasExceptpgnet()) {
+      blockageR->blockageRoutingExceptPGNets();
     }
 
     if (blockage->hasPushdown()) {
@@ -500,11 +512,16 @@ int definReader::componentsCallback(defrCallbackType_e /* unused: type */,
 
 int definReader::componentMaskShiftCallback(
     defrCallbackType_e /* unused: type */,
-    defiComponentMaskShiftLayer* /* unused: shiftLayers */,
+    defiComponentMaskShiftLayer* shiftLayers,
     defiUserData data)
 {
   definReader* reader = (definReader*) data;
-  UNSUPPORTED("COMPONENTMASKSHIFT is unsupported");
+  for (int i = 0; i < shiftLayers->numMaskShiftLayers(); i++) {
+    reader->_componentMaskShift->addLayer(shiftLayers->maskShiftLayer(i));
+  }
+
+  reader->_componentMaskShift->setLayers();
+
   return PARSE_OK;
 }
 
@@ -637,7 +654,7 @@ int definReader::groupNameCallback(defrCallbackType_e /* unused: type */,
 {
   definReader* reader = (definReader*) data;
   CHECKBLOCK
-  reader->_regionR->begin(name, /* group */ true);
+  reader->_groupR->begin(name);
   return PARSE_OK;
 }
 
@@ -647,7 +664,7 @@ int definReader::groupMemberCallback(defrCallbackType_e /* unused: type */,
 {
   definReader* reader = (definReader*) data;
   CHECKBLOCK
-  reader->_regionR->inst(member);
+  reader->_groupR->inst(member);
   return PARSE_OK;
 }
 
@@ -657,13 +674,11 @@ int definReader::groupCallback(defrCallbackType_e /* unused: type */,
 {
   definReader* reader = (definReader*) data;
   CHECKBLOCK
-  definRegion* regionR = reader->_regionR;
-
-  if (group->hasRegionName()) {
-    regionR->parent(group->regionName());
-  }
-  handle_props(group, regionR);
-  regionR->end();
+  definGroup* groupR = reader->_groupR;
+  if (group->hasRegionName())
+    groupR->region(group->regionName());
+  handle_props(group, groupR);
+  groupR->end();
 
   return PARSE_OK;
 }
@@ -836,8 +851,13 @@ int definReader::netCallback(defrCallbackType_e /* unused: type */,
             break;
 
           case DEFIPATH_MASK:
+            netR->pathColor(path->getMask());
+            break;
+
           case DEFIPATH_VIAMASK:
-            UNSUPPORTED("MASK in net's routing is unsupported");
+            netR->pathViaColor(path->getViaBottomMask(),
+                               path->getViaCutMask(),
+                               path->getViaTopMask());
             break;
 
           default:
@@ -959,7 +979,14 @@ int definReader::pinCallback(defrCallbackType_e /* unused: type */,
   }
 
   if (pin->hasDirection()) {
-    pinR->pinDirection(pin->direction());
+    if (reader->_mode == defin::FLOORPLAN) {
+      reader->_logger->warn(
+          utl::ODB,
+          437,
+          "Pin directions are ignored from floorplan DEF files.");
+    } else {
+      pinR->pinDirection(pin->direction());
+    }
   }
 
   if (pin->hasSupplySensitivity()) {
@@ -1190,7 +1217,7 @@ int definReader::regionCallback(defrCallbackType_e /* unused: type */,
   CHECKBLOCK
   definRegion* regionR = reader->_regionR;
 
-  regionR->begin(region->name(), /* is_group */ false);
+  regionR->begin(region->name());
 
   for (int i = 0; i < region->numRectangles(); ++i) {
     regionR->boundary(
@@ -1290,7 +1317,7 @@ int definReader::technologyCallback(defrCallbackType_e /* unused: type */,
                                     defiUserData data)
 {
   definReader* reader = (definReader*) data;
-  UNSUPPORTED("TECHNOLOGY is unsupported");
+  reader->_logger->warn(utl::ODB, 293, "TECHNOLOGY is ignored");
   return PARSE_OK;
 }
 
@@ -1542,6 +1569,10 @@ int definReader::specialNetCallback(defrCallbackType_e /* unused: type */,
               // TODO: Make this take and store rotation
               // snetR->pathVia(viaName,
               //                translate_orientation(path->getViaRotation()));
+            } else if (nextId == DEFIPATH_VIADATA) {
+              int numX, numY, stepX, stepY;
+              path->getViaData(&numX, &numY, &stepX, &stepY);
+              snetR->pathViaArray(viaName, numX, numY, stepX, stepY);
             } else {
               snetR->pathVia(viaName);
               path->prev();  // put back the token
@@ -1618,7 +1649,9 @@ void definReader::setLibs(std::vector<dbLib*>& libs)
   _rowR->setLibs(libs);
 }
 
-dbChip* definReader::createChip(std::vector<dbLib*>& libs, const char* file)
+dbChip* definReader::createChip(std::vector<dbLib*>& libs,
+                                const char* file,
+                                odb::dbTech* tech)
 {
   init();
   setLibs(libs);
@@ -1628,18 +1661,19 @@ dbChip* definReader::createChip(std::vector<dbLib*>& libs, const char* file)
       _logger->error(utl::ODB, 250, "Chip does not exist");
   } else if (chip != nullptr) {
     fprintf(stderr, "Error: Chip already exists\n");
-    return NULL;
-  } else
+    return nullptr;
+  } else {
     chip = dbChip::create(_db);
+  }
 
   assert(chip);
-  setTech(_db->getTech());
+  setTech(tech);
   _logger->info(utl::ODB, 127, "Reading DEF file: {}", file);
 
   if (!createBlock(file)) {
     dbChip::destroy(chip);
     _logger->warn(utl::ODB, 129, "Error: Failed to read DEF file");
-    return NULL;
+    return nullptr;
   }
 
   if (_pinR->_bterm_cnt)
@@ -1686,18 +1720,19 @@ dbChip* definReader::createChip(std::vector<dbLib*>& libs, const char* file)
 
 dbBlock* definReader::createBlock(dbBlock* parent,
                                   std::vector<dbLib*>& libs,
-                                  const char* def_file)
+                                  const char* def_file,
+                                  odb::dbTech* tech)
 {
   init();
   setLibs(libs);
   parent_ = parent;
-  setTech(_db->getTech());
+  setTech(tech);
   _logger->info(utl::ODB, 135, "Reading DEF file: {}", def_file);
 
   if (!createBlock(def_file)) {
     dbBlock::destroy(_block);
     _logger->warn(utl::ODB, 137, "Error: Failed to read DEF file");
-    return NULL;
+    return nullptr;
   }
 
   if (_pinR->_bterm_cnt)
@@ -1784,13 +1819,17 @@ bool definReader::createBlock(const char* file)
     defrSetRowCbk(rowCallback);
     defrSetNetCbk(netCallback);
     defrSetSNetCbk(specialNetCallback);
+    defrSetViaCbk(viaCallback);
+    defrSetBlockageCbk(blockageCallback);
+    defrSetNonDefaultCbk(nonDefaultRuleCallback);
+
+    defrSetAddPathToNet();
   }
 
   if (_mode == defin::DEFAULT) {
     defrSetPropCbk(propCallback);
     defrSetPropDefEndCbk(propEndCallback);
     defrSetPropDefStartCbk(propStartCallback);
-    defrSetBlockageCbk(blockageCallback);
 
     defrSetExtensionCbk(extensionCallback);
     defrSetFillStartCbk(fillsCallback);
@@ -1801,7 +1840,6 @@ bool definReader::createBlock(const char* file)
     defrSetGroupNameCbk(groupNameCallback);
     defrSetHistoryCbk(historyCallback);
 
-    defrSetNonDefaultCbk(nonDefaultRuleCallback);
     defrSetRegionCbk(regionCallback);
 
     defrSetScanchainsStartCbk(scanchainsCallback);
@@ -1810,17 +1848,13 @@ bool definReader::createBlock(const char* file)
     defrSetStartPinsCbk(pinsStartCallback);
     defrSetStylesStartCbk(stylesCallback);
     defrSetTechnologyCbk(technologyCallback);
-
-    defrSetViaCbk(viaCallback);
-
-    defrSetAddPathToNet();
   }
 
   bool isZipped = hasSuffix(file, ".gz");
   int res;
   if (!isZipped) {
     FILE* f = fopen(file, "r");
-    if (f == NULL) {
+    if (f == nullptr) {
       _logger->warn(utl::ODB, 148, "error: Cannot open DEF file {}", file);
       return false;
     }
@@ -1829,7 +1863,7 @@ bool definReader::createBlock(const char* file)
   } else {
     defrSetGZipReadFunction();
     defGZFile f = defrGZipOpen(file, "r");
-    if (f == NULL) {
+    if (f == nullptr) {
       _logger->warn(
           utl::ODB, 271, "error: Cannot open zipped DEF file {}", file);
       return false;
@@ -1838,10 +1872,11 @@ bool definReader::createBlock(const char* file)
     defGZipClose(f);
   }
 
-  if (res != 0 || _errors != 0) {
-    _logger->warn(utl::ODB, 149, "DEF parser returns an error!");
+  if (res != 0 || errors() != 0) {
     if (!_continue_on_errors) {
-      exit(2);
+      _logger->error(utl::ODB, 421, "DEF parser returns an error!");
+    } else {
+      _logger->warn(utl::ODB, 149, "DEF parser returns an error!");
     }
   }
 
@@ -1855,7 +1890,7 @@ bool definReader::replaceWires(const char* file)
 {
   FILE* f = fopen(file, "r");
 
-  if (f == NULL) {
+  if (f == nullptr) {
     _logger->warn(utl::ODB, 150, "error: Cannot open DEF file {}", file);
     return false;
   }
@@ -1874,9 +1909,10 @@ bool definReader::replaceWires(const char* file)
 
   int res = defrRead(f, file, (defiUserData) this, /* case sensitive */ 1);
   if (res != 0) {
-    _logger->warn(utl::ODB, 151, "DEF parser returns an error!");
     if (!_continue_on_errors) {
-      exit(2);
+      _logger->error(utl::ODB, 422, "DEF parser returns an error!");
+    } else {
+      _logger->warn(utl::ODB, 151, "DEF parser returns an error!");
     }
   }
 

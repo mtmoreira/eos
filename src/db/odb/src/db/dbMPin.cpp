@@ -33,6 +33,8 @@
 #include "dbMPin.h"
 
 #include "db.h"
+#include "dbAccessPoint.h"
+#include "dbBlock.h"
 #include "dbBoxItr.h"
 #include "dbMPinItr.h"
 #include "dbMTerm.h"
@@ -44,11 +46,11 @@ namespace odb {
 
 template class dbTable<_dbMTerm>;
 
-_dbMPin::_dbMPin(_dbDatabase*)
+_dbMPin::_dbMPin(_dbDatabase* db)
 {
 }
 
-_dbMPin::_dbMPin(_dbDatabase*, const _dbMPin& p)
+_dbMPin::_dbMPin(_dbDatabase* db, const _dbMPin& p)
     : _mterm(p._mterm), _geoms(p._geoms), _next_mpin(p._next_mpin)
 {
 }
@@ -62,6 +64,7 @@ dbOStream& operator<<(dbOStream& stream, const _dbMPin& mpin)
   stream << mpin._mterm;
   stream << mpin._geoms;
   stream << mpin._next_mpin;
+  stream << mpin.aps_;
   return stream;
 }
 
@@ -70,6 +73,7 @@ dbIStream& operator>>(dbIStream& stream, _dbMPin& mpin)
   stream >> mpin._mterm;
   stream >> mpin._geoms;
   stream >> mpin._next_mpin;
+  stream >> mpin.aps_;
   return stream;
 }
 
@@ -84,6 +88,9 @@ bool _dbMPin::operator==(const _dbMPin& rhs) const
   if (_next_mpin != rhs._next_mpin)
     return false;
 
+  if (aps_ != rhs.aps_)
+    return false;
+
   return true;
 }
 
@@ -95,6 +102,7 @@ void _dbMPin::differences(dbDiff& diff,
   DIFF_FIELD(_mterm);
   DIFF_FIELD(_geoms);
   DIFF_FIELD(_next_mpin);
+  // DIFF_VECTOR(aps_);
   DIFF_END
 }
 
@@ -104,7 +112,16 @@ void _dbMPin::out(dbDiff& diff, char side, const char* field) const
   DIFF_OUT_FIELD(_mterm);
   DIFF_OUT_FIELD(_geoms);
   DIFF_OUT_FIELD(_next_mpin);
+  // DIFF_OUT_VECTOR(aps_);
   DIFF_END
+}
+
+void _dbMPin::addAccessPoint(uint idx, _dbAccessPoint* ap)
+{
+  if (aps_.size() <= idx) {
+    aps_.resize(idx + 1);
+  }
+  aps_[idx].push_back(ap->getOID());
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -137,11 +154,25 @@ Rect dbMPin::getBBox()
   Rect bbox;
   bbox.mergeInit();
   for (dbBox* box : getGeometry()) {
-    Rect rect;
-    box->getBox(rect);
+    Rect rect = box->getBox();
     bbox.merge(rect);
   }
   return bbox;
+}
+
+std::vector<std::vector<odb::dbAccessPoint*>> dbMPin::getPinAccess() const
+{
+  _dbMPin* pin = (_dbMPin*) this;
+  // TODO: fix for multi chip block heirarchy
+  _dbBlock* block = (_dbBlock*) getDb()->getChip()->getBlock();
+  std::vector<std::vector<odb::dbAccessPoint*>> result;
+  for (const auto& pa : pin->aps_) {
+    result.push_back(std::vector<odb::dbAccessPoint*>());
+    for (const auto& ap : pa) {
+      result.back().push_back((dbAccessPoint*) block->ap_tbl_->getPtr(ap));
+    }
+  }
+  return result;
 }
 
 dbMPin* dbMPin::create(dbMTerm* mterm_)

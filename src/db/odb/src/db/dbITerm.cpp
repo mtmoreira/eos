@@ -33,6 +33,7 @@
 #include "dbITerm.h"
 
 #include "db.h"
+#include "dbAccessPoint.h"
 #include "dbArrayTable.h"
 #include "dbBTerm.h"
 #include "dbBlock.h"
@@ -46,6 +47,7 @@
 #include "dbInstHdr.h"
 #include "dbJournal.h"
 #include "dbLib.h"
+#include "dbMPin.h"
 #include "dbMTerm.h"
 #include "dbMaster.h"
 #include "dbNet.h"
@@ -85,6 +87,9 @@ bool _dbITerm::operator==(const _dbITerm& rhs) const
     return false;
 
   if (_prev_net_iterm != rhs._prev_net_iterm)
+    return false;
+
+  if (aps_ != rhs.aps_)
     return false;
 
   return true;
@@ -215,7 +220,7 @@ _dbInst* _dbITerm::getInst() const
 //
 ////////////////////////////////////////////////////////////////////
 
-dbInst* dbITerm::getInst()
+dbInst* dbITerm::getInst() const
 {
   _dbITerm* iterm = (_dbITerm*) this;
   _dbBlock* block = (_dbBlock*) iterm->getOwner();
@@ -229,13 +234,13 @@ dbNet* dbITerm::getNet()
   _dbBlock* block = (_dbBlock*) iterm->getOwner();
 
   if (iterm->_net == 0)
-    return NULL;
+    return nullptr;
 
   _dbNet* net = block->_net_tbl->getPtr(iterm->_net);
   return (dbNet*) net;
 }
 
-dbMTerm* dbITerm::getMTerm()
+dbMTerm* dbITerm::getMTerm() const
 {
   _dbITerm* iterm = (_dbITerm*) this;
   _dbBlock* block = (_dbBlock*) iterm->getOwner();
@@ -255,7 +260,7 @@ dbBTerm* dbITerm::getBTerm()
   _dbInst* inst = block->_inst_tbl->getPtr(iterm->_inst);
 
   if (inst->_hierarchy == 0)
-    return NULL;
+    return nullptr;
 
   _dbHier* hier = block->_hier_tbl->getPtr(inst->_hierarchy);
 
@@ -265,7 +270,7 @@ dbBTerm* dbITerm::getBTerm()
   return (dbBTerm*) child->_bterm_tbl->getPtr(bterm);
 }
 
-dbBlock* dbITerm::getBlock()
+dbBlock* dbITerm::getBlock() const
 {
   return (dbBlock*) getImpl()->getOwner();
 }
@@ -300,78 +305,19 @@ bool dbITerm::isSpecial()
 void dbITerm::setSpecial()
 {
   _dbITerm* iterm = (_dbITerm*) this;
-  //_dbBlock * block = (_dbBlock *) getOwner();
-  // dimitri_fix: need to FIX on FULL_ECO uint prev_flags = flagsToUInt(iterm);
-#ifdef FULL_ECO
-  uint prev_flags = flagsToUInt(iterm);
-#endif
-
   iterm->_flags._special = 1;
-
-#ifdef FULL_ECO
-  if (block->_journal) {
-    debugPrint(getImpl()->getLogger(),
-               utl::ODB,
-               "DB_ECO",
-               1,
-               "ECO: Iterm {}, setSpecial",
-               getId());
-    block->_journal->updateField(
-        this, _dbNet::FLAGS, prev_flags, flagsToUInt(iterm));
-  }
-#endif
 }
 
 void dbITerm::clearSpecial()
 {
   _dbITerm* iterm = (_dbITerm*) this;
-  //_dbBlock * block = (_dbBlock *) getOwner();
-  // dimitri_fix: need to FIX on FULL_ECO //uint prev_flags =
-  // flagsToUInt(iterm);
-#ifdef FULL_ECO
-  uint prev_flags = flagsToUInt(iterm);
-#endif
-
   iterm->_flags._special = 0;
-
-#ifdef FULL_ECO
-  if (block->_journal) {
-    debugPrint(getImpl()->getLogger(),
-               utl::ODB,
-               "DB_ECO",
-               1,
-               "ECO: Iterm {}, clearSpecial\n",
-               getId());
-    block->_journal->updateField(
-        this, _dbNet::FLAGS, prev_flags, flagsToUInt(iterm));
-  }
-#endif
 }
 
 void dbITerm::setSpef(uint v)
 {
   _dbITerm* iterm = (_dbITerm*) this;
-  //_dbBlock * block = (_dbBlock *) getOwner();
-  // dimitri_fix: need to FIX on FULL_ECO //uint prev_flags =
-  // flagsToUInt(iterm);
-#ifdef FULL_ECO
-  uint prev_flags = flagsToUInt(iterm);
-#endif
-
   iterm->_flags._spef = v;
-
-#ifdef FULL_ECO
-  if (block->_journal) {
-    debugPrint(getImpl()->getLogger(),
-               utl::ODB,
-               "DB_ECO",
-               1,
-               "ECO: Iterm {}, setSpef",
-               getId());
-    block->_journal->updateField(
-        this, _dbNet::FLAGS, prev_flags, flagsToUInt(iterm));
-  }
-#endif
 }
 
 bool dbITerm::isSpef()
@@ -401,78 +347,53 @@ bool dbITerm::isConnected()
 void dbITerm::setConnected()
 {
   _dbITerm* iterm = (_dbITerm*) this;
-  // dimitri_fix: need to FIX on FULL_ECO uint prev_flags = flagsToUInt(iterm);
-#ifdef FULL_ECO
-  _dbBlock* block = (_dbBlock*) getOwner();
-  uint prev_flags = flagsToUInt(iterm);
-#endif
-
   iterm->_flags._connected = 1;
-
-#ifdef FULL_ECO
-  if (block->_journal) {
-    debugPrint(getImpl()->getLogger(),
-               utl::ODB,
-               "DB_ECO",
-               1,
-               "ECO: Iterm {}, setConnected",
-               getId());
-    block->_journal->updateField(
-        this, _dbNet::FLAGS, prev_flags, flagsToUInt(iterm));
-  }
-#endif
 }
 
 void dbITerm::clearConnected()
 {
   _dbITerm* iterm = (_dbITerm*) this;
-  // uint prev_flags = flagsToUInt(iterm);
-#ifdef FULL_ECO
-  _dbBlock* block = (_dbBlock*) getOwner();
-  uint prev_flags = flagsToUInt(iterm);
-#endif
-
   iterm->_flags._connected = 0;
-
-#ifdef FULL_ECO
-  if (block->_journal) {
-    debugPrint(getImpl()->getLogger(),
-               utl::ODB,
-               "DB_ECO",
-               1,
-               "ECO: Iterm {}, clearConnected",
-               getId());
-    block->_journal->updateField(
-        this, _dbNet::FLAGS, prev_flags, flagsToUInt(iterm));
-  }
-#endif
 }
 
-dbITerm* dbITerm::connect(dbInst* inst_, dbNet* net_, dbMTerm* mterm_)
+void dbITerm::connect(dbNet* net_)
 {
-  _dbInst* inst = (_dbInst*) inst_;
-  //_dbNet * net = (_dbNet *) net_;
-  _dbMTerm* mterm = (_dbMTerm*) mterm_;
-  _dbBlock* block = (_dbBlock*) inst->getOwner();
-  _dbITerm* iterm = block->_iterm_tbl->getPtr(inst->_iterms[mterm->_order_id]);
-  connect((dbITerm*) iterm, net_);
-  return (dbITerm*) iterm;
-}
-
-void dbITerm::connect(dbITerm* iterm_, dbNet* net_)
-{
-  _dbITerm* iterm = (_dbITerm*) iterm_;
+  _dbITerm* iterm = (_dbITerm*) this;
   _dbNet* net = (_dbNet*) net_;
   _dbBlock* block = (_dbBlock*) iterm->getOwner();
 
   // Do Nothing if already connected
   if (iterm->_net == net->getOID())
     return;
-  for (auto callback : block->_callbacks)
-    callback->inDbITermPreConnect(iterm_, net_);
+
+  _dbInst* inst = iterm->getInst();
+  if (inst->_flags._dont_touch) {
+    inst->getLogger()->error(
+        utl::ODB,
+        369,
+        "Attempt to connect iterm of dont_touch instance {}",
+        inst->_name);
+  }
+
+  if (net->_flags._dont_touch) {
+    inst->getLogger()->error(utl::ODB,
+                             373,
+                             "Attempt to connect iterm to dont_touch net {}",
+                             net->_name);
+  }
+
+  if (net_->getBlock() != getInst()->getBlock()) {
+    inst->getLogger()->error(utl::ODB,
+                             433,
+                             "Connecting instances on different dies into "
+                             "one net is currently not supported");
+  }
 
   if (iterm->_net != 0)
-    disconnect(iterm_);
+    disconnect();
+
+  for (auto callback : block->_callbacks)
+    callback->inDbITermPreConnect(this, net_);
 
   if (block->_journal) {
     debugPrint(iterm->getImpl()->getLogger(),
@@ -480,11 +401,11 @@ void dbITerm::connect(dbITerm* iterm_, dbNet* net_)
                "DB_ECO",
                1,
                "ECO: connect Iterm {} to net {}",
-               iterm_->getId(),
+               getId(),
                net_->getId());
     block->_journal->beginAction(dbJournal::CONNECT_OBJECT);
     block->_journal->pushParam(dbITermObj);
-    block->_journal->pushParam(iterm_->getId());
+    block->_journal->pushParam(getId());
     block->_journal->pushParam(net_->getId());
     block->_journal->endAction();
   }
@@ -504,30 +425,47 @@ void dbITerm::connect(dbITerm* iterm_, dbNet* net_)
   net->_iterms = iterm->getOID();
 
   for (auto callback : block->_callbacks)
-    callback->inDbITermPostConnect(iterm_);
+    callback->inDbITermPostConnect(this);
 }
 
-void dbITerm::disconnect(dbITerm* iterm_)
+void dbITerm::disconnect()
 {
-  _dbITerm* iterm = (_dbITerm*) iterm_;
+  _dbITerm* iterm = (_dbITerm*) this;
 
   if (iterm->_net == 0)
     return;
 
+  _dbInst* inst = iterm->getInst();
+  if (inst->_flags._dont_touch) {
+    inst->getLogger()->error(
+        utl::ODB,
+        370,
+        "Attempt to disconnect iterm of dont_touch instance {}",
+        inst->_name);
+  }
+
   _dbBlock* block = (_dbBlock*) iterm->getOwner();
   _dbNet* net = block->_net_tbl->getPtr(iterm->_net);
+
+  if (net->_flags._dont_touch) {
+    inst->getLogger()->error(utl::ODB,
+                             372,
+                             "Attempt to disconnect iterm of dont_touch net {}",
+                             net->_name);
+  }
+
   for (auto callback : block->_callbacks)
-    callback->inDbITermPreDisconnect(iterm_);
+    callback->inDbITermPreDisconnect(this);
   if (block->_journal) {
     debugPrint(iterm->getImpl()->getLogger(),
                utl::ODB,
                "DB_ECO",
                1,
                "ECO: disconnect Iterm {}",
-               iterm_->getId());
+               getId());
     block->_journal->beginAction(dbJournal::DISCONNECT_OBJECT);
     block->_journal->pushParam(dbITermObj);
-    block->_journal->pushParam(iterm_->getId());
+    block->_journal->pushParam(getId());
     block->_journal->endAction();
   }
 
@@ -554,15 +492,7 @@ void dbITerm::disconnect(dbITerm* iterm_)
 
   iterm->_net = 0;
   for (auto callback : block->_callbacks)
-    callback->inDbITermPostDisconnect(iterm_, (dbNet*) net);
-}
-
-dbSet<dbITerm>::iterator dbITerm::disconnect(dbSet<dbITerm>::iterator& itr)
-{
-  dbITerm* it = *itr;
-  dbSet<dbITerm>::iterator next = ++itr;
-  disconnect(it);
-  return next;
+    callback->inDbITermPostDisconnect(this, (dbNet*) net);
 }
 
 dbSigType dbITerm::getSigType()
@@ -648,8 +578,7 @@ bool dbITerm::getAvgXY(int* x, int* y)
     dbSet<dbBox>::iterator box_itr;
     for (box_itr = boxes.begin(); box_itr != boxes.end(); box_itr++) {
       dbBox* box = *box_itr;
-      Rect rect;
-      box->getBox(rect);
+      Rect rect = box->getBox();
       transform.apply(rect);
       xx += rect.xMin() + rect.xMax();
       yy += rect.yMin() + rect.yMax();
@@ -682,6 +611,64 @@ void dbITerm::staSetVertexId(uint32_t id)
 {
   _dbITerm* iterm = (_dbITerm*) this;
   iterm->_sta_vertex_id = id;
+}
+
+void dbITerm::setAccessPoint(dbMPin* pin, dbAccessPoint* ap)
+{
+  _dbITerm* iterm = (_dbITerm*) this;
+  if (ap != nullptr) {
+    iterm->aps_[pin->getImpl()->getOID()] = ap->getImpl()->getOID();
+    _dbAccessPoint* _ap = (_dbAccessPoint*) ap;
+    _ap->iterms_.push_back(iterm->getOID());
+  } else
+    iterm->aps_[pin->getImpl()->getOID()] = dbId<_dbAccessPoint>();
+}
+
+std::map<dbMPin*, std::vector<dbAccessPoint*>> dbITerm::getAccessPoints() const
+{
+  _dbBlock* block = (_dbBlock*) getBlock();
+  auto mterm = getMTerm();
+  uint pin_access_idx = getInst()->getPinAccessIdx();
+  std::map<dbMPin*, std::vector<dbAccessPoint*>> aps;
+  for (auto mpin : mterm->getMPins()) {
+    _dbMPin* pin = (_dbMPin*) mpin;
+    if (pin->aps_.size() > pin_access_idx) {
+      for (const auto& id : pin->aps_[pin_access_idx]) {
+        aps[mpin].push_back((dbAccessPoint*) block->ap_tbl_->getPtr(id));
+      }
+    }
+  }
+  return aps;
+}
+
+std::vector<dbAccessPoint*> dbITerm::getPrefAccessPoints() const
+{
+  _dbBlock* block = (_dbBlock*) getBlock();
+  _dbITerm* iterm = (_dbITerm*) this;
+  std::vector<dbAccessPoint*> aps;
+  for (auto& [pin_id, ap_id] : iterm->aps_) {
+    if (ap_id.isValid()) {
+      aps.push_back((dbAccessPoint*) block->ap_tbl_->getPtr(ap_id));
+    }
+  }
+  return aps;
+}
+
+std::vector<Rect> dbITerm::getGeometries() const
+{
+  dbTransform transform;
+  getInst()->getTransform(transform);
+
+  std::vector<Rect> geometries;
+  for (dbMPin* mpin : getMTerm()->getMPins()) {
+    for (dbBox* box : mpin->getGeometry()) {
+      Rect rect = box->getBox();
+      transform.apply(rect);
+      geometries.push_back(rect);
+    }
+  }
+
+  return geometries;
 }
 
 }  // namespace odb

@@ -16,10 +16,10 @@
 #include <utility>
 #include <vector>
 
-#include "opendb/db.h"
-#include "opendb/defin.h"
-#include "opendb/defout.h"
-#include "opendb/lefin.h"
+#include "odb/db.h"
+#include "odb/defin.h"
+#include "odb/defout.h"
+#include "odb/lefin.h"
 #include "utl/Logger.h"
 
 namespace eos::db {
@@ -111,6 +111,10 @@ std::optional<std::pair<std::string, long>> ParseBusBit(
 struct OdbDatabase::Impl {
   utl::Logger logger;
   odb::dbDatabase* db = nullptr;
+  // The technology created by the first LEF read; later LEF reads
+  // and DEF reads take it as an explicit argument in the ead3236
+  // API, where a technology is a first-class object.
+  odb::dbTech* tech = nullptr;
   int lef_count = 0;
 
   Impl() : db(odb::dbDatabase::create()) { db->setLogger(&logger); }
@@ -155,10 +159,16 @@ Status OdbDatabase::ReadLef(const std::string& path) {
     odb::lefin reader(impl_->db, &impl_->logger, false);
     odb::dbLib* lib = nullptr;
     if (impl_->lef_count == 0) {
-      lib = reader.createTechAndLib("eos_lib", path.c_str());
+      lib = reader.createTechAndLib("eos_tech", "eos_lib", path.c_str());
+      if (lib != nullptr) {
+        impl_->tech = lib->getTech();
+        if (impl_->tech == nullptr) {
+          impl_->tech = impl_->db->getTech();
+        }
+      }
     } else {
       const std::string name = "eos_lib_" + std::to_string(impl_->lef_count);
-      lib = reader.createLib(name.c_str(), path.c_str());
+      lib = reader.createLib(impl_->tech, name.c_str(), path.c_str());
     }
     if (lib == nullptr) {
       return IoError("could not read LEF file", path);
@@ -178,7 +188,7 @@ Status OdbDatabase::ReadDef(const std::string& path) {
   try {
     odb::defin reader(impl_->db, &impl_->logger);
     std::vector<odb::dbLib*> libs = impl_->Libs();
-    odb::dbChip* chip = reader.createChip(libs, path.c_str());
+    odb::dbChip* chip = reader.createChip(libs, path.c_str(), impl_->tech);
     if (chip == nullptr || chip->getBlock() == nullptr) {
       return IoError("could not read DEF file", path);
     }
@@ -212,15 +222,13 @@ Status OdbDatabase::ReadDb(const std::string& path) {
         "read a database into a database that already holds content: " +
             path);
   }
-  std::FILE* file = std::fopen(path.c_str(), "rb");
-  if (file == nullptr) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
     return IoError("could not read database file", path);
   }
   try {
     impl_->db->read(file);
-    std::fclose(file);
   } catch (const std::exception&) {
-    std::fclose(file);
     return IoError("could not read database file", path);
   }
   if (impl_->TopBlock() == nullptr) {
@@ -235,15 +243,17 @@ Status OdbDatabase::WriteDb(const std::string& path) const {
                          "write a database before any has been read: " +
                              path);
   }
-  std::FILE* file = std::fopen(path.c_str(), "wb");
-  if (file == nullptr) {
+  std::ofstream file(path, std::ios::binary);
+  if (!file) {
     return IoError("could not write database file", path);
   }
   try {
     impl_->db->write(file);
-    std::fclose(file);
+    file.close();
+    if (!file) {
+      return IoError("could not write database file", path);
+    }
   } catch (const std::exception&) {
-    std::fclose(file);
     return IoError("could not write database file", path);
   }
   return Status::Ok();
@@ -723,7 +733,7 @@ Status OdbDatabase::ConnectInstancePin(const std::string& instance,
                              " is already connected; disconnect it first");
   }
   try {
-    odb::dbITerm::connect(term, net);
+    term->connect(net);
   } catch (const std::exception&) {
     return Status::Error(ErrorCode::kInvalidState,
                          "could not connect pin " + instance + "/" + pin);
@@ -752,7 +762,7 @@ Status OdbDatabase::DisconnectInstancePin(const std::string& instance,
                              " is not connected");
   }
   try {
-    odb::dbITerm::disconnect(term);
+    term->disconnect();
   } catch (const std::exception&) {
     return Status::Error(ErrorCode::kInvalidState,
                          "could not disconnect pin " + instance + "/" + pin);
@@ -778,7 +788,7 @@ Status OdbDatabase::DeleteInstance(const std::string& instance) {
     }
     for (odb::dbITerm* term : terms) {
       if (term->getNet() != nullptr) {
-        odb::dbITerm::disconnect(term);
+        term->disconnect();
       }
     }
     odb::dbInst::destroy(inst);
@@ -805,7 +815,7 @@ Status OdbDatabase::DeleteNet(const std::string& net_name) {
       iterms.push_back(term);
     }
     for (odb::dbITerm* term : iterms) {
-      odb::dbITerm::disconnect(term);
+      term->disconnect();
     }
     std::vector<odb::dbBTerm*> bterms;
     for (odb::dbBTerm* term : net->getBTerms()) {
