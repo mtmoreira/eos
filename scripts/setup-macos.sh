@@ -15,6 +15,12 @@
 #             CUDD symbols. Homebrew installs it as gobjcopy, so this
 #             script links it as objcopy on PATH.
 #   python3 - the ABC build step runs a Python script.
+#   bison, flex, swig, eigen, spdlog, zlib - required by the
+#             imported OpenDB and OpenSTA modules (parsers, code
+#             generation, linear algebra, compression, logging).
+# The same set is what cmake/EosDependencies.cmake checks at
+# configure time; this script is what -DEOS_AUTO_INSTALL_DEPS=ON
+# runs on macOS.
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -35,7 +41,7 @@ if ! xcode-select -p >/dev/null 2>&1; then
   exit 1
 fi
 
-brew install tcl-tk cmake binutils python3
+brew install tcl-tk cmake binutils python3 bison flex swig eigen spdlog zlib
 
 # GNU objcopy under its expected name. Never clobbers an existing one.
 if ! command -v objcopy >/dev/null 2>&1; then

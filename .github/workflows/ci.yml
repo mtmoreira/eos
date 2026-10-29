@@ -18,6 +18,8 @@ jobs:
         run: pip install pyyaml pytest
       - name: Layer and structure check
         run: python3 tools/check_layers.py
+      - name: Shell script syntax check
+        run: bash -n scripts/setup-macos.sh
       - name: Checker unit tests
         run: python3 -m pytest tools/tests -q
 
