@@ -11,6 +11,10 @@ if(EOS_BUILD_TESTS)
   enable_testing()
 endif()
 
+# Configure-time dependency check (fails fast with one actionable
+# report when a tool or library is missing; see the module header).
+include(${CMAKE_SOURCE_DIR}/cmake/EosDependencies.cmake)
+
 # Optional: the Tcl shell. Found once here so the tcl module, the eda
 # app and the test wiring all agree on whether a real shell exists.
 find_package(TCL QUIET)
