@@ -35,6 +35,7 @@
 #include <iostream>
 
 #include "db.h"
+#include "dbAccessPoint.h"
 #include "dbBTerm.h"
 #include "dbBlock.h"
 #include "dbBlockCallBackObj.h"
@@ -63,7 +64,8 @@ _dbBPin::_dbBPin(_dbDatabase*, const _dbBPin& p)
       _boxes(p._boxes),
       _next_bpin(p._next_bpin),
       _min_spacing(p._min_spacing),
-      _effective_width(p._effective_width)
+      _effective_width(p._effective_width),
+      aps_(p.aps_)
 {
 }
 
@@ -95,6 +97,9 @@ bool _dbBPin::operator==(const _dbBPin& rhs) const
     return false;
 
   if (_effective_width != rhs._effective_width)
+    return false;
+
+  if (aps_ != rhs.aps_)
     return false;
 
   return true;
@@ -139,6 +144,7 @@ dbOStream& operator<<(dbOStream& stream, const _dbBPin& bpin)
   stream << bpin._next_bpin;
   stream << bpin._min_spacing;
   stream << bpin._effective_width;
+  stream << bpin.aps_;
 
   return stream;
 }
@@ -152,6 +158,7 @@ dbIStream& operator>>(dbIStream& stream, _dbBPin& bpin)
   stream >> bpin._next_bpin;
   stream >> bpin._min_spacing;
   stream >> bpin._effective_width;
+  stream >> bpin.aps_;
 
   return stream;
 }
@@ -162,7 +169,7 @@ dbIStream& operator>>(dbIStream& stream, _dbBPin& bpin)
 //
 ////////////////////////////////////////////////////////////////////
 
-dbBTerm* dbBPin::getBTerm()
+dbBTerm* dbBPin::getBTerm() const
 {
   _dbBPin* pin = (_dbBPin*) this;
   _dbBlock* block = (_dbBlock*) pin->getOwner();
@@ -182,8 +189,7 @@ Rect dbBPin::getBBox()
   Rect bbox;
   bbox.mergeInit();
   for (dbBox* box : getBoxes()) {
-    Rect rect;
-    box->getBox(rect);
+    Rect rect = box->getBox();
     bbox.merge(rect);
   }
   return bbox;
@@ -241,6 +247,17 @@ int dbBPin::getMinSpacing()
   return bpin->_min_spacing;
 }
 
+std::vector<dbAccessPoint*> dbBPin::getAccessPoints() const
+{
+  _dbBPin* bpin = (_dbBPin*) this;
+  _dbBlock* block = (_dbBlock*) getBTerm()->getBlock();
+  std::vector<dbAccessPoint*> aps;
+  for (const auto& ap : bpin->aps_) {
+    aps.push_back((dbAccessPoint*) block->ap_tbl_->getPtr(ap));
+  }
+  return aps;
+}
+
 dbBPin* dbBPin::create(dbBTerm* bterm_)
 {
   _dbBTerm* bterm = (_dbBTerm*) bterm_;
@@ -263,12 +280,12 @@ void dbBPin::destroy(dbBPin* bpin_)
     callback->inDbBPinDestroy(bpin_);
   // unlink bpin from bterm
   uint id = bpin->getOID();
-  _dbBPin* prev = NULL;
+  _dbBPin* prev = nullptr;
   uint cur = bterm->_bpins;
   while (cur) {
     _dbBPin* c = block->_bpin_tbl->getPtr(cur);
     if (cur == id) {
-      if (prev == NULL)
+      if (prev == nullptr)
         bterm->_bpins = bpin->_next_bpin;
       else
         prev->_next_bpin = bpin->_next_bpin;

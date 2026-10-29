@@ -7,6 +7,7 @@
 // licence-clean by construction.
 #include "eos/db/odb.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -383,6 +384,37 @@ TEST(Odb, EcoQueriesAndMutations) {
             ErrorCode::kNotFound);
   EXPECT_EQ(db.SwapInstanceMaster("u1", "NOPE").code(),
             ErrorCode::kNotFound);
+}
+
+TEST(Odb, ReadDbOrfsV30GcdReportsCountsAndRoundTrips) {
+  // The check the ead3236 re-pin exists for (fix track unit REPIN):
+  // EOS's facade reads the real ORFS v3.0 sky130hd gcd final
+  // database, which the v2.0 pin rejected on its schema version.
+  // The evidence file is local-only and never committed, so the
+  // test is gated on EOS_ORFS_ODB_PATH and skips (rather than
+  // failing) wherever the file is absent, including CI. Run with
+  // the variable set, the expected counts are the candidate
+  // probe's from docs/odb-repin-decision.md Section 2: block gcd,
+  // 1046 instances, 394 nets.
+  const char* path = std::getenv("EOS_ORFS_ODB_PATH");
+  if (path == nullptr || path[0] == '\0') {
+    GTEST_SKIP() << "EOS_ORFS_ODB_PATH not set; the ORFS v3.0 "
+                    "evidence database is local-only";
+  }
+  TempDir dir;
+  OdbDatabase db;
+  ASSERT_TRUE(db.ReadDb(path).ok());
+  EXPECT_EQ(db.TopBlockName(), "gcd");
+  EXPECT_EQ(db.InstanceCount(), 1046u);
+  EXPECT_EQ(db.NetCount(), 394u);
+  const std::string out = dir.Path("roundtrip.odb");
+  ASSERT_TRUE(db.WriteDb(out).ok());
+
+  OdbDatabase reread;
+  ASSERT_TRUE(reread.ReadDb(out).ok());
+  EXPECT_EQ(reread.TopBlockName(), "gcd");
+  EXPECT_EQ(reread.InstanceCount(), 1046u);
+  EXPECT_EQ(reread.NetCount(), 394u);
 }
 
 TEST(Odb, WriteDefBeforeAnyDefIsInvalidState) {

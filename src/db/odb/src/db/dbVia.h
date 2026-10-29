@@ -41,13 +41,14 @@
 
 namespace odb {
 
-class _dbTechLayer;
-class _dbTechViaGenerateRule;
 class _dbBox;
 class _dbDatabase;
+class _dbTech;
+class _dbTechLayer;
+class _dbTechViaGenerateRule;
+class dbDiff;
 class dbIStream;
 class dbOStream;
-class dbDiff;
 
 struct _dbViaFlags
 {
@@ -55,7 +56,8 @@ struct _dbViaFlags
   uint _is_tech_via : 1;
   uint _has_params : 1;
   dbOrientType::Value _orient : 4;
-  uint _spare_bits : 25;
+  bool default_ : 1;
+  uint _spare_bits : 24;
 };
 
 class _dbVia : public _dbObject
@@ -87,6 +89,7 @@ class _dbVia : public _dbObject
 
   void differences(dbDiff& diff, const char* field, const _dbVia& rhs) const;
   void out(dbDiff& diff, char side, const char* field) const;
+  _dbTech* getTech();
 };
 
 dbOStream& operator<<(dbOStream& stream, const _dbVia& v);

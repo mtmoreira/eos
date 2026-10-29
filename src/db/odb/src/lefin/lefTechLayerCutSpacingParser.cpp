@@ -25,46 +25,17 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <boost/bind.hpp>
-#include <boost/config/warning_disable.hpp>
-#include <boost/fusion/algorithm.hpp>
-#include <boost/fusion/container.hpp>
-#include <boost/fusion/include/adapt_struct.hpp>
-#include <boost/fusion/include/at_c.hpp>
-#include <boost/fusion/include/io.hpp>
-#include <boost/fusion/sequence.hpp>
-#include <boost/fusion/sequence/intrinsic/at_c.hpp>
-#include <boost/lambda/lambda.hpp>
-#include <boost/optional/optional_io.hpp>
-#include <boost/spirit/include/phoenix_core.hpp>
-#include <boost/spirit/include/phoenix_operator.hpp>
-#include <boost/spirit/include/qi.hpp>
-#include <boost/spirit/include/qi_alternative.hpp>
 #include <functional>
 #include <iostream>
 #include <string>
 
+#include "boostParser.h"
 #include "db.h"
 #include "lefLayerPropParser.h"
 #include "lefin.h"
 
 namespace lefTechLayerCutSpacing {
-namespace qi = boost::spirit::qi;
-namespace ascii = boost::spirit::ascii;
-namespace phoenix = boost::phoenix;
-using ascii::char_;
-using boost::fusion::at_c;
-using boost::spirit::ascii::alpha;
-using boost::spirit::ascii::space_type;
-using boost::spirit::ascii::string;
-using boost::spirit::qi::lit;
-using qi::lexeme;
 
-using qi::double_;
-using qi::int_;
-// using qi::_1;
-using ascii::space;
-using phoenix::ref;
 void setCutSpacing(double value,
                    odb::lefTechLayerCutSpacingParser* parser,
                    odb::dbTechLayer* layer,
@@ -148,7 +119,7 @@ void addAdjacentCutsSubRule(
   auto className = at_c<6>(params);
   auto sideParallelNoPrl = at_c<7>(params);
   auto sameMask = at_c<8>(params);
-  uint cuts_int = (uint) cuts[0] - (uint) '0';
+  odb::uint cuts_int = (odb::uint) cuts[0] - (odb::uint) '0';
   parser->curRule->setAdjacentCuts(cuts_int);
   if (aligned.is_initialized()) {
     parser->curRule->setExactAligned(true);
@@ -367,8 +338,6 @@ bool parse(
     odb::lefin* lefin,
     std::vector<std::pair<odb::dbObject*, std::string>>& incomplete_props)
 {
-  qi::rule<Iterator, std::string(), ascii::space_type> _string;
-  _string %= lexeme[(alpha >> *(char_ - ' ' - '\n'))];
   qi::rule<std::string::iterator, space_type> LAYER_CUTCLASS
       = (lit("CUTCLASS")
          >> _string[boost::bind(&setCutClass, _1, parser, layer)]

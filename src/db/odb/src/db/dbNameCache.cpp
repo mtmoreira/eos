@@ -50,7 +50,7 @@ template class dbTable<_dbName>;
 // _dbName
 /////////////////
 _dbName::_dbName(_dbDatabase*, const _dbName& n)
-    : _name(NULL), _next_entry(n._next_entry), _ref_cnt(n._ref_cnt)
+    : _name(nullptr), _next_entry(n._next_entry), _ref_cnt(n._ref_cnt)
 {
   if (n._name) {
     _name = strdup(n._name);
@@ -60,7 +60,7 @@ _dbName::_dbName(_dbDatabase*, const _dbName& n)
 
 _dbName::_dbName(_dbDatabase*)
 {
-  _name = NULL;
+  _name = nullptr;
   _ref_cnt = 0;
 }
 
@@ -134,7 +134,6 @@ _dbNameCache::_dbNameCache(_dbDatabase* db,
                            dbObjectTable* (dbObject::*m)(dbObjectType))
 {
   _name_tbl = new dbTable<_dbName>(db, owner, m, dbNameObj);
-  ZALLOCATED(_name_tbl);
 
   _name_hash.setTable(_name_tbl);
 }
@@ -145,7 +144,6 @@ _dbNameCache::_dbNameCache(_dbDatabase* db,
     : _name_hash(cache._name_hash)
 {
   _name_tbl = new dbTable<_dbName>(db, owner, *cache._name_tbl);
-  ZALLOCATED(_name_tbl);
 
   _name_hash.setTable(_name_tbl);
 }
@@ -206,7 +204,7 @@ uint _dbNameCache::addName(const char* name)
 {
   _dbName* n = _name_hash.find(name);
 
-  if (n == NULL) {
+  if (n == nullptr) {
     n = _name_tbl->create();
     n->_name = strdup(name);
     ZALLOCATED(n->_name);

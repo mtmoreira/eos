@@ -133,7 +133,12 @@ class _dbTechLayerAntennaRule : public _dbObject
   double _area_minus_diff_factor;
   bool _has_antenna_cumroutingpluscut;
 
-  _dbTechLayerAntennaRule(_dbDatabase*) {}
+  _dbTechLayerAntennaRule(_dbDatabase*)
+      : _gate_plus_diff_factor(0),
+        _area_minus_diff_factor(0),
+        _has_antenna_cumroutingpluscut(false)
+  {
+  }
   _dbTechLayerAntennaRule(_dbDatabase*, const _dbTechLayerAntennaRule& r)
       : _layer(r._layer),
         _area_mult(r._area_mult),
@@ -172,10 +177,11 @@ class _dbTechAntennaAreaElement
  public:
   ~_dbTechAntennaAreaElement(){};
 
-  static void create(dbVector<_dbTechAntennaAreaElement*>& incon,
-                     double inarea,
-                     dbTechLayer* inly
-                     = NULL);  // Allocate a new element and add to container.
+  static void create(
+      dbVector<_dbTechAntennaAreaElement*>& incon,
+      double inarea,
+      dbTechLayer* inly
+      = nullptr);  // Allocate a new element and add to container.
   void writeLef(const char* header, dbTech* tech, lefout& writer) const;
 
   friend dbOStream& operator<<(dbOStream& stream,

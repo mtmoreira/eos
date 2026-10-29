@@ -30,11 +30,13 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
+#include "dbTypes.h"
+
 #include <ctype.h>
-#include <string.h>
+
+#include <cstring>
 
 #include "dbId.h"
-#include "dbTypes.h"
 
 namespace odb {
 
@@ -56,32 +58,41 @@ bool dbIdValidation::isId(const char* inid)
 
 dbOrientType::dbOrientType(const char* orient)
 {
-  if (strcasecmp(orient, "R0") == 0)
+  if (strcasecmp(orient, "R0") == 0) {
     _value = R0;
-
-  else if (strcasecmp(orient, "R90") == 0)
+  } else if (strcasecmp(orient, "R90") == 0) {
     _value = R90;
-
-  else if (strcasecmp(orient, "R180") == 0)
+  } else if (strcasecmp(orient, "R180") == 0) {
     _value = R180;
-
-  else if (strcasecmp(orient, "R270") == 0)
+  } else if (strcasecmp(orient, "R270") == 0) {
     _value = R270;
-
-  else if (strcasecmp(orient, "MY") == 0)
+  } else if (strcasecmp(orient, "MY") == 0) {
     _value = MY;
-
-  else if (strcasecmp(orient, "MYR90") == 0)
+  } else if (strcasecmp(orient, "MYR90") == 0) {
     _value = MYR90;
-
-  else if (strcasecmp(orient, "MX") == 0)
+  } else if (strcasecmp(orient, "MX") == 0) {
     _value = MX;
-
-  else if (strcasecmp(orient, "MXR90") == 0)
+  } else if (strcasecmp(orient, "MXR90") == 0) {
     _value = MXR90;
-
-  else
+  } else if (strcasecmp(orient, "N") == 0) {  // LEF/DEF style names
     _value = R0;
+  } else if (strcasecmp(orient, "W") == 0) {
+    _value = R90;
+  } else if (strcasecmp(orient, "S") == 0) {
+    _value = R180;
+  } else if (strcasecmp(orient, "E") == 0) {
+    _value = R270;
+  } else if (strcasecmp(orient, "FN") == 0) {
+    _value = MY;
+  } else if (strcasecmp(orient, "FE") == 0) {
+    _value = MYR90;
+  } else if (strcasecmp(orient, "FS") == 0) {
+    _value = MX;
+  } else if (strcasecmp(orient, "FW") == 0) {
+    _value = MXR90;
+  } else {
+    _value = R0;
+  }
 }
 
 dbOrientType::dbOrientType(Value orient)
@@ -184,6 +195,72 @@ dbOrientType dbOrientType::flipY() const
       return R90;
   }
   return R0;
+}
+
+bool dbOrientType::isRightAngleRotation() const
+{
+  switch (_value) {
+    case R90:
+    case R270:
+    case MYR90:
+    case MXR90:
+      return true;
+    case R0:
+    case R180:
+    case MY:
+    case MX:
+      return false;
+  }
+  assert(false);
+  return false;
+}
+
+dbGroupType::dbGroupType(const char* orient)
+{
+  if (strcasecmp(orient, "PHYSICAL_CLUSTER") == 0)
+    _value = PHYSICAL_CLUSTER;
+
+  else if (strcasecmp(orient, "VOLTAGE_DOMAIN") == 0)
+    _value = VOLTAGE_DOMAIN;
+
+  else
+    _value = PHYSICAL_CLUSTER;
+}
+
+dbGroupType::dbGroupType(Value orient)
+{
+  _value = orient;
+}
+
+dbGroupType::dbGroupType()
+{
+  _value = PHYSICAL_CLUSTER;
+}
+
+dbGroupType::dbGroupType(const dbGroupType& type)
+{
+  _value = type._value;
+}
+
+const char* dbGroupType::getString() const
+{
+  const char* value = "";
+
+  switch (_value) {
+    case PHYSICAL_CLUSTER:
+      value = "PHYSICAL_CLUSTER";
+      break;
+
+    case VOLTAGE_DOMAIN:
+      value = "VOLTAGE_DOMAIN";
+      break;
+
+    case POWER_DOMAIN:
+      value = "POWER_DOMAIN";
+      break;
+  }
+
+  return value;
 }
 
 dbSigType::dbSigType(const char* value)
@@ -551,6 +628,42 @@ dbMasterType::dbMasterType(const char* value)
 
   else if (strcasecmp(value, "ENDCAP BOTTOMRIGHT") == 0)
     _value = ENDCAP_BOTTOMRIGHT;
+
+  else if (strcasecmp(value, "ENDCAP BOTTOMEDGE") == 0)
+    _value = ENDCAP_LEF58_BOTTOMEDGE;
+
+  else if (strcasecmp(value, "ENDCAP TOPEDGE") == 0)
+    _value = ENDCAP_LEF58_TOPEDGE;
+
+  else if (strcasecmp(value, "ENDCAP RIGHTEDGE") == 0)
+    _value = ENDCAP_LEF58_RIGHTEDGE;
+
+  else if (strcasecmp(value, "ENDCAP LEFTEDGE") == 0)
+    _value = ENDCAP_LEF58_LEFTEDGE;
+
+  else if (strcasecmp(value, "ENDCAP RIGHTBOTTOMEDGE") == 0)
+    _value = ENDCAP_LEF58_RIGHTBOTTOMEDGE;
+
+  else if (strcasecmp(value, "ENDCAP LEFTBOTTOMEDGE") == 0)
+    _value = ENDCAP_LEF58_LEFTBOTTOMEDGE;
+
+  else if (strcasecmp(value, "ENDCAP RIGHTTOPEDGE") == 0)
+    _value = ENDCAP_LEF58_RIGHTTOPEDGE;
+
+  else if (strcasecmp(value, "ENDCAP LEFTTOPEDGE") == 0)
+    _value = ENDCAP_LEF58_LEFTTOPEDGE;
+
+  else if (strcasecmp(value, "ENDCAP RIGHTBOTTOMCORNER") == 0)
+    _value = ENDCAP_LEF58_RIGHTBOTTOMCORNER;
+
+  else if (strcasecmp(value, "ENDCAP LEFTBOTTOMCORNER") == 0)
+    _value = ENDCAP_LEF58_LEFTBOTTOMCORNER;
+
+  else if (strcasecmp(value, "ENDCAP RIGHTTOPCORNER") == 0)
+    _value = ENDCAP_LEF58_RIGHTTOPCORNER;
+
+  else if (strcasecmp(value, "ENDCAP LEFTTOPCORNER") == 0)
+    _value = ENDCAP_LEF58_LEFTTOPCORNER;
 }
 
 dbMasterType::dbMasterType(Value value)
@@ -684,6 +797,54 @@ const char* dbMasterType::getString() const
     case ENDCAP_BOTTOMRIGHT:
       value = "ENDCAP BOTTOMRIGHT";
       break;
+
+    case ENDCAP_LEF58_BOTTOMEDGE:
+      value = "ENDCAP BOTTOMEDGE";
+      break;
+
+    case ENDCAP_LEF58_TOPEDGE:
+      value = "ENDCAP TOPEDGE";
+      break;
+
+    case ENDCAP_LEF58_RIGHTEDGE:
+      value = "ENDCAP RIGHTEDGE";
+      break;
+
+    case ENDCAP_LEF58_LEFTEDGE:
+      value = "ENDCAP LEFTEDGE";
+      break;
+
+    case ENDCAP_LEF58_RIGHTBOTTOMEDGE:
+      value = "ENDCAP RIGHTBOTTOMEDGE";
+      break;
+
+    case ENDCAP_LEF58_LEFTBOTTOMEDGE:
+      value = "ENDCAP LEFTBOTTOMEDGE";
+      break;
+
+    case ENDCAP_LEF58_RIGHTTOPEDGE:
+      value = "ENDCAP RIGHTTOPEDGE";
+      break;
+
+    case ENDCAP_LEF58_LEFTTOPEDGE:
+      value = "ENDCAP LEFTTOPEDGE";
+      break;
+
+    case ENDCAP_LEF58_RIGHTBOTTOMCORNER:
+      value = "ENDCAP RIGHTBOTTOMCORNER";
+      break;
+
+    case ENDCAP_LEF58_LEFTBOTTOMCORNER:
+      value = "ENDCAP LEFTBOTTOMCORNER";
+      break;
+
+    case ENDCAP_LEF58_RIGHTTOPCORNER:
+      value = "ENDCAP RIGHTTOPCORNER";
+      break;
+
+    case ENDCAP_LEF58_LEFTTOPCORNER:
+      value = "ENDCAP LEFTTOPCORNER";
+      break;
   }
 
   return value;
@@ -721,6 +882,18 @@ bool dbMasterType::isBlock() const
     case ENDCAP_TOPRIGHT:
     case ENDCAP_BOTTOMLEFT:
     case ENDCAP_BOTTOMRIGHT:
+    case ENDCAP_LEF58_BOTTOMEDGE:
+    case ENDCAP_LEF58_TOPEDGE:
+    case ENDCAP_LEF58_RIGHTEDGE:
+    case ENDCAP_LEF58_LEFTEDGE:
+    case ENDCAP_LEF58_RIGHTBOTTOMEDGE:
+    case ENDCAP_LEF58_LEFTBOTTOMEDGE:
+    case ENDCAP_LEF58_RIGHTTOPEDGE:
+    case ENDCAP_LEF58_LEFTTOPEDGE:
+    case ENDCAP_LEF58_RIGHTBOTTOMCORNER:
+    case ENDCAP_LEF58_LEFTBOTTOMCORNER:
+    case ENDCAP_LEF58_RIGHTTOPCORNER:
+    case ENDCAP_LEF58_LEFTTOPCORNER:
       return false;
   }
   assert(false);
@@ -759,6 +932,18 @@ bool dbMasterType::isCore() const
     case ENDCAP_TOPRIGHT:
     case ENDCAP_BOTTOMLEFT:
     case ENDCAP_BOTTOMRIGHT:
+    case ENDCAP_LEF58_BOTTOMEDGE:
+    case ENDCAP_LEF58_TOPEDGE:
+    case ENDCAP_LEF58_RIGHTEDGE:
+    case ENDCAP_LEF58_LEFTEDGE:
+    case ENDCAP_LEF58_RIGHTBOTTOMEDGE:
+    case ENDCAP_LEF58_LEFTBOTTOMEDGE:
+    case ENDCAP_LEF58_RIGHTTOPEDGE:
+    case ENDCAP_LEF58_LEFTTOPEDGE:
+    case ENDCAP_LEF58_RIGHTBOTTOMCORNER:
+    case ENDCAP_LEF58_LEFTBOTTOMCORNER:
+    case ENDCAP_LEF58_RIGHTTOPCORNER:
+    case ENDCAP_LEF58_LEFTTOPCORNER:
       return false;
   }
   assert(false);
@@ -797,6 +982,18 @@ bool dbMasterType::isPad() const
     case ENDCAP_TOPRIGHT:
     case ENDCAP_BOTTOMLEFT:
     case ENDCAP_BOTTOMRIGHT:
+    case ENDCAP_LEF58_BOTTOMEDGE:
+    case ENDCAP_LEF58_TOPEDGE:
+    case ENDCAP_LEF58_RIGHTEDGE:
+    case ENDCAP_LEF58_LEFTEDGE:
+    case ENDCAP_LEF58_RIGHTBOTTOMEDGE:
+    case ENDCAP_LEF58_LEFTBOTTOMEDGE:
+    case ENDCAP_LEF58_RIGHTTOPEDGE:
+    case ENDCAP_LEF58_LEFTTOPEDGE:
+    case ENDCAP_LEF58_RIGHTBOTTOMCORNER:
+    case ENDCAP_LEF58_LEFTBOTTOMCORNER:
+    case ENDCAP_LEF58_RIGHTTOPCORNER:
+    case ENDCAP_LEF58_LEFTTOPCORNER:
       return false;
   }
   assert(false);
@@ -813,6 +1010,18 @@ bool dbMasterType::isEndCap() const
     case ENDCAP_TOPRIGHT:
     case ENDCAP_BOTTOMLEFT:
     case ENDCAP_BOTTOMRIGHT:
+    case ENDCAP_LEF58_BOTTOMEDGE:
+    case ENDCAP_LEF58_TOPEDGE:
+    case ENDCAP_LEF58_RIGHTEDGE:
+    case ENDCAP_LEF58_LEFTEDGE:
+    case ENDCAP_LEF58_RIGHTBOTTOMEDGE:
+    case ENDCAP_LEF58_LEFTBOTTOMEDGE:
+    case ENDCAP_LEF58_RIGHTTOPEDGE:
+    case ENDCAP_LEF58_LEFTTOPEDGE:
+    case ENDCAP_LEF58_RIGHTBOTTOMCORNER:
+    case ENDCAP_LEF58_LEFTBOTTOMCORNER:
+    case ENDCAP_LEF58_RIGHTTOPCORNER:
+    case ENDCAP_LEF58_LEFTTOPCORNER:
       return true;
     case NONE:
     case COVER:
@@ -841,6 +1050,56 @@ bool dbMasterType::isEndCap() const
   return false;
 }
 
+bool dbMasterType::isCover() const
+{
+  switch (_value) {
+    case COVER:
+    case COVER_BUMP:
+      return true;
+    case NONE:
+    case RING:
+    case BLOCK:
+    case BLOCK_BLACKBOX:
+    case BLOCK_SOFT:
+    case PAD:
+    case PAD_INPUT:
+    case PAD_OUTPUT:
+    case PAD_INOUT:
+    case PAD_POWER:
+    case PAD_SPACER:
+    case PAD_AREAIO:
+    case CORE:
+    case CORE_FEEDTHRU:
+    case CORE_TIEHIGH:
+    case CORE_TIELOW:
+    case CORE_SPACER:
+    case CORE_ANTENNACELL:
+    case CORE_WELLTAP:
+    case ENDCAP:
+    case ENDCAP_PRE:
+    case ENDCAP_POST:
+    case ENDCAP_TOPLEFT:
+    case ENDCAP_TOPRIGHT:
+    case ENDCAP_BOTTOMLEFT:
+    case ENDCAP_BOTTOMRIGHT:
+    case ENDCAP_LEF58_BOTTOMEDGE:
+    case ENDCAP_LEF58_TOPEDGE:
+    case ENDCAP_LEF58_RIGHTEDGE:
+    case ENDCAP_LEF58_LEFTEDGE:
+    case ENDCAP_LEF58_RIGHTBOTTOMEDGE:
+    case ENDCAP_LEF58_LEFTBOTTOMEDGE:
+    case ENDCAP_LEF58_RIGHTTOPEDGE:
+    case ENDCAP_LEF58_LEFTTOPEDGE:
+    case ENDCAP_LEF58_RIGHTBOTTOMCORNER:
+    case ENDCAP_LEF58_LEFTBOTTOMCORNER:
+    case ENDCAP_LEF58_RIGHTTOPCORNER:
+    case ENDCAP_LEF58_LEFTTOPCORNER:
+      return false;
+  }
+  assert(false);
+  return false;
+}
+
 dbTechLayerType::dbTechLayerType(const char* value)
 {
   if (strcasecmp(value, "ROUTING") == 0)
@@ -860,21 +1119,6 @@ dbTechLayerType::dbTechLayerType(const char* value)
 
   else
     _value = NONE;
-}
-
-dbTechLayerType::dbTechLayerType(Value value)
-{
-  _value = value;
-}
-
-dbTechLayerType::dbTechLayerType()
-{
-  _value = ROUTING;
-}
-
-dbTechLayerType::dbTechLayerType(const dbTechLayerType& value)
-{
-  _value = value._value;
 }
 
 const char* dbTechLayerType::getString() const
@@ -923,21 +1167,6 @@ dbTechLayerDir::dbTechLayerDir(const char* value)
 
   else
     _value = NONE;
-}
-
-dbTechLayerDir::dbTechLayerDir(Value value)
-{
-  _value = value;
-}
-
-dbTechLayerDir::dbTechLayerDir()
-{
-  _value = NONE;
-}
-
-dbTechLayerDir::dbTechLayerDir(const dbTechLayerDir& value)
-{
-  _value = value._value;
 }
 
 const char* dbTechLayerDir::getString() const
@@ -1055,6 +1284,8 @@ dbBoxOwner::dbBoxOwner(const char* value)
     _value = SWIRE;
   else if (strcasecmp(value, "REGION") == 0)
     _value = REGION;
+  else
+    _value = UNKNOWN;
 }
 
 dbBoxOwner::dbBoxOwner(Value value)
@@ -1622,6 +1853,130 @@ const char* dbDirection::getString() const
 
     case WEST:
       value = "WEST";
+      break;
+    case UP:
+      value = "UP";
+      break;
+    case DOWN:
+      value = "DOWN";
+      break;
+  }
+
+  return value;
+}
+
+dbMTermShapeType::dbMTermShapeType(const char* value)
+{
+  if (strcasecmp(value, "NONE") == 0)
+    _value = NONE;
+
+  else if (strcasecmp(value, "RING") == 0)
+    _value = RING;
+
+  else if (strcasecmp(value, "ABUTMENT") == 0)
+    _value = ABUTMENT;
+
+  else if (strcasecmp(value, "FEEDTHRU") == 0)
+    _value = FEEDTHRU;
+
+  else
+    _value = NONE;
+}
+
+dbMTermShapeType::dbMTermShapeType(Value value)
+{
+  _value = value;
+}
+
+dbMTermShapeType::dbMTermShapeType()
+{
+  _value = NONE;
+}
+
+dbMTermShapeType::dbMTermShapeType(const dbMTermShapeType& value)
+{
+  _value = value._value;
+}
+
+const char* dbMTermShapeType::getString() const
+{
+  const char* value = "";
+
+  switch (_value) {
+    case NONE:
+      value = "NONE";
+      break;
+
+    case RING:
+      value = "RING";
+      break;
+
+    case FEEDTHRU:
+      value = "FEEDTHRU";
+      break;
+
+    case ABUTMENT:
+      value = "ABUTMENT";
+      break;
+  }
+
+  return value;
+}
+
+dbAccessType::dbAccessType(const char* orient)
+{
+  if (strcasecmp(orient, "OnGrid") == 0)
+    _value = OnGrid;
+
+  else if (strcasecmp(orient, "HalfGrid") == 0)
+    _value = HalfGrid;
+
+  else if (strcasecmp(orient, "Center") == 0)
+    _value = Center;
+
+  else if (strcasecmp(orient, "EncOpt") == 0)
+    _value = EncOpt;
+
+  else if (strcasecmp(orient, "NearbyGrid") == 0)
+    _value = NearbyGrid;
+
+  else
+    _value = OnGrid;
+}
+
+dbAccessType::dbAccessType(Value orient)
+{
+  _value = orient;
+}
+
+dbAccessType::dbAccessType()
+{
+  _value = OnGrid;
+}
+
+const char* dbAccessType::getString() const
+{
+  const char* value = "";
+
+  switch (_value) {
+    case OnGrid:
+      value = "OnGrid";
+      break;
+
+    case HalfGrid:
+      value = "HalfGrid";
+      break;
+
+    case Center:
+      value = "Center";
+      break;
+
+    case EncOpt:
+      value = "EncOpt";
+      break;
+
+    case NearbyGrid:
+      value = "NearbyGrid";
       break;
   }
 

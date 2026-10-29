@@ -43,6 +43,7 @@ template <class T>
 class dbTable;
 class _dbMTerm;
 class _dbBox;
+class _dbLib;
 class _dbMPin;
 class _dbTarget;
 class _dbSite;
@@ -84,6 +85,7 @@ class _dbMaster : public _dbObject
   dbId<_dbMaster> _leq;
   dbId<_dbMaster> _eeq;
   dbId<_dbBox> _obstructions;
+  dbId<_dbLib> _lib_for_site;
   dbId<_dbSite> _site;
   dbHashTable<_dbMTerm> _mterm_hash;
   dbTable<_dbMTerm>* _mterm_tbl;
@@ -98,8 +100,6 @@ class _dbMaster : public _dbObject
   dbBoxItr* _box_itr;
   dbMPinItr* _mpin_itr;
   dbTargetItr* _target_itr;
-  int _clocked_mterm_index;
-  int _output_mterm_index;
 
   _dbMaster(_dbDatabase* db);
   _dbMaster(_dbDatabase* db, const _dbMaster& m);

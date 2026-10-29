@@ -41,7 +41,6 @@
 // User Code End Includes
 
 namespace odb {
-
 class dbIStream;
 class dbOStream;
 class dbDiff;
@@ -49,27 +48,30 @@ class _dbDatabase;
 class _dbInst;
 class _dbModInst;
 class _dbNet;
-// User Code Begin Classes
-// User Code End Classes
+class _dbRegion;
 
 struct dbGroupFlags
 {
   uint _type : 2;
-  uint _box : 1;
-  uint spare_bits_ : 29;
+  uint spare_bits_ : 30;
 };
-// User Code Begin Structs
-// User Code End Structs
 
 class _dbGroup : public _dbObject
 {
  public:
-  // User Code Begin Enums
-  // User Code End Enums
+  _dbGroup(_dbDatabase*, const _dbGroup& r);
+  _dbGroup(_dbDatabase*);
+
+  ~_dbGroup();
+
+  bool operator==(const _dbGroup& rhs) const;
+  bool operator!=(const _dbGroup& rhs) const { return !operator==(rhs); }
+  bool operator<(const _dbGroup& rhs) const;
+  void differences(dbDiff& diff, const char* field, const _dbGroup& rhs) const;
+  void out(dbDiff& diff, char side, const char* field) const;
 
   dbGroupFlags flags_;
   char* _name;
-  Rect _box;
   dbId<_dbGroup> _next_entry;
   dbId<_dbGroup> _group_next;
   dbId<_dbGroup> _parent_group;
@@ -78,24 +80,11 @@ class _dbGroup : public _dbObject
   dbId<_dbGroup> _groups;
   dbVector<dbId<_dbNet>> _power_nets;
   dbVector<dbId<_dbNet>> _ground_nets;
-
-  // User Code Begin Fields
-  dbVector<dbId<_dbNet>> _nets;
-  // User Code End Fields
-  _dbGroup(_dbDatabase*, const _dbGroup& r);
-  _dbGroup(_dbDatabase*);
-  ~_dbGroup();
-  bool operator==(const _dbGroup& rhs) const;
-  bool operator!=(const _dbGroup& rhs) const { return !operator==(rhs); }
-  bool operator<(const _dbGroup& rhs) const;
-  void differences(dbDiff& diff, const char* field, const _dbGroup& rhs) const;
-  void out(dbDiff& diff, char side, const char* field) const;
-  // User Code Begin Methods
-  // User Code End Methods
+  dbId<_dbGroup> region_next_;
+  dbId<_dbGroup> region_prev_;
+  dbId<_dbRegion> region_;
 };
 dbIStream& operator>>(dbIStream& stream, _dbGroup& obj);
 dbOStream& operator<<(dbOStream& stream, const _dbGroup& obj);
-// User Code Begin General
-// User Code End General
 }  // namespace odb
    // Generator Code End Header

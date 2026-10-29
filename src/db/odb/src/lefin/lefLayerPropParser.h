@@ -28,6 +28,8 @@
 #pragma once
 
 #include <boost/fusion/container.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/spirit/include/support_unused.hpp>
 #include <map>
 #include <string>
 #include <vector>
@@ -41,7 +43,7 @@ namespace odb {
 class lefTechLayerSpacingEolParser
 {
  public:
-  static void parse(std::string, dbTechLayer*, lefin*);
+  static void parse(const std::string&, dbTechLayer*, lefin*);
 };
 
 class lefTechLayerMinStepParser
@@ -129,7 +131,7 @@ class lefTechLayerCutEnclosureRuleParser
 {
  public:
   lefTechLayerCutEnclosureRuleParser(lefin*);
-  void parse(std::string, odb::dbTechLayer*);
+  void parse(const std::string&, odb::dbTechLayer*);
 
  private:
   lefin* lefin_;
@@ -145,7 +147,7 @@ class lefTechLayerEolExtensionRuleParser
 {
  public:
   lefTechLayerEolExtensionRuleParser(lefin*);
-  void parse(std::string, odb::dbTechLayer*);
+  void parse(const std::string&, odb::dbTechLayer*);
 
  private:
   lefin* lefin_;
@@ -160,7 +162,7 @@ class lefTechLayerEolKeepOutRuleParser
 {
  public:
   lefTechLayerEolKeepOutRuleParser(lefin*);
-  void parse(std::string, odb::dbTechLayer*);
+  void parse(const std::string&, odb::dbTechLayer*);
 
  private:
   lefin* lefin_;
@@ -173,6 +175,177 @@ class lefTechLayerEolKeepOutRuleParser
   void setClass(std::string,
                 odb::dbTechLayerEolKeepOutRule* rule,
                 odb::dbTechLayer* layer);
+};
+
+class lefTechLayerAreaRuleParser
+{
+ public:
+  lefTechLayerAreaRuleParser(lefin*);
+  void parse(const std::string&,
+             odb::dbTechLayer*,
+             std::vector<std::pair<odb::dbObject*, std::string>>&);
+
+ private:
+  lefin* lefin_;
+  bool parseSubRule(
+      std::string,
+      odb::dbTechLayer* layer,
+      std::vector<std::pair<odb::dbObject*, std::string>>& incomplete_props);
+  void setInt(double val,
+              odb::dbTechLayerAreaRule* rule,
+              void (odb::dbTechLayerAreaRule::*func)(int));
+  void setExceptEdgeLengths(const boost::fusion::vector<double, double>& params,
+                            odb::dbTechLayerAreaRule* rule);
+  void setExceptMinSize(const boost::fusion::vector<double, double>& params,
+                        odb::dbTechLayerAreaRule* rule);
+  void setExceptStep(const boost::fusion::vector<double, double>& params,
+                     odb::dbTechLayerAreaRule* rule);
+  void setTrimLayer(
+      std::string val,
+      odb::dbTechLayerAreaRule* rule,
+      odb::dbTechLayer* layer,
+      std::vector<std::pair<odb::dbObject*, std::string>>& incomplete_props);
+};
+
+class lefTechLayerPitchRuleParser
+{
+ public:
+  lefTechLayerPitchRuleParser(lefin*);
+  void parse(std::string, odb::dbTechLayer*);
+
+ private:
+  void setInt(double val,
+              odb::dbTechLayer* layer,
+              void (odb::dbTechLayer::*func)(int));
+  void setPitchXY(boost::fusion::vector<double, double>& params,
+                  odb::dbTechLayer* layer);
+  lefin* lefin_;
+};
+
+class lefTechLayerForbiddenSpacingRuleParser
+{
+ public:
+  lefTechLayerForbiddenSpacingRuleParser(lefin*);
+  void parse(std::string, odb::dbTechLayer*);
+
+ private:
+  lefin* lefin_;
+  bool parseSubRule(std::string, odb::dbTechLayer* layer);
+  void setInt(double val,
+              odb::dbTechLayerForbiddenSpacingRule* rule,
+              void (odb::dbTechLayerForbiddenSpacingRule::*func)(int));
+  void setForbiddenSpacing(const boost::fusion::vector<double, double>& params,
+                           odb::dbTechLayerForbiddenSpacingRule* rule);
+};
+
+class ArraySpacingParser
+{
+ public:
+  ArraySpacingParser(dbTechLayer* layer, lefin* lefin)
+      : layer_(layer), lefin_(lefin), rule_(nullptr)
+  {
+  }
+  bool parse(std::string);
+
+ private:
+  void setCutClass(std::string name);
+  void setArraySpacing(boost::fusion::vector<int, double>& params);
+  void setWithin(boost::fusion::vector<double, double>& params);
+  void setCutSpacing(double spacing);
+  void setViaWidth(double width);
+  dbTechLayer* layer_;
+  lefin* lefin_;
+  dbTechLayerArraySpacingRule* rule_;
+};
+
+class WidthTableParser
+{
+ public:
+  WidthTableParser(dbTechLayer* layer, lefin* lefin)
+      : layer_(layer), lefin_(lefin), rule_(nullptr)
+  {
+  }
+  void parse(const std::string&);
+
+ private:
+  void addWidth(double width);
+  bool parseSubRule(std::string s);
+  dbTechLayer* layer_;
+  lefin* lefin_;
+  dbTechLayerWidthTableRule* rule_;
+};
+
+class MinCutParser
+{
+ public:
+  MinCutParser(dbTechLayer* layer, lefin* lefin)
+      : layer_(layer), lefin_(lefin), rule_(nullptr)
+  {
+  }
+  void parse(const std::string&);
+
+ private:
+  bool parseSubRule(std::string);
+  void addCutClass(boost::fusion::vector<std::string, int>&);
+  void setWidth(double);
+  void setWithinCutDist(double);
+  void setLength(double);
+  void setLengthWithin(double);
+  void setArea(double);
+  void setAreaWithin(double);
+  dbTechLayer* layer_;
+  lefin* lefin_;
+  dbTechLayerMinCutRule* rule_;
+};
+
+class MetalWidthViaMapParser
+{
+ public:
+  MetalWidthViaMapParser(
+      dbTech* tech,
+      lefin* lefin,
+      std::vector<std::pair<odb::dbObject*, std::string>>& incomplete_props)
+      : tech_(tech),
+        lefin_(lefin),
+        cut_class_(false),
+        incomplete_props_(incomplete_props),
+        via_map(nullptr)
+  {
+  }
+  void parse(const std::string&);
+
+ private:
+  bool parseSubRule(std::string);
+  void addEntry(boost::fusion::vector<std::string,
+                                      double,
+                                      double,
+                                      boost::optional<double>,
+                                      boost::optional<double>,
+                                      std::string>&);
+  void setCutClass();
+  void setPGVia();
+  dbTech* tech_;
+  lefin* lefin_;
+  bool cut_class_;
+  std::vector<std::pair<dbObject*, std::string>>& incomplete_props_;
+  dbMetalWidthViaMap* via_map;
+};
+
+class KeepOutZoneParser
+{
+ public:
+  KeepOutZoneParser(dbTechLayer* layer, lefin* lefin)
+      : layer_(layer), lefin_(lefin), rule_(nullptr)
+  {
+  }
+  void parse(const std::string&);
+
+ private:
+  bool parseSubRule(std::string);
+  void setInt(double val, void (odb::dbTechLayerKeepOutZoneRule::*func)(int));
+  dbTechLayer* layer_;
+  lefin* lefin_;
+  dbTechLayerKeepOutZoneRule* rule_;
 };
 
 }  // namespace odb

@@ -36,10 +36,10 @@
 #include <map>
 #include <string>
 
-#include "db.h"
-#include "dbMap.h"
-#include "defout.h"
-#include "odb.h"
+#include "odb/db.h"
+#include "odb/dbMap.h"
+#include "odb/defout.h"
+#include "odb/odb.h"
 namespace utl {
 class Logger;
 }
@@ -91,6 +91,7 @@ class defout_impl
   void writeGCells(dbBlock* block);
   void writeVias(dbBlock* block);
   void writeVia(dbVia* via);
+  void writeComponentMaskShift(dbBlock* block);
   void writeInsts(dbBlock* block);
   void writeNonDefaultRules(dbBlock* block);
   void writeNonDefaultRule(dbTechNonDefaultRule* rule);
@@ -120,8 +121,8 @@ class defout_impl
     _use_net_inst_ids = false;
     _use_master_ids = false;
     _use_alias = false;
-    _select_net_map = NULL;
-    _select_inst_map = NULL;
+    _select_net_map = nullptr;
+    _select_inst_map = nullptr;
     _version = defout::DEF_5_8;
     _logger = logger;
   }

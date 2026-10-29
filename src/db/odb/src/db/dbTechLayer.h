@@ -39,11 +39,8 @@
 #include "dbTypes.h"
 #include "dbVector.h"
 #include "odb.h"
-// User Code Begin Includes
-// User Code End Includes
 
 namespace odb {
-
 class dbIStream;
 class dbOStream;
 class dbDiff;
@@ -60,7 +57,13 @@ class _dbTechLayerCutSpacingTableOrthRule;
 class _dbTechLayerCutSpacingTableDefRule;
 class _dbTechLayerCutEnclosureRule;
 class _dbTechLayerEolExtensionRule;
+class _dbTechLayerArraySpacingRule;
 class _dbTechLayerEolKeepOutRule;
+class _dbTechLayerWidthTableRule;
+class _dbTechLayerMinCutRule;
+class _dbTechLayerAreaRule;
+class _dbTechLayerForbiddenSpacingRule;
+class _dbTechLayerKeepOutZoneRule;
 // User Code Begin Classes
 class _dbTechLayerSpacingRule;
 class _dbTechMinCutRule;
@@ -86,19 +89,34 @@ struct dbTechLayerFlags
   bool right_way_on_grid_only_ : 1;
   bool right_way_on_grid_only_check_mask_ : 1;
   bool rect_only_except_non_core_pins_ : 1;
-  uint lef58_type_ : 3;
-  uint spare_bits_ : 6;
+  uint lef58_type_ : 5;
+  uint spare_bits_ : 4;
 };
-// User Code Begin Structs
-// User Code End Structs
 
 class _dbTechLayer : public _dbObject
 {
  public:
-  // User Code Begin Enums
-  // User Code End Enums
+  _dbTechLayer(_dbDatabase*, const _dbTechLayer& r);
+  _dbTechLayer(_dbDatabase*);
+
+  ~_dbTechLayer();
+
+  bool operator==(const _dbTechLayer& rhs) const;
+  bool operator!=(const _dbTechLayer& rhs) const { return !operator==(rhs); }
+  bool operator<(const _dbTechLayer& rhs) const;
+  void differences(dbDiff& diff,
+                   const char* field,
+                   const _dbTechLayer& rhs) const;
+  void out(dbDiff& diff, char side, const char* field) const;
+  dbObjectTable* getObjectTable(dbObjectType type);
+  // User Code Begin Methods
+  uint getV55RowIdx(const int& rowVal) const;
+  uint getV55ColIdx(const int& colVal) const;
+  uint getTwIdx(const int width, const int prl) const;
+  // User Code End Methods
 
   dbTechLayerFlags flags_;
+  uint wrong_way_width_;
 
   dbTable<_dbTechLayerCutClassRule>* cut_class_rules_tbl_;
   dbHashTable<_dbTechLayerCutClassRule> cut_class_rules_hash_;
@@ -121,7 +139,19 @@ class _dbTechLayer : public _dbObject
 
   dbTable<_dbTechLayerEolExtensionRule>* eol_ext_rules_tbl_;
 
+  dbTable<_dbTechLayerArraySpacingRule>* array_spacing_rules_tbl_;
+
   dbTable<_dbTechLayerEolKeepOutRule>* eol_keep_out_rules_tbl_;
+
+  dbTable<_dbTechLayerWidthTableRule>* width_table_rules_tbl_;
+
+  dbTable<_dbTechLayerMinCutRule>* min_cuts_rules_tbl_;
+
+  dbTable<_dbTechLayerAreaRule>* area_rules_tbl_;
+
+  dbTable<_dbTechLayerForbiddenSpacingRule>* forbidden_spacing_rules_tbl_;
+
+  dbTable<_dbTechLayerKeepOutZoneRule>* keepout_zone_rules_tbl_;
 
   // User Code Begin Fields
 
@@ -144,6 +174,7 @@ class _dbTechLayer : public _dbObject
   int _min_step;
   int _min_step_max_length;
   int _min_step_max_edges;
+  int _first_last_pitch;
 
   struct
   {  // Protrusion
@@ -171,26 +202,8 @@ class _dbTechLayer : public _dbObject
   dbId<_dbTechLayerAntennaRule> _oxide1;
   dbId<_dbTechLayerAntennaRule> _oxide2;
   // User Code End Fields
-  _dbTechLayer(_dbDatabase*, const _dbTechLayer& r);
-  _dbTechLayer(_dbDatabase*);
-  ~_dbTechLayer();
-  bool operator==(const _dbTechLayer& rhs) const;
-  bool operator!=(const _dbTechLayer& rhs) const { return !operator==(rhs); }
-  bool operator<(const _dbTechLayer& rhs) const;
-  void differences(dbDiff& diff,
-                   const char* field,
-                   const _dbTechLayer& rhs) const;
-  void out(dbDiff& diff, char side, const char* field) const;
-  dbObjectTable* getObjectTable(dbObjectType type);
-  // User Code Begin Methods
-  uint getV55RowIdx(const int& rowVal) const;
-  uint getV55ColIdx(const int& colVal) const;
-  uint getTwIdx(const int width, const int prl) const;
-  // User Code End Methods
 };
 dbIStream& operator>>(dbIStream& stream, _dbTechLayer& obj);
 dbOStream& operator<<(dbOStream& stream, const _dbTechLayer& obj);
-// User Code Begin General
-// User Code End General
 }  // namespace odb
    // Generator Code End Header
