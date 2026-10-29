@@ -472,6 +472,96 @@ TEST(StaFacade, WorstPathToUnknownEndpointFails) {
   EXPECT_EQ(path.status().code(), ErrorCode::kInvalidArgument);
 }
 
+TEST(StaFacade, WorstPathPointsCarryTimingData) {
+  // Expected values by construction from the fixture: the DFF
+  // clock-to-Q is 0.2 ns, the buffer delay is 0.3 ns, the buffer
+  // output transition is 0.05 ns and the flop output transition
+  // is 0.1 ns, every load pin carries 0.001 pF, and each net
+  // drives exactly one load pin.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto path = engine.WorstPath(CheckKind::kSetup, "r2/D");
+  ASSERT_TRUE(path.ok()) << path.status().message();
+  ASSERT_EQ(path.value().size(), 4u);
+  const double arrivals[] = {0.2, 0.2, 0.5, 0.5};
+  const double incrs[] = {0.2, 0.0, 0.3, 0.0};
+  const double slews[] = {0.1, 0.1, 0.05, 0.05};
+  const double fanouts[] = {1.0, 0.0, 1.0, 0.0};
+  const double caps[] = {0.001, -1.0, 0.001, -1.0};
+  const char* cells[] = {"DFF", "BUF", "BUF", "DFF"};
+  for (std::size_t i = 0; i < path.value().size(); ++i) {
+    const PathPoint& point = path.value()[i];
+    EXPECT_NEAR(point.arrival_ns, arrivals[i], 1e-6);
+    EXPECT_NEAR(point.incr_ns, incrs[i], 1e-6);
+    EXPECT_NEAR(point.slew_ns, slews[i], 1e-6);
+    EXPECT_NEAR(point.fanout, fanouts[i], 1e-6);
+    EXPECT_NEAR(point.cap_pf, caps[i], 1e-9);
+    EXPECT_EQ(point.cell, cells[i]);
+    EXPECT_EQ(point.edge, "^");
+  }
+}
+
+TEST(StaFacade, WorstPathReportHeader) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto report = engine.WorstPathReport(CheckKind::kSetup, "r2/D");
+  ASSERT_TRUE(report.ok()) << report.status().message();
+  EXPECT_EQ(report.value().endpoint, "r2/D");
+  EXPECT_EQ(report.value().startpoint, "r1/Q");
+  EXPECT_NEAR(report.value().slack_ns, 9.4, 1e-6);
+  EXPECT_NEAR(report.value().arrival_ns, 0.5, 1e-6);
+  EXPECT_NEAR(report.value().required_ns, 9.9, 1e-6);
+  ASSERT_EQ(report.value().points.size(), 4u);
+  EXPECT_EQ(report.value().points.back().pin, "r2/D");
+}
+
+TEST(StaFacade, WorstPathReportHeaderOnTightClock) {
+  // One engine per test: the upstream analyzer is a singleton,
+  // so a second live engine in the same test fails to own it.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcTight);
+  const auto report = engine.WorstPathReport(CheckKind::kSetup, "r2/D");
+  ASSERT_TRUE(report.ok()) << report.status().message();
+  EXPECT_NEAR(report.value().slack_ns, -0.1, 1e-6);
+  EXPECT_NEAR(report.value().arrival_ns, 0.5, 1e-6);
+  EXPECT_NEAR(report.value().required_ns, 0.4, 1e-6);
+}
+
+TEST(StaFacade, EndpointsBySlackIncludesMetEndpoints) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto endpoints = engine.EndpointsBySlack(CheckKind::kSetup);
+  ASSERT_TRUE(endpoints.ok()) << endpoints.status().message();
+  ASSERT_FALSE(endpoints.value().empty());
+  // r2/D meets timing on the 10 ns clock, so the violating-only
+  // query would omit it; this query includes it, worst first.
+  bool found = false;
+  for (const EndpointSlack& endpoint : endpoints.value()) {
+    if (endpoint.pin == "r2/D") {
+      found = true;
+      EXPECT_NEAR(endpoint.slack_ns, 9.4, 1e-6);
+    }
+  }
+  EXPECT_TRUE(found);
+  for (std::size_t i = 1; i < endpoints.value().size(); ++i) {
+    EXPECT_LE(endpoints.value()[i - 1].slack_ns,
+              endpoints.value()[i].slack_ns);
+  }
+}
+
+TEST(StaFacade, WorstPathReportToUnknownEndpointFails) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto report = engine.WorstPathReport(CheckKind::kSetup, "r9/D");
+  EXPECT_FALSE(report.ok());
+  EXPECT_EQ(report.status().code(), ErrorCode::kInvalidArgument);
+}
+
 TEST(StaFacade, WorstPathToUnconstrainedEndpointFails) {
   // The top-level q port is an endpoint with no timing check
   // behind it (no output delay in the SDC), so it has no

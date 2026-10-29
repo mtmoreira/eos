@@ -55,9 +55,10 @@ TEST(Registry, UnknownCommandIsAnInvalidCommandDiagnostic) {
 TEST(Registry, CoreSetIsComplete) {
   Shell shell;
   // The count is a contract: adding a command means updating it.
-  EXPECT_EQ(shell.registry.Names().size(), 36u);
+  EXPECT_EQ(shell.registry.Names().size(), 37u);
   EXPECT_NE(shell.registry.Find("create_design"), nullptr);
   EXPECT_NE(shell.registry.Find("restore"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_timing"), nullptr);
 }
 
 TEST(CoreCommands, DesignLifecycleAndUnclosedDesignDiagnostic) {
@@ -874,6 +875,151 @@ TEST(CoreCommands, CollateralReadsFailFastOnMissingFiles) {
       shell.Run("read_liberty", {"tt", dir.Path("")});
   EXPECT_FALSE(dir_as_liberty.ok);
   EXPECT_EQ(dir_as_liberty.diag, Diag::kIoError);
+}
+
+TEST(CoreCommands, ReportTimingFullTable) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult report = shell.Run("report_timing", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt"), std::string::npos);
+  EXPECT_NE(report.payload.find("paths=1"), std::string::npos);
+  EXPECT_NE(report.payload.find("report=timing_report_func_tt"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Startpoint: r1/Q"), std::string::npos);
+  EXPECT_NE(report.payload.find("Endpoint: r2/D"), std::string::npos);
+  EXPECT_NE(report.payload.find("slack (MET): 9.400"), std::string::npos);
+  EXPECT_NE(report.payload.find("u1/Y"), std::string::npos);
+  EXPECT_NE(report.payload.find("Fanout"), std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "timing_report_func_tt"),
+            nullptr);
+}
+
+TEST(CoreCommands, ReportTimingHoldAndColumns) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult report = shell.Run(
+      "report_timing", {"-delay_type", "min", "-columns", "point,arrival"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("slack (MET): 0.450"), std::string::npos);
+  EXPECT_NE(report.payload.find("Point"), std::string::npos);
+  EXPECT_NE(report.payload.find("Arrival"), std::string::npos);
+  EXPECT_EQ(report.payload.find("Fanout"), std::string::npos);
+  EXPECT_EQ(report.payload.find("Cap"), std::string::npos);
+}
+
+TEST(CoreCommands, ReportTimingPathTypeEnd) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult report =
+      shell.Run("report_timing", {"-path_type", "end"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("Endpoint: r2/D"), std::string::npos);
+  // The end type prints no startpoint and no point table.
+  EXPECT_EQ(report.payload.find("Startpoint:"), std::string::npos);
+  EXPECT_EQ(report.payload.find("u1/Y"), std::string::npos);
+}
+
+TEST(CoreCommands, ReportTimingToEndpoint) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult report =
+      shell.Run("report_timing", {"-to", "r2/D"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("paths=1"), std::string::npos);
+  const CommandResult unknown =
+      shell.Run("report_timing", {"-to", "r9/D"});
+  EXPECT_FALSE(unknown.ok);
+}
+
+TEST(CoreCommands, ReportTimingFile) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const std::string file = dir.Path("report.txt");
+  const CommandResult report =
+      shell.Run("report_timing", {"-file", file});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("file=" + file), std::string::npos);
+  std::ifstream in(file);
+  ASSERT_TRUE(in);
+  std::stringstream contents;
+  contents << in.rdbuf();
+  EXPECT_NE(contents.str().find("Endpoint: r2/D"), std::string::npos);
+  EXPECT_NE(contents.str().find("u1/Y"), std::string::npos);
+}
+
+TEST(CoreCommands, ReportTimingRejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  EXPECT_FALSE(shell.Run("report_timing", {"-bogus", "1"}).ok);
+  EXPECT_FALSE(shell.Run("report_timing", {"-columns", "point,bogus"}).ok);
+  EXPECT_FALSE(
+      shell.Run("report_timing", {"-delay_type", "sideways"}).ok);
+  EXPECT_FALSE(
+      shell.Run("report_timing", {"-to", "r2/D", "-max_paths", "2"}).ok);
+  EXPECT_FALSE(shell.Run("report_timing", {"-max_paths", "0"}).ok);
+  EXPECT_FALSE(shell.Run("report_timing", {"-path_type", "wide"}).ok);
 }
 
 TEST(CoreCommands, CloseTimingClosesTheImportedDesign) {

@@ -49,6 +49,7 @@
 #define EOS_ANALYSIS_TIMING_H_
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -106,6 +107,30 @@ struct VerilogDesign {
   std::string sdc_path;
 };
 
+// One timing path report request: the check kind (setup for the
+// max-delay analysis, hold for the min-delay analysis), an optional
+// endpoint pin (empty selects the worst endpoints), the maximum
+// number of paths (across endpoints, worst first; at least 1),
+// and an optional slack ceiling: only endpoints with slack
+// strictly below it are reported. Per-endpoint path enumeration
+// (several paths to one endpoint) is not part of this request:
+// with an endpoint named, exactly that endpoint's worst path is
+// reported.
+struct PathReportRequest {
+  CheckKind kind = CheckKind::kSetup;
+  std::string endpoint;
+  std::size_t max_paths = 1;
+  std::optional<double> slack_lesser_than;
+};
+
+// One scene's path reports: the scenario and its worst paths in
+// the facade's PathReport shape, worst first. Empty when no
+// endpoint passes the request's selection.
+struct ScenePathReports {
+  db::Scenario scenario;
+  std::vector<PathReport> paths;
+};
+
 class TimingService {
  public:
   // Analyzes the Verilog design under every scene, in the order
@@ -128,6 +153,29 @@ class TimingService {
   Result<std::vector<SceneResult>> Analyze(
       db::OdbDatabase& database, const std::string& sdc_path,
       const std::vector<SceneAnalysis>& scenes);
+
+  // Reports the worst paths of the Verilog design under every
+  // scene, per the request. Each scene runs its own engine session
+  // (the upstream engine is a singleton, so scenes run strictly
+  // one after another), exactly as Analyze loads them. Fails with
+  // kInvalidArgument on a max_paths of 0, on the Analyze failures
+  // above, and on an unknown endpoint; a named endpoint filtered
+  // out by the slack ceiling reports zero paths for its scene
+  // rather than failing.
+  Result<std::vector<ScenePathReports>> ReportPaths(
+      const VerilogDesign& design,
+      const std::vector<SceneAnalysis>& scenes,
+      const PathReportRequest& request);
+
+  // Reports the worst paths of an imported ODB database under
+  // every scene, per the request. The database's top block is
+  // written to a temporary netlist exactly as Analyze does, and
+  // the Verilog form above runs on it. Fails as ReportPaths above
+  // plus kInvalidState when the database has no top block.
+  Result<std::vector<ScenePathReports>> ReportPaths(
+      db::OdbDatabase& database, const std::string& sdc_path,
+      const std::vector<SceneAnalysis>& scenes,
+      const PathReportRequest& request);
 };
 
 }  // namespace eos::analysis
