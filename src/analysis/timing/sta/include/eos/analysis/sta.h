@@ -89,12 +89,42 @@ struct ElectricalCheck {
   bool has_limit = false;
 };
 
-// One point on a worst path, in path order: the pin's path name
-// and the path name of the instance that owns the pin (empty for
-// a top-level port pin, which no instance owns).
+// One point on a worst path, in path order: the pin's path name,
+// the path name of the instance that owns the pin (empty for a
+// top-level port pin, which no instance owns), the owning cell's
+// name (empty for a port), the transition edge ("^" for rise, "v"
+// for fall, empty when the analyzer reports none), the load-pin
+// fanout (0 for a
+// non-driver pin; in this version a plain count of load pins on
+// the pin's net, without Liberty fanout-load weighting), the load
+// capacitance in picofarads (-1 for a non-driver pin, where the
+// analyzer reports no load), and the slew, incremental delay and
+// cumulative arrival in nanoseconds. The incremental delay is the
+// arrival difference from the previous point; for the first point
+// it is the arrival itself.
 struct PathPoint {
   std::string pin;
   std::string instance;
+  std::string cell;
+  std::string edge;
+  double fanout = 0.0;
+  double cap_pf = -1.0;
+  double slew_ns = 0.0;
+  double incr_ns = 0.0;
+  double arrival_ns = 0.0;
+};
+
+// One worst path as a report: the endpoint pin, the startpoint pin
+// (the first point's pin), the endpoint slack, the data arrival at
+// the endpoint and the data required time (arrival plus slack),
+// all in nanoseconds, plus the enriched points.
+struct PathReport {
+  std::string endpoint;
+  std::string startpoint;
+  double slack_ns = 0.0;
+  double arrival_ns = 0.0;
+  double required_ns = 0.0;
+  std::vector<PathPoint> points;
 };
 
 // One timing analysis session. Move-only; the destructor releases
@@ -161,6 +191,19 @@ class StaEngine {
   // constrained path end for that check kind.
   Result<std::vector<PathPoint>> WorstPath(CheckKind kind,
                                            const std::string& endpoint_pin);
+  // Every constrained endpoint for one check kind, sorted by slack
+  // ascending (worst first), ties broken by pin path name. Unlike
+  // ViolatingEndpoints this includes endpoints that meet timing.
+  // Fails with kInvalidState under the same conditions as
+  // WorstSlackNs.
+  Result<std::vector<EndpointSlack>> EndpointsBySlack(CheckKind kind);
+  // The worst path to one endpoint as a report. Fails with
+  // kInvalidState under the same conditions as WorstSlackNs, and
+  // with kInvalidArgument when no endpoint pin has the given path
+  // name, or when the named endpoint has no constrained path end
+  // for that check kind.
+  Result<PathReport> WorstPathReport(CheckKind kind,
+                                     const std::string& endpoint_pin);
 
   // The max transition (slew) check: worst value, limit and
   // slack in nanoseconds, and the violating-pin count. Fails

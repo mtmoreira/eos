@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -222,6 +223,191 @@ std::string MetricText(const analysis::TimingMetricMap& metrics,
                        const std::string& name) {
   const auto it = metrics.find(name);
   return it == metrics.end() ? "none" : FormatNumber(it->second.value);
+}
+
+// Builds the scene list for the active scenarios from the timing
+// session: one SceneAnalysis per active scenario, with that
+// scenario's corner Liberty and, for extracted parasitics, the
+// session SPEF. Shared by run_timing and report_timing so the two
+// commands never disagree about what a scene is. Returns the
+// failure result when the session cannot run timing at all, and
+// sets from_odb for the caller's service call choice.
+std::optional<CommandResult> BuildTimingScenes(
+    CommandContext& ctx, bool& from_odb,
+    std::vector<analysis::SceneAnalysis>& scenes) {
+  const std::vector<const db::Scenario*> active =
+      ctx.project.scenarios.ActiveScenarios();
+  if (active.empty()) {
+    return CommandResult::Fail(
+        Diag::kInvalidConfiguration,
+        "no active scenarios (see eos::create_scenario)");
+  }
+  from_odb =
+      ctx.timing.odb.has_value() && ctx.timing.odb->has_top_block();
+  const bool from_verilog = !ctx.timing.verilog_path.empty();
+  if (!from_odb && !from_verilog) {
+    return CommandResult::Fail(
+        Diag::kUnclosedDesign,
+        "no timing design source: eos::import_odb or "
+        "eos::read_verilog first");
+  }
+  if (ctx.timing.sdc_path.empty()) {
+    return CommandResult::Fail(Diag::kInvalidConfiguration,
+                               "no SDC: eos::read_sdc first");
+  }
+  for (const db::Scenario* scenario : active) {
+    analysis::SceneAnalysis scene;
+    scene.scenario = *scenario;
+    const auto liberty =
+        ctx.timing.liberty_by_corner.find(scenario->corner);
+    if (liberty == ctx.timing.liberty_by_corner.end()) {
+      return CommandResult::Fail(
+          Diag::kInvalidConfiguration,
+          "no Liberty for corner " + scenario->corner +
+              " (scene " + scenario->name +
+              "): eos::read_liberty first");
+    }
+    scene.liberty_path = liberty->second;
+    if (scenario->parasitics == db::ParasiticsLevel::kExtracted) {
+      if (ctx.timing.spef_path.empty()) {
+        return CommandResult::Fail(
+            Diag::kInvalidConfiguration,
+            "scene " + scenario->name +
+                " is at extracted parasitics but no SPEF is "
+                "set: eos::set_spef first");
+      }
+      scene.spef_path = ctx.timing.spef_path;
+    }
+    scenes.push_back(std::move(scene));
+  }
+  return std::nullopt;
+}
+
+// Parses "-key value" option pairs for report_timing. Unknown keys,
+// positional arguments and missing values fail; nothing is silently
+// ignored, per the registry's discipline.
+std::optional<CommandResult> ParseReportOptions(
+    const std::vector<std::string>& args,
+    std::map<std::string, std::string>& options) {
+  static const char* kKnown[] = {"delay_type", "max_paths", "to",
+                                 "slack_lesser_than", "columns", "path_type",
+                                 "digits", "file", "scene"};
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string& token = args[i];
+    if (token.size() < 2 || token[0] != '-') {
+      return CommandResult::Fail(
+          Diag::kInvalidConfiguration,
+          "report_timing takes -key value options, got: " + token);
+    }
+    const std::string key = token.substr(1);
+    bool known = false;
+    for (const char* candidate : kKnown) {
+      if (key == candidate) known = true;
+    }
+    if (!known) {
+      return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                 "unknown report_timing option: -" + key);
+    }
+    if (i + 1 >= args.size()) {
+      return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                 "option -" + key + " needs a value");
+    }
+    if (options.count(key) != 0) {
+      return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                 "option -" + key + " given twice");
+    }
+    options[key] = args[++i];
+  }
+  return std::nullopt;
+}
+
+std::string FormatFixed(double value, int digits) {
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(digits) << value;
+  return out.str();
+}
+
+// One report_timing column: its option name and its header title,
+// in the default column order (the Tempus-style column model:
+// the user picks the set and the order with -columns).
+struct ReportColumn {
+  const char* name;
+  const char* title;
+};
+
+const ReportColumn kReportColumns[] = {
+    {"point", "Point"}, {"cell", "Cell"}, {"edge", "Edge"},
+    {"fanout", "Fanout"}, {"cap", "Cap"}, {"slew", "Slew"},
+    {"incr", "Incr"}, {"arrival", "Arrival"},
+};
+
+std::string ColumnValue(const ReportColumn& column,
+                        const analysis::PathPoint& point, int digits) {
+  const std::string name = column.name;
+  if (name == "point") return point.pin;
+  if (name == "cell") return point.cell;
+  if (name == "edge") return point.edge;
+  if (name == "fanout") {
+    return std::to_string(static_cast<long long>(point.fanout));
+  }
+  if (name == "cap") {
+    return point.cap_pf < 0 ? "-" : FormatFixed(point.cap_pf, digits);
+  }
+  if (name == "slew") return FormatFixed(point.slew_ns, digits);
+  if (name == "incr") return FormatFixed(point.incr_ns, digits);
+  return FormatFixed(point.arrival_ns, digits);
+}
+
+// Renders one path: the header block (startpoint, endpoint,
+// arrival, required, slack) plus, for the full path type, the
+// point table in the requested columns. Times in nanoseconds,
+// capacitance in picofarads.
+std::string RenderPathReport(const analysis::PathReport& report,
+                             const std::vector<ReportColumn>& columns,
+                             const std::string& path_type, int digits) {
+  std::string out;
+  if (path_type == "end") {
+    out += "Endpoint: " + report.endpoint + "  slack (" +
+           (report.slack_ns < 0 ? "VIOLATED" : "MET") +
+           "): " + FormatFixed(report.slack_ns, digits) + "\n";
+    return out;
+  }
+  out += "Startpoint: " + report.startpoint + "\n";
+  out += "Endpoint: " + report.endpoint + "\n";
+  out += "data arrival time: " + FormatFixed(report.arrival_ns, digits) +
+         "\n";
+  out += "data required time: " + FormatFixed(report.required_ns, digits) +
+         "\n";
+  out += "slack (" + std::string(report.slack_ns < 0 ? "VIOLATED" : "MET") +
+         "): " + FormatFixed(report.slack_ns, digits) + "\n";
+  if (path_type == "full") {
+    std::vector<std::vector<std::string>> rows;
+    std::vector<std::string> header;
+    for (const ReportColumn& column : columns) header.push_back(column.title);
+    rows.push_back(header);
+    for (const analysis::PathPoint& point : report.points) {
+      std::vector<std::string> row;
+      for (const ReportColumn& column : columns) {
+        row.push_back(ColumnValue(column, point, digits));
+      }
+      rows.push_back(std::move(row));
+    }
+    std::vector<std::size_t> widths(columns.size(), 0);
+    for (const auto& row : rows) {
+      for (std::size_t c = 0; c < row.size(); ++c) {
+        widths[c] = std::max(widths[c], row[c].size());
+      }
+    }
+    for (const auto& row : rows) {
+      for (std::size_t c = 0; c < row.size(); ++c) {
+        if (c != 0) out += "  ";
+        out += row[c];
+        out += std::string(widths[c] - row[c].size(), ' ');
+      }
+      out += "\n";
+    }
+  }
+  return out;
 }
 
 // The closure loop's candidate knowledge, derived from the
@@ -986,51 +1172,10 @@ void RegisterCoreCommands(CommandRegistry& registry) {
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
         if (auto bad = ExpectCount(args, 0, "run_timing")) return *bad;
-        const std::vector<const db::Scenario*> active =
-            ctx.project.scenarios.ActiveScenarios();
-        if (active.empty()) {
-          return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
-              "no active scenarios (see eos::create_scenario)");
-        }
-        const bool from_odb = ctx.timing.odb.has_value() &&
-                              ctx.timing.odb->has_top_block();
-        const bool from_verilog = !ctx.timing.verilog_path.empty();
-        if (!from_odb && !from_verilog) {
-          return CommandResult::Fail(
-              Diag::kUnclosedDesign,
-              "no timing design source: eos::import_odb or "
-              "eos::read_verilog first");
-        }
-        if (ctx.timing.sdc_path.empty()) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
-                                     "no SDC: eos::read_sdc first");
-        }
+        bool from_odb = false;
         std::vector<analysis::SceneAnalysis> scenes;
-        for (const db::Scenario* scenario : active) {
-          analysis::SceneAnalysis scene;
-          scene.scenario = *scenario;
-          const auto liberty =
-              ctx.timing.liberty_by_corner.find(scenario->corner);
-          if (liberty == ctx.timing.liberty_by_corner.end()) {
-            return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
-                "no Liberty for corner " + scenario->corner +
-                    " (scene " + scenario->name +
-                    "): eos::read_liberty first");
-          }
-          scene.liberty_path = liberty->second;
-          if (scenario->parasitics == db::ParasiticsLevel::kExtracted) {
-            if (ctx.timing.spef_path.empty()) {
-              return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
-                  "scene " + scenario->name +
-                      " is at extracted parasitics but no SPEF is "
-                      "set: eos::set_spef first");
-            }
-            scene.spef_path = ctx.timing.spef_path;
-          }
-          scenes.push_back(std::move(scene));
+        if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          return *bad;
         }
         analysis::TimingService service;
         const Result<std::vector<analysis::SceneResult>> analyzed =
@@ -1082,6 +1227,216 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                      std::to_string(artifact.value());
         }
         ctx.timing.last_results = analyzed.value();
+        return CommandResult::Ok(payload);
+      });
+
+  // Signoff-style timing path report, on the Tempus column model
+  // over the PrimeTime selection vocabulary. The command runs the
+  // analysis itself for the selected scenes (it does not reuse a
+  // previous run_timing: the session keeps no live engine), then
+  // reports the worst paths: -delay_type max (setup, the default)
+  // or min (hold); -max_paths across endpoints, worst first; -to
+  // for one endpoint's worst path; -slack_lesser_than as a slack
+  // ceiling; -columns as a comma-separated column list in the
+  // requested order (default: point,cell,edge,fanout,cap,slew,incr,
+  // arrival); -path_type end (slack line only), summary (header
+  // block, the default is full) or full (header plus point table);
+  // -digits for decimals in the table (default 3); -file to write
+  // the report to a file and register it; -scene to report one
+  // active scenario instead of all of them. Per-endpoint path
+  // enumeration is not implemented: -to with -max_paths above 1
+  // fails rather than silently reporting one path.
+  add("report_timing",
+      "report_timing [-delay_type max|min] [-max_paths N] [-to "
+      "<endpoint>] [-slack_lesser_than X] [-columns <list>] "
+      "[-path_type end|summary|full] [-digits N] [-file <path>] "
+      "[-scene <name>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        std::map<std::string, std::string> options;
+        if (auto bad = ParseReportOptions(args, options)) return *bad;
+        analysis::PathReportRequest request;
+        const auto at = [&options](const char* key) {
+          return options.find(key);
+        };
+        if (at("delay_type") != options.end()) {
+          if (options["delay_type"] == "max") {
+            request.kind = analysis::CheckKind::kSetup;
+          } else if (options["delay_type"] == "min") {
+            request.kind = analysis::CheckKind::kHold;
+          } else {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "delay_type must be max or min, got: " +
+                    options["delay_type"]);
+          }
+        }
+        if (at("max_paths") != options.end()) {
+          std::uint64_t max_paths = 0;
+          if (!ParseU64(options["max_paths"], max_paths) ||
+              max_paths == 0) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "max_paths must be a positive integer, got: " +
+                    options["max_paths"]);
+          }
+          request.max_paths = static_cast<std::size_t>(max_paths);
+        }
+        if (at("to") != options.end()) {
+          request.endpoint = options["to"];
+          if (at("max_paths") != options.end() &&
+              request.max_paths != 1) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "-to selects one endpoint's worst path; -max_paths "
+                "above 1 needs per-endpoint enumeration, which "
+                "report_timing does not implement yet");
+          }
+        }
+        if (at("slack_lesser_than") != options.end()) {
+          const std::string& token = options["slack_lesser_than"];
+          try {
+            std::size_t used = 0;
+            const double ceiling = std::stod(token, &used);
+            if (used != token.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "slack_lesser_than must be a number, got: " + token);
+            }
+            request.slack_lesser_than = ceiling;
+          } catch (const std::exception&) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "slack_lesser_than must be a number, got: " + token);
+          }
+        }
+        std::vector<ReportColumn> columns;
+        if (at("columns") != options.end()) {
+          std::stringstream list(options["columns"]);
+          std::string token;
+          while (std::getline(list, token, ',')) {
+            bool known = false;
+            for (const ReportColumn& candidate : kReportColumns) {
+              if (token == candidate.name) {
+                columns.push_back(candidate);
+                known = true;
+              }
+            }
+            if (!known) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "unknown report_timing column: " + token);
+            }
+          }
+          if (columns.empty()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "-columns needs at least one column");
+          }
+        } else {
+          for (const ReportColumn& candidate : kReportColumns) {
+            columns.push_back(candidate);
+          }
+        }
+        std::string path_type = "full";
+        if (at("path_type") != options.end()) {
+          path_type = options["path_type"];
+          if (path_type != "end" && path_type != "summary" &&
+              path_type != "full") {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "path_type must be end, summary or full, got: " +
+                    path_type);
+          }
+        }
+        int digits = 3;
+        if (at("digits") != options.end()) {
+          std::uint64_t parsed = 0;
+          if (!ParseU64(options["digits"], parsed)) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "digits must be a non-negative integer, got: " +
+                    options["digits"]);
+          }
+          digits = static_cast<int>(parsed);
+        }
+        bool from_odb = false;
+        std::vector<analysis::SceneAnalysis> scenes;
+        if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          return *bad;
+        }
+        if (at("scene") != options.end()) {
+          std::vector<analysis::SceneAnalysis> selected;
+          for (const analysis::SceneAnalysis& scene : scenes) {
+            if (scene.scenario.name == options["scene"]) {
+              selected.push_back(scene);
+            }
+          }
+          if (selected.empty()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown scenario: " + options["scene"]);
+          }
+          scenes = std::move(selected);
+        }
+        analysis::TimingService service;
+        const Result<std::vector<analysis::ScenePathReports>> reported =
+            from_odb
+                ? service.ReportPaths(*ctx.timing.odb, ctx.timing.sdc_path,
+                                      scenes, request)
+                : service.ReportPaths(
+                      analysis::VerilogDesign{ctx.timing.verilog_path,
+                                              ctx.timing.top_cell,
+                                              ctx.timing.sdc_path},
+                      scenes, request);
+        if (!reported.ok()) return FromStatus(reported.status());
+        std::string payload = std::string("source=") +
+                              (from_odb ? "odb" : "verilog") +
+                              " delay_type=" +
+                              (request.kind == analysis::CheckKind::kHold
+                                   ? "min"
+                                   : "max") +
+                              " scenes=" +
+                              std::to_string(reported.value().size()) +
+                              " revision=" +
+                              std::to_string(
+                                  ctx.project.ledger.current_revision());
+        std::string text;
+        for (const analysis::ScenePathReports& scene :
+             reported.value()) {
+          const std::string report =
+              "timing_report_" + scene.scenario.name;
+          const Result<session::ArtifactId> artifact =
+              ctx.reports.RegisterReport(ctx.project, report,
+                                         session::ProofStatus::kPass,
+                                         "NLDM");
+          if (!artifact.ok()) return FromStatus(artifact.status());
+          payload += "\nscene=" + scene.scenario.name +
+                     " paths=" + std::to_string(scene.paths.size()) +
+                     " report=" + report + " artifact=" +
+                     std::to_string(artifact.value());
+          text += "\nScene: " + scene.scenario.name + "\n";
+          for (const analysis::PathReport& path : scene.paths) {
+            text += RenderPathReport(path, columns, path_type, digits);
+            text += "\n";
+          }
+        }
+        if (at("file") != options.end()) {
+          const std::string file = options["file"];
+          std::ofstream out(file);
+          if (!out) {
+            return CommandResult::Fail(Diag::kIoError,
+                                       "could not write file: " + file);
+          }
+          out << text;
+          out.close();
+          if (!out) {
+            return CommandResult::Fail(Diag::kIoError,
+                                       "could not write file: " + file);
+          }
+          payload += "\nfile=" + file;
+        }
+        payload += "\n" + text;
         return CommandResult::Ok(payload);
       });
 

@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "Graph.hh"
+#include "GraphDelayCalc.hh"
 #include "MinMax.hh"
 #include "Network.hh"
 #include "PathEnd.hh"
@@ -332,7 +333,8 @@ struct StaEngine::Impl {
     return visitor;
   }
 
-  Result<std::vector<EndpointSlack>> Endpoints(bool hold) {
+  Result<std::vector<EndpointSlack>> Endpoints(bool hold,
+                                               bool violating_only) {
     const Status ready = Ready();
     if (!ready.ok()) return ready;
     try {
@@ -342,7 +344,8 @@ struct StaEngine::Impl {
       for (sta::Vertex* vertex : sta->endpoints()) {
         const WorstEndVisitor visitor = VisitWorstEnd(vertex, min_max);
         if (visitor.found() &&
-            sta::delayLess(visitor.slack(), 0.0F, sta)) {
+            (!violating_only ||
+             sta::delayLess(visitor.slack(), 0.0F, sta))) {
           endpoints.push_back(EndpointSlack{
               sta->network()->pathName(vertex->pin()),
               ToNs(visitor.slack())});
@@ -359,6 +362,69 @@ struct StaEngine::Impl {
     }
   }
 
+  // Walks one worst path into enriched points, in path order.
+  // Arrival, slew and edge come straight off the analyzer's path
+  // objects; the incremental delay is the arrival difference from
+  // the previous point (the arrival itself for the first point);
+  // the cell is the owning instance's cell; the load capacitance
+  // (drivers only) and the load-pin fanout follow the analyzer's
+  // own report code, which reads the load cap off the delay
+  // calculator and counts load pins on the driven net.
+  std::vector<PathPoint> WalkPoints(const sta::Path* worst_path) {
+    const sta::PathExpanded expanded(worst_path, sta);
+    std::vector<PathPoint> points;
+    double prev_arrival = 0.0;
+    for (size_t i = expanded.startIndex(); i < expanded.size(); ++i) {
+      const sta::Path* path = expanded.path(i);
+      if (path == nullptr) continue;
+      sta::Pin* pin = path->pin(sta);
+      if (pin == nullptr) continue;
+      PathPoint point;
+      point.pin = sta->network()->pathName(pin);
+      sta::Instance* inst = sta->network()->instance(pin);
+      point.instance =
+          inst == nullptr ? "" : sta->network()->pathName(inst);
+      point.cell = inst == nullptr ? "" : sta->network()->cellName(inst);
+      const sta::RiseFall* rf = path->transition(sta);
+      point.edge = rf == nullptr ? "" : rf->shortName();
+      point.arrival_ns = ToNs(path->arrival());
+      point.incr_ns =
+          points.empty() ? point.arrival_ns : point.arrival_ns - prev_arrival;
+      prev_arrival = point.arrival_ns;
+      point.slew_ns = ToNs(path->slew(sta));
+      if (sta->network()->isDriver(pin)) {
+        if (rf != nullptr) {
+          point.cap_pf = ToPf(sta->graphDelayCalc()->loadCap(
+              pin, rf, path->scene(sta), path->minMax(sta)));
+        } else {
+          point.cap_pf = ToPf(sta->graphDelayCalc()->loadCap(
+              pin, path->scene(sta), path->minMax(sta)));
+        }
+        sta::PinConnectedPinIterator* iter =
+            sta->network()->connectedPinIterator(pin);
+        double fanout = 0.0;
+        while (iter->hasNext()) {
+          if (sta->network()->isLoad(iter->next())) fanout += 1.0;
+        }
+        delete iter;
+        point.fanout = fanout;
+      }
+      points.push_back(std::move(point));
+    }
+    return points;
+  }
+
+  // Finds the endpoint vertex for a path query. Null when no
+  // endpoint pin has the given path name.
+  sta::Vertex* FindEndpoint(const std::string& endpoint_pin) {
+    for (sta::Vertex* vertex : sta->endpoints()) {
+      if (sta->network()->pathName(vertex->pin()) == endpoint_pin) {
+        return vertex;
+      }
+    }
+    return nullptr;
+  }
+
   Result<std::vector<PathPoint>> WorstPath(bool hold,
                                            const std::string& endpoint_pin) {
     const Status ready = Ready();
@@ -366,13 +432,7 @@ struct StaEngine::Impl {
     try {
       const sta::MinMax* min_max =
           hold ? sta::MinMax::min() : sta::MinMax::max();
-      sta::Vertex* target = nullptr;
-      for (sta::Vertex* vertex : sta->endpoints()) {
-        if (sta->network()->pathName(vertex->pin()) == endpoint_pin) {
-          target = vertex;
-          break;
-        }
-      }
+      sta::Vertex* target = FindEndpoint(endpoint_pin);
       if (target == nullptr) {
         return Status::Error(ErrorCode::kInvalidArgument,
                              "no endpoint pin named " + endpoint_pin);
@@ -384,27 +444,51 @@ struct StaEngine::Impl {
             "endpoint " + endpoint_pin +
                 " has no constrained path end for this check kind");
       }
-      const sta::PathExpanded expanded(visitor.worst_path(), sta);
-      std::vector<PathPoint> points;
-      for (size_t i = expanded.startIndex(); i < expanded.size(); ++i) {
-        const sta::Path* path = expanded.path(i);
-        if (path == nullptr) continue;
-        sta::Pin* pin = path->pin(sta);
-        if (pin == nullptr) continue;
-        PathPoint point;
-        point.pin = sta->network()->pathName(pin);
-        point.instance = sta->network()->isTopLevelPort(pin)
-                             ? ""
-                             : sta->network()->pathName(
-                                   sta->network()->instance(pin));
-        points.push_back(std::move(point));
-      }
+      std::vector<PathPoint> points = WalkPoints(visitor.worst_path());
       if (points.empty()) {
         return Status::Error(ErrorCode::kInvalidState,
                              "worst path to endpoint " + endpoint_pin +
                                  " expanded to no points");
       }
       return points;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
+  Result<PathReport> WorstPathReport(bool hold,
+                                     const std::string& endpoint_pin) {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      const sta::MinMax* min_max =
+          hold ? sta::MinMax::min() : sta::MinMax::max();
+      sta::Vertex* target = FindEndpoint(endpoint_pin);
+      if (target == nullptr) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "no endpoint pin named " + endpoint_pin);
+      }
+      const WorstEndVisitor visitor = VisitWorstEnd(target, min_max);
+      if (!visitor.found() || visitor.worst_path() == nullptr) {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "endpoint " + endpoint_pin +
+                " has no constrained path end for this check kind");
+      }
+      std::vector<PathPoint> points = WalkPoints(visitor.worst_path());
+      if (points.empty()) {
+        return Status::Error(ErrorCode::kInvalidState,
+                             "worst path to endpoint " + endpoint_pin +
+                                 " expanded to no points");
+      }
+      PathReport report;
+      report.endpoint = endpoint_pin;
+      report.startpoint = points.front().pin;
+      report.slack_ns = ToNs(visitor.slack());
+      report.arrival_ns = points.back().arrival_ns;
+      report.required_ns = report.arrival_ns + report.slack_ns;
+      report.points = std::move(points);
+      return report;
     } catch (const std::exception& ex) {
       return Status::Error(ErrorCode::kIoError, ex.what());
     }
@@ -460,12 +544,22 @@ Result<double> StaEngine::TotalNegativeHoldSlackNs() {
 
 Result<std::vector<EndpointSlack>> StaEngine::ViolatingEndpoints(
     CheckKind kind) {
-  return impl_->Endpoints(kind == CheckKind::kHold);
+  return impl_->Endpoints(kind == CheckKind::kHold, true);
+}
+
+Result<std::vector<EndpointSlack>> StaEngine::EndpointsBySlack(
+    CheckKind kind) {
+  return impl_->Endpoints(kind == CheckKind::kHold, false);
 }
 
 Result<std::vector<PathPoint>> StaEngine::WorstPath(
     CheckKind kind, const std::string& endpoint_pin) {
   return impl_->WorstPath(kind == CheckKind::kHold, endpoint_pin);
+}
+
+Result<PathReport> StaEngine::WorstPathReport(
+    CheckKind kind, const std::string& endpoint_pin) {
+  return impl_->WorstPathReport(kind == CheckKind::kHold, endpoint_pin);
 }
 
 Result<ElectricalCheck> StaEngine::MaxTransitionCheck() {

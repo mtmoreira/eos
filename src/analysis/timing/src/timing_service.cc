@@ -156,6 +156,62 @@ Result<std::vector<SceneResult>> AnalyzeChecked(
   return results;
 }
 
+// Loads one scene's inputs into a fresh engine, exactly as
+// AnalyzeScene does, without running any metric query.
+Status PrepareEngine(StaEngine& engine, const VerilogDesign& design,
+                     const SceneAnalysis& scene) {
+  Status status = engine.ReadLiberty(scene.liberty_path);
+  if (!status.ok()) return SceneError(scene, status);
+  status = engine.ReadVerilog(design.verilog_path);
+  if (!status.ok()) return SceneError(scene, status);
+  status = engine.LinkDesign(design.top_cell);
+  if (!status.ok()) return SceneError(scene, status);
+  status = engine.ReadSdc(design.sdc_path);
+  if (!status.ok()) return SceneError(scene, status);
+  if (!scene.spef_path.empty()) {
+    status = engine.ReadSpef(scene.spef_path);
+    if (!status.ok()) return SceneError(scene, status);
+  }
+  return Status::Ok();
+}
+
+Result<ScenePathReports> ReportScene(const VerilogDesign& design,
+                                     const SceneAnalysis& scene,
+                                     const PathReportRequest& request) {
+  StaEngine engine;
+  const Status prepared = PrepareEngine(engine, design, scene);
+  if (!prepared.ok()) return prepared;
+  ScenePathReports out;
+  out.scenario = scene.scenario;
+  if (!request.endpoint.empty()) {
+    Result<PathReport> report =
+        engine.WorstPathReport(request.kind, request.endpoint);
+    if (!report.ok()) return SceneError(scene, report.status());
+    if (!request.slack_lesser_than.has_value() ||
+        report.value().slack_ns < request.slack_lesser_than.value()) {
+      out.paths.push_back(std::move(report).value());
+    }
+    return out;
+  }
+  Result<std::vector<EndpointSlack>> endpoints =
+      engine.EndpointsBySlack(request.kind);
+  if (!endpoints.ok()) return SceneError(scene, endpoints.status());
+  for (const EndpointSlack& endpoint : endpoints.value()) {
+    if (out.paths.size() >= request.max_paths) break;
+    // Endpoints arrive worst first, so once one meets the ceiling
+    // every later one does too.
+    if (request.slack_lesser_than.has_value() &&
+        endpoint.slack_ns >= request.slack_lesser_than.value()) {
+      break;
+    }
+    Result<PathReport> report =
+        engine.WorstPathReport(request.kind, endpoint.pin);
+    if (!report.ok()) return SceneError(scene, report.status());
+    out.paths.push_back(std::move(report).value());
+  }
+  return out;
+}
+
 }  // namespace
 
 Result<std::vector<SceneResult>> TimingService::Analyze(
@@ -195,6 +251,55 @@ Result<std::vector<SceneResult>> TimingService::Analyze(
   const VerilogDesign design{netlist.string(), database.TopBlockName(),
                              sdc_path};
   return AnalyzeChecked(design, scenes);
+}
+
+Result<std::vector<ScenePathReports>> TimingService::ReportPaths(
+    const VerilogDesign& design,
+    const std::vector<SceneAnalysis>& scenes,
+    const PathReportRequest& request) {
+  if (design.verilog_path.empty() || design.top_cell.empty()) {
+    return Invalid("timing analysis needs a netlist and its top cell");
+  }
+  if (request.max_paths == 0) {
+    return Invalid("path report needs max_paths of at least 1");
+  }
+  const Status valid = Validate(design.sdc_path, scenes);
+  if (!valid.ok()) return valid;
+  std::vector<ScenePathReports> reports;
+  for (const SceneAnalysis& scene : scenes) {
+    Result<ScenePathReports> report = ReportScene(design, scene, request);
+    if (!report.ok()) return report.status();
+    reports.push_back(std::move(report).value());
+  }
+  return reports;
+}
+
+Result<std::vector<ScenePathReports>> TimingService::ReportPaths(
+    db::OdbDatabase& database, const std::string& sdc_path,
+    const std::vector<SceneAnalysis>& scenes,
+    const PathReportRequest& request) {
+  if (!database.has_top_block()) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "timing analysis of an ODB database with no "
+                         "top block");
+  }
+  // The netlist is a scratch product of the database, never a
+  // deliverable: it lives in the temp directory and is removed
+  // when this call returns, whatever the outcome.
+  const std::filesystem::path netlist =
+      std::filesystem::temp_directory_path() / "eos_timing_service_netlist.v";
+  const Status written = database.WriteVerilog(netlist.string());
+  if (!written.ok()) return written;
+  struct NetlistGuard {
+    std::filesystem::path path;
+    ~NetlistGuard() {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
+  } guard{netlist};
+  const VerilogDesign design{netlist.string(), database.TopBlockName(),
+                             sdc_path};
+  return ReportPaths(design, scenes, request);
 }
 
 }  // namespace eos::analysis
