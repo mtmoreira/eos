@@ -39,7 +39,12 @@ set(STA_VERSION "3.1.0")
 set(STA_GIT_SHA1 "0f2529d18218b87aa0e82de444395a830d5058a1")
 set(TCL_READLINE 0)
 # std::format check, exactly as upstream: with no std::format the
-# build falls back to the bundled fmt inside spdlog.
+# build needs fmt headers. Prefer a system fmt package: some
+# spdlog builds (notably Homebrew's) are built against external
+# fmt and ship no bundled headers, so linking spdlog's bundled
+# dir would dangle and fail late at compile time with
+# "fmt/core.h not found". Fall back to the bundled copy only
+# when it actually exists, and fail at configure time otherwise.
 include(CheckCXXSourceCompiles)
 set(_eos_sta_saved_flags "${CMAKE_REQUIRED_FLAGS}")
 if(MSVC)
@@ -55,12 +60,22 @@ int main() { (void)std::format(\"{}\", 42); return 0; }
 set(CMAKE_REQUIRED_FLAGS "${_eos_sta_saved_flags}")
 if(NOT HAVE_CXX_STD_FORMAT)
   find_package(spdlog REQUIRED)
-  get_target_property(_eos_sta_spdlog_inc spdlog::spdlog
-    INTERFACE_INCLUDE_DIRECTORIES)
-  set(_eos_sta_fmt_dir "${CMAKE_CURRENT_BINARY_DIR}/_spdlog_fmt")
-  file(MAKE_DIRECTORY "${_eos_sta_fmt_dir}")
-  file(CREATE_LINK "${_eos_sta_spdlog_inc}/spdlog/fmt/bundled"
-    "${_eos_sta_fmt_dir}/fmt" SYMBOLIC)
+  unset(_eos_sta_fmt_dir CACHE)
+  find_path(_eos_sta_fmt_dir NAMES fmt/core.h)
+  if(NOT _eos_sta_fmt_dir)
+    get_target_property(_eos_sta_spdlog_inc spdlog::spdlog
+      INTERFACE_INCLUDE_DIRECTORIES)
+    if(NOT EXISTS "${_eos_sta_spdlog_inc}/spdlog/fmt/bundled/core.h")
+      message(FATAL_ERROR
+        "OpenSTA needs fmt: no system fmt package found and "
+        "spdlog ships no bundled fmt headers; install fmt "
+        "(brew install fmt, or apt-get install libfmt-dev)")
+    endif()
+    set(_eos_sta_fmt_dir "${CMAKE_CURRENT_BINARY_DIR}/_spdlog_fmt")
+    file(MAKE_DIRECTORY "${_eos_sta_fmt_dir}")
+    file(CREATE_LINK "${_eos_sta_spdlog_inc}/spdlog/fmt/bundled"
+      "${_eos_sta_fmt_dir}/fmt" SYMBOLIC)
+  endif()
 endif()
 configure_file(src/util/StaConfig.hh.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/include/sta/StaConfig.hh)

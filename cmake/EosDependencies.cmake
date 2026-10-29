@@ -12,8 +12,9 @@
 # Every hard build dependency is checked here:
 #   Tcl headers and library (the real shell needs them; without
 #     them the build succeeds but eda reports the shell is
-#     unavailable), BISON, FLEX, SWIG, Eigen3, ZLIB, spdlog,
-#     the Python3 interpreter, and GNU objcopy.
+#     unavailable), BISON, FLEX, SWIG, Eigen3, ZLIB, spdlog, fmt
+#     (OpenSTA's fallback when the compiler lacks std::format),
+#     the Python3 interpreter, and objcopy.
 # GTest is deliberately not a hard dependency: the test tree falls
 # back to FetchContent when it is not found. Threads come from the
 # system toolchain.
@@ -40,7 +41,7 @@ if(APPLE)
   find_program(EOS_BREW_PROGRAM brew)
   if(EOS_BREW_PROGRAM)
     execute_process(
-      COMMAND ${EOS_BREW_PROGRAM} --prefix tcl-tk bison flex zlib eigen spdlog llvm
+      COMMAND ${EOS_BREW_PROGRAM} --prefix tcl-tk bison flex zlib eigen spdlog fmt llvm
       OUTPUT_VARIABLE _eos_brew_prefixes
       OUTPUT_STRIP_TRAILING_WHITESPACE
       ERROR_QUIET)
@@ -133,6 +134,13 @@ function(eos_check_dependencies)
     list(APPEND _missing "spdlog development files")
     list(APPEND _brew "spdlog")
     list(APPEND _apt "libspdlog-dev")
+  endif()
+
+  find_package(fmt QUIET)
+  if(NOT fmt_FOUND)
+    list(APPEND _missing "fmt development files (OpenSTA fallback when std::format is absent)")
+    list(APPEND _brew "fmt")
+    list(APPEND _apt "libfmt-dev")
   endif()
 
   find_package(Python3 COMPONENTS Interpreter QUIET)

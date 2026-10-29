@@ -17,9 +17,12 @@
 #             understands Mach-O, so this script links it as
 #             objcopy on PATH.
 #   python3 - the ABC build step runs a Python script.
-#   bison, flex, swig, eigen, spdlog, zlib - required by the
+#   bison, flex, swig, eigen, spdlog, fmt, zlib - required by the
 #             imported OpenDB and OpenSTA modules (parsers, code
 #             generation, linear algebra, compression, logging).
+#             fmt is explicit, not just a spdlog dependency: when
+#             the compiler lacks std::format, OpenSTA needs fmt
+#             headers, and Homebrew's spdlog ships no bundled copy.
 # The same set is what cmake/EosDependencies.cmake checks at
 # configure time; this script is what -DEOS_AUTO_INSTALL_DEPS=ON
 # runs on macOS.
@@ -43,7 +46,7 @@ if ! xcode-select -p >/dev/null 2>&1; then
   exit 1
 fi
 
-brew install tcl-tk cmake llvm python3 bison flex swig eigen spdlog zlib
+brew install tcl-tk cmake llvm python3 bison flex swig eigen spdlog fmt zlib
 
 # objcopy under its expected name, resolving to LLVM's objcopy.
 # Unconditional and idempotent: it also repairs an earlier link to
