@@ -1,4 +1,4 @@
-// eda: the EOS tool binary. Main and startup only, no logic: build the
+// eos: the EOS tool binary. Main and startup only, no logic: build the
 // registry, register the core commands, open the Tcl shell over a
 // fresh command context, then run script files or the interactive
 // loop.
