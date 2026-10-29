@@ -10,10 +10,12 @@
 #             still succeeds, but eda reports "this build has no Tcl:
 #             the EOS shell is unavailable".
 #   cmake   - the build system.
-#   binutils- macOS does not ship GNU objcopy, which the ABC build
-#             step calls by that exact name to namespace its bundled
-#             CUDD symbols. Homebrew installs it as gobjcopy, so this
-#             script links it as objcopy on PATH.
+#   llvm    - the ABC build step calls objcopy to namespace its
+#             bundled CUDD symbols. macOS object files are Mach-O,
+#             which GNU objcopy (Homebrew binutils) cannot read at
+#             all: it fails on the first object. LLVM's objcopy
+#             understands Mach-O, so this script links it as
+#             objcopy on PATH.
 #   python3 - the ABC build step runs a Python script.
 #   bison, flex, swig, eigen, spdlog, zlib - required by the
 #             imported OpenDB and OpenSTA modules (parsers, code
@@ -41,21 +43,19 @@ if ! xcode-select -p >/dev/null 2>&1; then
   exit 1
 fi
 
-brew install tcl-tk cmake binutils python3 bison flex swig eigen spdlog zlib
+brew install tcl-tk cmake llvm python3 bison flex swig eigen spdlog zlib
 
-# GNU objcopy under its expected name. Never clobbers an existing one.
-if ! command -v objcopy >/dev/null 2>&1; then
-  GOBJCOPY="$(brew --prefix binutils)/bin/gobjcopy"
-  if [[ ! -x "$GOBJCOPY" ]]; then
-    GOBJCOPY="$(brew --prefix)/bin/gobjcopy"
-  fi
-  if [[ -x "$GOBJCOPY" ]]; then
-    ln -s "$GOBJCOPY" "$(brew --prefix)/bin/objcopy"
-    echo "Linked objcopy -> $GOBJCOPY"
-  else
-    echo "setup-macos.sh: gobjcopy not found after brew install binutils" >&2
-    exit 1
-  fi
+# objcopy under its expected name, resolving to LLVM's objcopy.
+# Unconditional and idempotent: it also repairs an earlier link to
+# GNU objcopy, which cannot read Mach-O objects. Never links
+# anything else as objcopy.
+LLVM_OBJCOPY="$(brew --prefix llvm)/bin/llvm-objcopy"
+if [[ -x "$LLVM_OBJCOPY" ]]; then
+  ln -sf "$LLVM_OBJCOPY" "$(brew --prefix)/bin/objcopy"
+  echo "Linked objcopy -> $LLVM_OBJCOPY"
+else
+  echo "setup-macos.sh: llvm-objcopy not found after brew install llvm" >&2
+  exit 1
 fi
 
 echo "Verifying..."

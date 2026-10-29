@@ -40,7 +40,7 @@ if(APPLE)
   find_program(EOS_BREW_PROGRAM brew)
   if(EOS_BREW_PROGRAM)
     execute_process(
-      COMMAND ${EOS_BREW_PROGRAM} --prefix tcl-tk bison flex zlib eigen spdlog binutils
+      COMMAND ${EOS_BREW_PROGRAM} --prefix tcl-tk bison flex zlib eigen spdlog llvm
       OUTPUT_VARIABLE _eos_brew_prefixes
       OUTPUT_STRIP_TRAILING_WHITESPACE
       ERROR_QUIET)
@@ -135,8 +135,8 @@ function(eos_check_dependencies)
 
   find_program(EOS_OBJCOPY_PATH objcopy)
   if(NOT EOS_OBJCOPY_PATH)
-    list(APPEND _missing "GNU objcopy (ABC CUDD namespacing step)")
-    list(APPEND _brew "binutils")
+    list(APPEND _missing "objcopy (ABC CUDD namespacing step; LLVM objcopy on macOS)")
+    list(APPEND _brew "llvm")
     list(APPEND _apt "binutils")
   endif()
 
