@@ -2306,6 +2306,10 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (!incumbent_eval.ok) return FromStatus(foundation::Status::Error(
             foundation::ErrorCode::kIoError, incumbent_eval.error));
         ++sta_evaluations;
+        // Unit S7: a new loop run replaces the previous run's
+        // per-strategy record, including the empty-working-set
+        // path below, which returns without committing.
+        ctx.synth.opt_strategy_records.clear();
         std::vector<std::string> working_pins;
         std::vector<std::pair<std::string, double>> working_baseline;
         for (const analysis::EndpointSlack& endpoint :
@@ -2442,6 +2446,24 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (!have_best) break;
           committed.push_back(OptStrategyName(best_strategy));
+          // Unit S7: the commit's own record. The candidate
+          // was proven kEquivalent against the incumbent
+          // before it could become the best of this
+          // iteration, so the proof term records that gate;
+          // the STA numbers are this candidate's evaluation
+          // in the resident session, and the cell count is
+          // scanned from the candidate file itself.
+          {
+            std::map<std::string, int> commit_types;
+            int commit_cells = 0;
+            ScanMappedCells(best_file, cell_set, &commit_types,
+                            &commit_cells);
+            ctx.synth.opt_strategy_records.push_back(
+                std::string(OptStrategyName(best_strategy)) + ":" +
+                FormatNumber(best_eval.worst_slack) + ":" +
+                FormatNumber(best_eval.total_negative) + ":" +
+                std::to_string(commit_cells) + ":proof=equivalent");
+          }
           if (!incumbent_temp.empty()) {
             std::error_code ec;
             std::filesystem::remove(incumbent_temp, ec);
@@ -2520,6 +2542,303 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             std::to_string(equivalence_rejected) +
             " failed_strategies=" +
             OptNameListText(failed_strategies));
+      });
+
+  // --- write_verilog, check_equivalence, synth_report (unit
+  // S7): output, equivalence, and qualification. ---
+  //
+  // write_verilog copies the current netlist to the path the
+  // caller names: the loop's winner when the loop ran, the
+  // mapped netlist otherwise. It is a copy, not a
+  // re-synthesis: the deliverable is byte-identical to the
+  // netlist the loop or the mapper produced, and the session
+  // records which source it came from. A failed write leaves
+  // the previous output record untouched.
+  add("write_verilog", "write_verilog <path>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 1, "write_verilog <path>")) {
+          return *bad;
+        }
+        if (!ctx.synth.mapped) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no mapped design: eos::synth_map first");
+        }
+        const std::string source =
+            ctx.synth.opt_run ? ctx.synth.opt_verilog
+                              : ctx.synth.mapped_verilog;
+        const std::string source_name =
+            ctx.synth.opt_run ? "opt" : "mapped";
+        if (auto bad = CheckReadable(source)) return *bad;
+        const std::string& dest = args[0];
+        std::error_code ec;
+        const bool same =
+            std::filesystem::equivalent(source, dest, ec) && !ec;
+        if (!same) {
+          std::ifstream in(source, std::ios::binary);
+          if (!in) {
+            return CommandResult::Fail(
+                Diag::kIoError, "could not read file: " + source);
+          }
+          std::ofstream out(dest, std::ios::binary);
+          if (!out) {
+            return CommandResult::Fail(
+                Diag::kIoError, "could not write file: " + dest);
+          }
+          out << in.rdbuf();
+          out.flush();
+          if (!out) {
+            return CommandResult::Fail(
+                Diag::kIoError, "could not write file: " + dest);
+          }
+        }
+        std::set<std::string> cell_set;
+        {
+          std::size_t start = 0;
+          const std::string& cells = ctx.synth.mapped_genlib_cells;
+          while (start <= cells.size()) {
+            const std::size_t comma = cells.find(',', start);
+            const std::string cell = cells.substr(
+                start, comma == std::string::npos ? std::string::npos
+                                                  : comma - start);
+            if (!cell.empty()) cell_set.insert(cell);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+          }
+        }
+        std::map<std::string, int> by_type;
+        int total_cells = 0;
+        ScanMappedCells(dest, cell_set, &by_type, &total_cells);
+        const std::string types = CellTypesText(by_type);
+        ctx.synth.output_written = true;
+        ctx.synth.output_verilog = dest;
+        ctx.synth.output_source = source_name;
+        ctx.synth.output_cells = total_cells;
+        ctx.synth.output_types = types;
+        return CommandResult::Ok(
+            "path=" + dest + " source=" + source_name +
+            " cells=" + std::to_string(total_cells) +
+            " types=" + types);
+      });
+
+  // check_equivalence proves two gate-level netlists
+  // equivalent with ABC cec, through the same facade the
+  // loop uses: an unreadable input is a precondition failure
+  // before the prover runs, and a proof that does not
+  // conclude (limit hit, name mismatch, unreadable netlist
+  // inside the prover) is kUnknown. Only kEquivalent passes:
+  // a not-equivalent or unknown proof fails the step, never
+  // passes it, and the verdict is recorded in the session
+  // either way so synth_report can report it. The diagnostic
+  // taxonomy has no not-equivalent code, so both failing
+  // verdicts share kProofUnknown with the exact verdict in
+  // the message. The genlib defaults to the mapping's
+  // conversion; an explicit -genlib overrides it.
+  add("check_equivalence",
+      "check_equivalence <first> <second> [-genlib <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        std::vector<std::string> positionals;
+        std::string genlib;
+        bool genlib_seen = false;
+        for (std::size_t i = 0; i < args.size(); ++i) {
+          if (args[i] == "-genlib") {
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -genlib needs a value");
+            }
+            if (genlib_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -genlib given twice");
+            }
+            genlib_seen = true;
+            genlib = args[++i];
+            if (genlib.empty()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -genlib needs a non-empty value");
+            }
+          } else if (!args[i].empty() && args[i][0] == '-') {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown check_equivalence option: " + args[i]);
+          } else {
+            positionals.push_back(args[i]);
+          }
+        }
+        if (positionals.size() != 2) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::check_equivalence <first> <second> "
+              "[-genlib <path>]");
+        }
+        if (genlib.empty()) genlib = ctx.synth.mapped_genlib;
+        if (genlib.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no genlib for the proof: eos::check_equivalence "
+              "-genlib <path> or eos::synth_map first");
+        }
+        if (auto bad = CheckReadable(positionals[0])) return *bad;
+        if (auto bad = CheckReadable(positionals[1])) return *bad;
+        if (auto bad = CheckReadable(genlib)) return *bad;
+        synth::AbcEngine abc;
+        const foundation::Result<synth::EquivalenceVerdict> proof =
+            abc.ProveEquivalent(positionals[0], positionals[1],
+                                genlib);
+        if (!proof.ok()) return FromStatus(proof.status());
+        const char* verdict = "unknown";
+        if (proof.value() == synth::EquivalenceVerdict::kEquivalent) {
+          verdict = "equivalent";
+        } else if (proof.value() ==
+                   synth::EquivalenceVerdict::kNotEquivalent) {
+          verdict = "not_equivalent";
+        }
+        ctx.synth.equiv_run = true;
+        ctx.synth.equiv_verdict = verdict;
+        ctx.synth.equiv_first = positionals[0];
+        ctx.synth.equiv_second = positionals[1];
+        if (proof.value() != synth::EquivalenceVerdict::kEquivalent) {
+          return CommandResult::Fail(
+              Diag::kProofUnknown,
+              std::string("equivalence proof: ") + verdict + " for " +
+                  positionals[0] + " vs " + positionals[1]);
+        }
+        return CommandResult::Ok(
+            std::string("verdict=equivalent first=") +
+            positionals[0] + " second=" + positionals[1] +
+            " genlib=" + genlib);
+      });
+
+  // synth_report is the phase exit report: one payload
+  // carrying every stage's record, the per-strategy STA
+  // metrics of the loop's commits with their equivalence
+  // proofs, the winning strategy, the deliverable, and the
+  // most recent equivalence verdict. It never fails for
+  // lack of progress: a stage not reached reports "none"
+  // for its values, so the report is readable at any point
+  // in the flow. The winner is the loop's last commit, and
+  // each commit strictly improved the loop's lexicographic
+  // cost (worst slack, then total negative slack, then
+  // worst hold slack, then total negative hold slack, then
+  // electrical violations), so the winner is the
+  // lexicographic best of the strategies that ran. No power
+  // metric is reported: no synthesis command in this phase
+  // measures power on a mapped netlist, so the report
+  // records cell count (the area term) per strategy and
+  // does not invent a power number.
+  add("synth_report", "synth_report",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "synth_report")) {
+          return *bad;
+        }
+        const CommandContext::SynthSession& synth = ctx.synth;
+        std::string stages;
+        const auto add_stage = [&stages](const char* stage) {
+          if (!stages.empty()) stages += ",";
+          stages += stage;
+        };
+        if (synth.parsed) add_stage("parsed");
+        if (synth.elaborated) add_stage("elaborated");
+        if (synth.generic_optimized) add_stage("generic");
+        if (synth.mapped) add_stage("mapped");
+        if (synth.opt_run) add_stage("opt");
+        if (synth.output_written) add_stage("output");
+        if (synth.equiv_run) add_stage("equiv");
+        if (stages.empty()) stages = "none";
+        std::string payload = "stages=" + stages +
+                              " top=" + synth.top_cell;
+        payload += " generic_script=" +
+                   (synth.generic_script.empty() ? "none"
+                                                 : synth.generic_script);
+        payload += " generic_before_and=" +
+                   std::to_string(synth.generic_before_and) +
+                   " generic_before_levels=" +
+                   std::to_string(synth.generic_before_levels) +
+                   " generic_after_and=" +
+                   std::to_string(synth.generic_after_and) +
+                   " generic_after_levels=" +
+                   std::to_string(synth.generic_after_levels);
+        payload += " mapped_target=" +
+                   (synth.mapped_target.empty() ? "none"
+                                                : synth.mapped_target);
+        payload += " mapped_cells=" + std::to_string(synth.mapped_cells) +
+                   " mapped_types=" +
+                   (synth.mapped_types.empty() ? "none"
+                                               : synth.mapped_types);
+        payload += std::string(" mapped_timing_judged=") +
+                   (synth.mapped_timing_judged ? "true" : "false");
+        payload += " mapped_worst_slack_ns=" +
+                   (synth.mapped_timing_judged
+                        ? FormatNumber(synth.mapped_worst_slack_ns)
+                        : "none");
+        payload += " mapped_total_negative_slack_ns=" +
+                   (synth.mapped_timing_judged
+                        ? FormatNumber(
+                              synth.mapped_total_negative_slack_ns)
+                        : "none");
+        payload += " mapped_electrical_violations=" +
+                   std::to_string(synth.mapped_electrical_violations);
+        payload += std::string(" opt_run=") +
+                   (synth.opt_run ? "true" : "false");
+        payload += " opt_winner=" +
+                   (synth.opt_winner.empty() ? "none" : synth.opt_winner);
+        payload += " opt_iterations=" +
+                   std::to_string(synth.opt_iterations);
+        payload += " opt_cells=" + std::to_string(synth.opt_cells) +
+                   " opt_types=" +
+                   (synth.opt_types.empty() ? "none" : synth.opt_types);
+        payload += " opt_worst_slack_ns=" +
+                   (synth.opt_run
+                        ? FormatNumber(synth.opt_worst_slack_ns)
+                        : "none");
+        payload += " opt_total_negative_slack_ns=" +
+                   (synth.opt_run
+                        ? FormatNumber(
+                              synth.opt_total_negative_slack_ns)
+                        : "none");
+        payload += " opt_still_violating=" +
+                   OptNameListText(synth.opt_still_violating);
+        payload += " strategies=";
+        if (synth.opt_strategy_records.empty()) {
+          payload += "none";
+        } else {
+          for (std::size_t i = 0;
+               i < synth.opt_strategy_records.size(); ++i) {
+            if (i > 0) payload += ";";
+            payload += synth.opt_strategy_records[i];
+          }
+        }
+        payload +=
+            " winner_rule=lexicographic:worst_slack_ns,"
+            "total_negative_slack_ns,worst_hold_slack_ns,"
+            "total_negative_hold_slack_ns,electrical_violations";
+        payload += " winner=" +
+                   (synth.opt_winner.empty() ? "none" : synth.opt_winner);
+        payload += " output=" +
+                   (synth.output_verilog.empty() ? "none"
+                                                 : synth.output_verilog);
+        payload += " output_source=" +
+                   (synth.output_source.empty() ? "none"
+                                                : synth.output_source);
+        payload += " output_cells=" +
+                   std::to_string(synth.output_cells);
+        payload += " equivalence=" +
+                   (synth.equiv_verdict.empty() ? "not_run"
+                                                : synth.equiv_verdict);
+        const std::string deliverable =
+            synth.output_written
+                ? synth.output_verilog
+                : (synth.opt_run ? synth.opt_verilog
+                                 : (synth.mapped ? synth.mapped_verilog
+                                                : ""));
+        payload += " deliverable=" +
+                   (deliverable.empty() ? "none" : deliverable);
+        return CommandResult::Ok(payload);
       });
 
   add("read_sdc", "read_sdc <path>",

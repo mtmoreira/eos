@@ -57,9 +57,13 @@ TEST(Registry, CoreSetIsComplete) {
   Shell shell;
   // The count is a contract: adding a command means updating it.
   // S1 adds elaborate and synth_generic; S2 adds synth_map; S3
-  // adds synth_opt; S4 adds read_filelist.
-  EXPECT_EQ(shell.registry.Names().size(), 43u);
+  // adds synth_opt; S4 adds read_filelist; S7 adds
+  // write_verilog, check_equivalence, and synth_report.
+  EXPECT_EQ(shell.registry.Names().size(), 46u);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
+  EXPECT_NE(shell.registry.Find("write_verilog"), nullptr);
+  EXPECT_NE(shell.registry.Find("check_equivalence"), nullptr);
+  EXPECT_NE(shell.registry.Find("synth_report"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_opt"), nullptr);
   EXPECT_NE(shell.registry.Find("create_design"), nullptr);
   EXPECT_NE(shell.registry.Find("restore"), nullptr);
@@ -1854,6 +1858,260 @@ TEST(CoreCommands, SynthOptRequiresAnSdc) {
   const CommandResult loop = shell.Run("synth_opt");
   EXPECT_FALSE(loop.ok);
   EXPECT_NE(loop.message.find("SDC"), std::string::npos);
+}
+
+// S7: the exit report reads at any stage, and a stage not
+// reached reports "none" rather than failing the report.
+TEST(CoreCommands, SynthReportBeforeAnyStage) {
+  Shell shell;
+  const CommandResult report = shell.Run("synth_report");
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("stages=none"), std::string::npos);
+  EXPECT_NE(report.payload.find("winner=none"), std::string::npos);
+  EXPECT_NE(report.payload.find("deliverable=none"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("equivalence=not_run"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("strategies=none"),
+            std::string::npos);
+  EXPECT_FALSE(shell.Run("synth_report", {"extra"}).ok);
+}
+
+// S7: write_verilog copies the current netlist byte for byte:
+// the mapped netlist before the loop, the loop winner after
+// it, and a failed write leaves the previous record alone.
+TEST(CoreCommands, SynthWriteVerilogWritesMappedThenOptWinner) {
+  TimingTempDir dir;
+  Shell shell;
+  EXPECT_FALSE(shell.Run("write_verilog", {dir.Path("out.v")}).ok);
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const std::string mapped = shell.ctx.synth.mapped_verilog;
+  const std::string dest1 = dir.Path("mapped_out.v");
+  const CommandResult written = shell.Run("write_verilog", {dest1});
+  ASSERT_TRUE(written.ok) << written.message;
+  EXPECT_NE(written.payload.find("source=mapped"), std::string::npos);
+  EXPECT_NE(written.payload.find(
+                "cells=" + std::to_string(shell.ctx.synth.mapped_cells)),
+            std::string::npos);
+  {
+    std::ifstream in_mapped(mapped, std::ios::binary);
+    std::ostringstream mapped_text;
+    mapped_text << in_mapped.rdbuf();
+    std::ifstream in_out(dest1, std::ios::binary);
+    std::ostringstream out_text;
+    out_text << in_out.rdbuf();
+    EXPECT_EQ(out_text.str(), mapped_text.str());
+  }
+  EXPECT_FALSE(shell.Run("write_verilog").ok);
+  EXPECT_FALSE(
+      shell.Run("write_verilog", {dest1, "extra"}).ok);
+  EXPECT_FALSE(shell.Run("write_verilog",
+                         {dir.Path("no_dir/out.v")})
+                   .ok);
+  EXPECT_EQ(shell.ctx.synth.output_verilog, dest1);
+  EXPECT_EQ(shell.ctx.synth.output_source, "mapped");
+  const CommandResult loop =
+      shell.Run("synth_opt", {"-strategies", "classic"});
+  ASSERT_TRUE(loop.ok) << loop.message;
+  EXPECT_EQ(shell.ctx.synth.opt_winner, "classic");
+  const std::string dest2 = dir.Path("opt_out.v");
+  const CommandResult written2 = shell.Run("write_verilog", {dest2});
+  ASSERT_TRUE(written2.ok) << written2.message;
+  EXPECT_NE(written2.payload.find("source=opt"), std::string::npos);
+  EXPECT_EQ(shell.ctx.synth.output_verilog, dest2);
+  EXPECT_EQ(shell.ctx.synth.output_source, "opt");
+  {
+    std::ifstream in_opt(shell.ctx.synth.opt_verilog,
+                         std::ios::binary);
+    std::ostringstream opt_text;
+    opt_text << in_opt.rdbuf();
+    std::ifstream in_out(dest2, std::ios::binary);
+    std::ostringstream out_text;
+    out_text << in_out.rdbuf();
+    EXPECT_EQ(out_text.str(), opt_text.str());
+  }
+  const CommandResult report = shell.Run("synth_report");
+  ASSERT_TRUE(report.ok);
+  EXPECT_NE(report.payload.find("stages="), std::string::npos);
+  EXPECT_NE(report.payload.find("mapped"), std::string::npos);
+  EXPECT_NE(report.payload.find("opt"), std::string::npos);
+  EXPECT_NE(report.payload.find("output"), std::string::npos);
+  EXPECT_NE(report.payload.find("winner=classic"), std::string::npos);
+  EXPECT_NE(report.payload.find("output=" + dest2),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("deliverable=" + dest2),
+            std::string::npos);
+}
+
+// S7: the loop's per-strategy record carries each commit's
+// own STA numbers and its equivalence proof, and the report
+// names the winner by the lexicographic rule.
+TEST(CoreCommands, SynthReportNamesWinnerAndPerStrategyMetrics) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const CommandResult loop =
+      shell.Run("synth_opt", {"-strategies", "classic"});
+  ASSERT_TRUE(loop.ok) << loop.message;
+  ASSERT_EQ(shell.ctx.synth.opt_strategy_records.size(), 1u);
+  EXPECT_NE(shell.ctx.synth.opt_strategy_records[0].find("classic:"),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.synth.opt_strategy_records[0].find(
+                "proof=equivalent"),
+            std::string::npos);
+  const CommandResult report = shell.Run("synth_report");
+  ASSERT_TRUE(report.ok);
+  EXPECT_NE(report.payload.find("winner=classic"), std::string::npos);
+  EXPECT_NE(report.payload.find("strategies=classic:"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("proof=equivalent"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find(
+                "winner_rule=lexicographic:worst_slack_ns,"),
+            std::string::npos);
+  EXPECT_NEAR(SynthPayloadNumber(report, "opt_worst_slack_ns"), 0.05,
+              1e-4);
+  EXPECT_NEAR(
+      SynthPayloadNumber(report, "opt_total_negative_slack_ns"), 0.0,
+      1e-4);
+  EXPECT_NE(report.payload.find("opt_still_violating=none"),
+            std::string::npos);
+}
+
+// The changed-function design for the S7 equivalence tests:
+// same ports as optloop, but y2 differs (OR in place of the
+// second AND), so its mapped netlist must prove NOT
+// equivalent to the optloop mapping.
+const char kSynthOptLoopChanged[] = R"V(module optloop (a, b, c, d, y1, y2);
+  input a, b, c, d;
+  output y1, y2;
+  assign y1 = ((a & b) & c) & d;
+  assign y2 = ((a | c) & b) & d;
+endmodule
+)V";
+
+// S7: check_equivalence proves the winner against the mapped
+// netlist, rejects a changed function, reports an
+// unconcludable proof as unknown, and leaves the session
+// record untouched when a precondition fails.
+TEST(CoreCommands, SynthCheckEquivalenceProvesWinnerAndRejects) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const CommandResult loop =
+      shell.Run("synth_opt", {"-strategies", "classic"});
+  ASSERT_TRUE(loop.ok) << loop.message;
+  const std::string mapped = shell.ctx.synth.mapped_verilog;
+  const std::string winner = shell.ctx.synth.opt_verilog;
+  const std::string genlib = shell.ctx.synth.mapped_genlib;
+  const CommandResult proof =
+      shell.Run("check_equivalence", {mapped, winner});
+  ASSERT_TRUE(proof.ok) << proof.message;
+  EXPECT_NE(proof.payload.find("verdict=equivalent"),
+            std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.equiv_run);
+  EXPECT_EQ(shell.ctx.synth.equiv_verdict, "equivalent");
+  const CommandResult explicit_genlib = shell.Run(
+      "check_equivalence", {mapped, winner, "-genlib", genlib});
+  ASSERT_TRUE(explicit_genlib.ok) << explicit_genlib.message;
+  // Precondition failures leave the record at the last proof.
+  EXPECT_FALSE(shell.Run("check_equivalence", {mapped}).ok);
+  EXPECT_FALSE(
+      shell.Run("check_equivalence", {mapped, winner, "extra"}).ok);
+  EXPECT_FALSE(shell.Run("check_equivalence",
+                         {mapped, winner, "-bogus", "1"})
+                   .ok);
+  EXPECT_FALSE(shell.Run("check_equivalence",
+                         {mapped, winner, "-genlib"})
+                   .ok);
+  EXPECT_FALSE(shell.Run("check_equivalence",
+                         {mapped, winner, "-genlib", genlib,
+                          "-genlib", genlib})
+                   .ok);
+  EXPECT_FALSE(shell.Run("check_equivalence",
+                         {mapped, dir.Path("missing.v")})
+                   .ok);
+  EXPECT_EQ(shell.ctx.synth.equiv_verdict, "equivalent");
+  // No genlib anywhere: a fresh shell with two readable
+  // files still cannot prove without a library.
+  {
+    Shell bare;
+    const std::string first = dir.Write("a.v", kSynthOptLoopDemo);
+    const std::string second = dir.Write("b.v", kSynthOptLoopDemo);
+    const CommandResult no_genlib =
+        bare.Run("check_equivalence", {first, second});
+    EXPECT_FALSE(no_genlib.ok);
+    EXPECT_NE(no_genlib.message.find("genlib"), std::string::npos);
+  }
+  // A changed function proves not equivalent.
+  {
+    TimingTempDir dir2;
+    Shell other;
+    ASSERT_TRUE(other.Run("create_scenario",
+                          {"func_tt", "func", "tt", "estimate"})
+                    .ok);
+    ASSERT_TRUE(other.Run("read_liberty",
+                          {"tt", dir2.Write("cells.lib",
+                                            kSynthOptLiberty)})
+                    .ok);
+    ASSERT_TRUE(other.Run("read_verilog",
+                          {dir2.Write("optloop.v",
+                                      kSynthOptLoopChanged),
+                           "optloop"})
+                    .ok);
+    ASSERT_TRUE(
+        other.Run("read_sdc",
+                  {dir2.Write("top.sdc", kSynthOptSdcClear)})
+            .ok);
+    ASSERT_TRUE(other.Run("elaborate").ok);
+    ASSERT_TRUE(other.Run("synth_generic").ok);
+    ASSERT_TRUE(other.Run("synth_map", {"-target", "area"}).ok);
+    const CommandResult changed = shell.Run(
+        "check_equivalence",
+        {mapped, other.ctx.synth.mapped_verilog});
+    EXPECT_FALSE(changed.ok);
+    EXPECT_NE(changed.message.find("not_equivalent"),
+              std::string::npos);
+    EXPECT_EQ(changed.diag, Diag::kProofUnknown);
+    EXPECT_EQ(shell.ctx.synth.equiv_verdict, "not_equivalent");
+  }
+  // A file the prover cannot read at all is unknown, never a
+  // pass, and the session records the unknown verdict.
+  const std::string garbage = dir.Write("garbage.v", "not verilog\n");
+  const CommandResult unknown =
+      shell.Run("check_equivalence", {mapped, garbage});
+  EXPECT_FALSE(unknown.ok);
+  EXPECT_NE(unknown.message.find("unknown"), std::string::npos);
+  EXPECT_EQ(unknown.diag, Diag::kProofUnknown);
+  EXPECT_EQ(shell.ctx.synth.equiv_verdict, "unknown");
+  const CommandResult report = shell.Run("synth_report");
+  ASSERT_TRUE(report.ok);
+  EXPECT_NE(report.payload.find("equivalence=unknown"),
+            std::string::npos);
+}
+
+// S7, measured limit: ABC's mapped reader cannot convert
+// assign-based RTL (the conversion fails with an empty
+// network), so proving the RTL file against the mapped
+// netlist is unknown, never a pass. The command reports
+// exactly that, and the session records it. The proof that
+// does stand for a strategy output is the loop's own gate:
+// every committed candidate was proven kEquivalent against
+// its incumbent, transitively from the mapped netlist.
+TEST(CoreCommands, SynthCheckEquivalenceRtlVersusMappedIsUnknown) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const CommandResult loop =
+      shell.Run("synth_opt", {"-strategies", "classic"});
+  ASSERT_TRUE(loop.ok) << loop.message;
+  const std::string rtl = dir.Write("rtl.v", kSynthOptLoopDemo);
+  const CommandResult proof = shell.Run(
+      "check_equivalence", {rtl, shell.ctx.synth.opt_verilog});
+  EXPECT_FALSE(proof.ok);
+  EXPECT_NE(proof.message.find("unknown"), std::string::npos);
+  EXPECT_EQ(proof.diag, Diag::kProofUnknown);
+  EXPECT_EQ(shell.ctx.synth.equiv_verdict, "unknown");
 }
 
 TEST(CoreCommands, ImportOdbLoadsTheDatabase) {

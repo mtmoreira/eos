@@ -196,6 +196,32 @@ struct CommandContext {
     double opt_worst_slack_ns = 0.0;
     double opt_total_negative_slack_ns = 0.0;
     std::vector<std::string> opt_still_violating;
+    // Synthesis unit S7: one record per strategy the loop
+    // committed, in commit order, as
+    // "name:worst_slack_ns:total_negative_slack_ns:cells:proof=equivalent".
+    // A committed candidate was proven kEquivalent against its
+    // incumbent before it committed, so the proof term is a
+    // record of that gate, not a fresh claim; a run with no
+    // commit leaves this empty, and a re-run replaces it.
+    std::vector<std::string> opt_strategy_records;
+    // Synthesis unit S7: the deliverable write_verilog wrote.
+    // output_source is "mapped" when the loop never ran and
+    // "opt" when it did; output_types is the same
+    // "Type:count" scan synth_map and synth_opt report.
+    bool output_written = false;
+    std::string output_verilog;
+    std::string output_source;
+    int output_cells = 0;
+    std::string output_types;
+    // Synthesis unit S7: the most recent check_equivalence
+    // proof, whatever its verdict. equiv_verdict is
+    // "equivalent", "not_equivalent", or "unknown"; a run
+    // that never reached the prover (unreadable input, no
+    // genlib) leaves the previous record untouched.
+    bool equiv_run = false;
+    std::string equiv_verdict;
+    std::string equiv_first;
+    std::string equiv_second;
   };
   SynthSession synth;
 
