@@ -67,12 +67,18 @@
 #     libparse.cc itself (without FILTERLIB, its main() is not
 #     compiled in), which provides the LibertyParser the
 #     dfflibmap, clockgate and libcache passes use.
-# The share directory is NOT wired in this unit: passes that need
-# techlib .v data at runtime (the synth_* passes) look it up
-# relative to the host executable, which is not an EOS concept.
-# The front end, which S0 exercises, needs no share data. Wiring
-# share data to an EOS-owned location is S1 work, when elaborate
-# first runs a pass that needs it.
+# The share directory is staged, not found: passes that need
+# techlib .v data at runtime (techmap, and later the synth_*
+# passes) look it up relative to the host executable, which is
+# not an EOS concept. Unit S1 stages exactly the one share file
+# it needs, techmap.v, into the build tree at configure time,
+# and the facade points Yosys's share global at that directory
+# after setup (see yosys_facade.cc). The staged copy is a build
+# artifact, never committed; a fresh configure regenerates it.
+# Other share files the synth_* passes would need stay unwired
+# until a unit needs them.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/src/techlibs/common/techmap.v
+  DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/share)
 find_package(FLEX REQUIRED)
 find_package(BISON REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -546,7 +552,8 @@ target_include_directories(eda_synth_yosys
   PUBLIC include
   PRIVATE src ${_eos_yosys_gen_dir} src/libs/flex src/libs)
 target_compile_definitions(eda_synth_yosys PRIVATE
-  _YOSYS_ _DEFAULT_SOURCE _XOPEN_SOURCE=600)
+  _YOSYS_ _DEFAULT_SOURCE _XOPEN_SOURCE=600
+  EOS_YOSYS_SHARE_DIR=\"${CMAKE_CURRENT_BINARY_DIR}/share/\")
 if(ZLIB_FOUND)
   target_link_libraries(eda_synth_yosys PRIVATE ZLIB::ZLIB)
 endif()

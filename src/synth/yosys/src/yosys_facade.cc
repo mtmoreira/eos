@@ -36,9 +36,14 @@
 // instead of killing the caller.
 #include "eos/synth/yosys.h"
 
+#include <algorithm>
 #include <atomic>
+#include <filesystem>
 #include <fstream>
+#include <map>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "kernel/log.h"
 #include "kernel/rtlil.h"
@@ -56,6 +61,139 @@ Status IoError(const std::string& what, const std::string& path) {
   return Status::Error(ErrorCode::kIoError, what + ": " + path);
 }
 
+Status InvalidArgument(const std::string& message) {
+  return Status::Error(ErrorCode::kInvalidArgument, message);
+}
+
+Status InvalidState(const std::string& message) {
+  return Status::Error(ErrorCode::kInvalidState, message);
+}
+
+// A top name is interpolated into a Yosys pass command string, so
+// it must be a plain Verilog identifier: anything else is rejected
+// before any pass runs, and can never smuggle a second command in.
+bool IsPlainIdentifier(const std::string& name) {
+  if (name.empty()) return false;
+  const auto is_alpha = [](char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+  };
+  const auto is_digit = [](char c) { return c >= '0' && c <= '9'; };
+  if (!is_alpha(name[0])) return false;
+  for (std::size_t i = 1; i < name.size(); ++i) {
+    if (!is_alpha(name[i]) && !is_digit(name[i])) return false;
+  }
+  return true;
+}
+
+// Runs one Yosys pass command under the command-error throw scope,
+// so a pass rejection comes back as a Status instead of aborting
+// the caller. A log_error inside the pass (a syntax error, an
+// internal failure) still aborts the process; that is the
+// documented rule in the facade header, not a case this helper
+// can recover.
+Status RunPass(const std::string& command) {
+  try {
+    auto guard = Yosys::logger().error_throw_scope();
+    Yosys::run_pass(command);
+  } catch (const Yosys::log_cmd_error_exception&) {
+    return InvalidArgument("Yosys rejected the command: " + command);
+  } catch (const std::exception& e) {
+    return InvalidState(std::string("Yosys failed: ") + e.what());
+  }
+  return Status::Ok();
+}
+
+// Finds a module of the live design by its source name, the way
+// ParseVerilog reports names (unescaped).
+Yosys::RTLIL::Module* FindModule(const std::string& name) {
+  if (Yosys::yosys_design == nullptr) return nullptr;
+  for (const auto& entry : Yosys::yosys_design->modules_) {
+    if (entry.first.unescape() == name) return entry.second;
+  }
+  return nullptr;
+}
+
+// Cell types whose outputs start a new timing path instead of
+// continuing one: flip-flops, latches, memories and FSMs, in both
+// the $ form elaborate produces and the $_ form techmap produces.
+bool IsSequentialCell(const std::string& type) {
+  static const char* kPrefixes[] = {"$dff",  "$adff", "$sdff", "$dffsr",
+                                    "$dffe", "$mem",  "$fsm",  "$_DFF",
+                                    "$_SDFF", "$_DLATCH", "$sr"};
+  for (const char* prefix : kPrefixes) {
+    if (type.compare(0, std::string(prefix).size(), prefix) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+YosysNetlistStats ComputeStats(Yosys::RTLIL::Module* module) {
+  YosysNetlistStats stats;
+  stats.module = module->name.unescape();
+  stats.cell_count = static_cast<int>(module->cells_.size());
+  stats.wire_count = static_cast<int>(module->wires_.size());
+  std::map<std::string, int> by_type;
+  for (const auto& entry : module->cells_) {
+    by_type[entry.second->type.str()]++;
+  }
+  for (const auto& entry : by_type) {
+    stats.cells_by_type.push_back(YosysCellTypeCount{entry.first, entry.second});
+  }
+  // Logic depth by fixed-point propagation over wires. Every wire
+  // starts at depth 0 (a primary input, an undriven wire, or a
+  // sequential output); a combinational cell raises its output
+  // wires to one more than the deepest of its input wires.
+  // Iterating to a fixed point removes any dependence on the
+  // order Yosys stores cells in, and the iteration count is
+  // bounded by the cell count because a wire's depth never
+  // exceeds the longest cell chain.
+  std::map<Yosys::RTLIL::Wire*, int> depth;
+  for (const auto& entry : module->wires_) {
+    depth[entry.second] = 0;
+  }
+  for (std::size_t pass = 0; pass <= module->cells_.size(); ++pass) {
+    bool changed = false;
+    for (const auto& entry : module->cells_) {
+      Yosys::RTLIL::Cell* cell = entry.second;
+      if (IsSequentialCell(cell->type.str())) continue;
+      int deepest_input = -1;
+      bool has_input = false;
+      std::vector<Yosys::RTLIL::Wire*> outputs;
+      for (const auto& port : cell->connections_) {
+        if (cell->output(port.first)) {
+          for (const auto& bit : port.second) {
+            if (bit.wire != nullptr) outputs.push_back(bit.wire);
+          }
+        } else {
+          for (const auto& bit : port.second) {
+            if (bit.wire != nullptr) {
+              has_input = true;
+              const auto found = depth.find(bit.wire);
+              if (found != depth.end() && found->second > deepest_input) {
+                deepest_input = found->second;
+              }
+            }
+          }
+        }
+      }
+      if (!has_input || outputs.empty()) continue;
+      const int candidate = deepest_input + 1;
+      for (Yosys::RTLIL::Wire* wire : outputs) {
+        if (candidate > depth[wire]) {
+          depth[wire] = candidate;
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  for (const auto& entry : depth) {
+    if (entry.second > stats.logic_depth) stats.logic_depth = entry.second;
+  }
+  return stats;
+}
+
 }  // namespace
 
 YosysEngine::YosysEngine() {
@@ -66,6 +204,16 @@ YosysEngine::YosysEngine() {
       Yosys::logger().add_sink<Yosys::ConsoleLogSink>();
       g_yosys_setup_done = true;
     }
+    // Point Yosys's share lookup at the build-tree staging
+    // (CMakeLists stages techmap.v there at configure time).
+    // Upstream resolves its share dir from the host executable,
+    // which for EOS is a test binary or the shell, so without
+    // this override techmap looks for /techmap.v and fails.
+    // The override is set on every engine construction, so it
+    // holds regardless of which engine ran setup first.
+#ifdef EOS_YOSYS_SHARE_DIR
+    Yosys::yosys_share_dirname = EOS_YOSYS_SHARE_DIR;
+#endif
   }
 }
 
@@ -142,6 +290,110 @@ Result<YosysDesignSummary> YosysEngine::ParseVerilog(
     }
   }
   return summary;
+}
+
+Result<YosysNetlistStats> YosysEngine::Elaborate(const std::string& top) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  if (!IsPlainIdentifier(top)) {
+    return InvalidArgument("top module name is not a plain identifier: " + top);
+  }
+  if (FindModule(top) == nullptr) {
+    return InvalidArgument("top module not found in the parsed design: " + top);
+  }
+  // The unoptimized netlist: hierarchy, process lowering, FSM and
+  // memory identification, and nothing else. Optimization passes
+  // are synth_generic's job, so the elaborated stats are the
+  // baseline the generic script is judged against.
+  static const char* kPasses[] = {"hierarchy", "proc", "fsm", "memory"};
+  for (const char* pass : kPasses) {
+    std::string command(pass);
+    if (std::string(pass) == "hierarchy") command += " -top " + top;
+    const Status status = RunPass(command);
+    if (!status.ok()) return status;
+  }
+  Yosys::RTLIL::Module* module = FindModule(top);
+  if (module == nullptr) {
+    return InvalidArgument("top module not found after elaboration: " + top);
+  }
+  return ComputeStats(module);
+}
+
+Result<YosysNetlistStats> YosysEngine::Stats(const std::string& top) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  if (!IsPlainIdentifier(top)) {
+    return InvalidArgument("top module name is not a plain identifier: " + top);
+  }
+  Yosys::RTLIL::Module* module = FindModule(top);
+  if (module == nullptr) {
+    return InvalidArgument("module not found in the live design: " + top);
+  }
+  return ComputeStats(module);
+}
+
+Status YosysEngine::AigMap() {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  // techmap first: it converts sequential cells to the simple
+  // forms ($dff to $_DFF_P_) that the BLIF backend writes as
+  // .latch lines; without it write_blif emits $dff as a .subckt
+  // reference ABC cannot resolve. techmap reads its rules from
+  // the staged share techmap.v (see the engine constructor).
+  const Status techmap = RunPass("techmap");
+  if (!techmap.ok()) return techmap;
+  return RunPass("aigmap");
+}
+
+Status YosysEngine::WriteBlif(const std::string& path,
+                              const std::string& top) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  if (!IsPlainIdentifier(top)) {
+    return InvalidArgument("top module name is not a plain identifier: " + top);
+  }
+  {
+    std::ofstream out(path);
+    if (!out.good()) {
+      return IoError("cannot write BLIF file", path);
+    }
+  }
+  const Status status = RunPass("write_blif -top " + top + " " + path);
+  if (!status.ok()) return status;
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec) ||
+      std::filesystem::file_size(path, ec) == 0) {
+    return IoError("Yosys wrote no BLIF file", path);
+  }
+  return Status::Ok();
+}
+
+Status YosysEngine::WriteVerilog(const std::string& path) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  {
+    std::ofstream out(path);
+    if (!out.good()) {
+      return IoError("cannot write Verilog file", path);
+    }
+  }
+  // -noattr: ABC's Verilog reader rejects Yosys attribute lines
+  // (it fails reading the module directive at the first one),
+  // and the bridge file carries no information in attributes
+  // that the optimization needs.
+  const Status status = RunPass("write_verilog -noattr " + path);
+  if (!status.ok()) return status;
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec) ||
+      std::filesystem::file_size(path, ec) == 0) {
+    return IoError("Yosys wrote no Verilog file", path);
+  }
+  return Status::Ok();
 }
 
 }  // namespace eos::synth

@@ -7,8 +7,11 @@
 #include "eos/ui/registry.h"
 
 #include "eos/session/flow.h"
+#include "eos/synth/abc.h"
+#include "eos/synth/yosys.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <charconv>
 #include <cstdint>
@@ -21,6 +24,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 
 namespace eos::ui {
@@ -209,6 +214,38 @@ void ResetProject(CommandContext& ctx) {
   ctx.collections.clear();
   ctx.next_collection = 1;
   ctx.timing = CommandContext::TimingSession();
+  ctx.synth = CommandContext::SynthSession();
+}
+
+// A scratch path for a synthesis bridge file: the elaborated
+// netlist Yosys hands ABC (BLIF), and the optimized netlist ABC
+// hands back (Verilog). The optimized file is session state
+// (the synth session records its path); the bridge file is
+// deleted by its caller once ABC has read it. The process id is
+// part of the name: a bare per-process counter collides across
+// processes sharing /tmp, so two shells (or a test binary and a
+// shell) would otherwise read each other's bridge files.
+std::string SynthTempPath(const std::string& stem,
+                          const std::string& extension) {
+  static std::atomic<unsigned long> counter{0};
+  return (std::filesystem::temp_directory_path() /
+          ("eos_synth_" + stem + "_" +
+           std::to_string(static_cast<long long>(::getpid())) + "_" +
+           std::to_string(counter.fetch_add(1)) + extension))
+      .string();
+}
+
+std::string SynthStatsText(const synth::YosysNetlistStats& stats) {
+  std::string types;
+  for (const synth::YosysCellTypeCount& entry : stats.cells_by_type) {
+    if (!types.empty()) types += ",";
+    types += entry.type + ":" + std::to_string(entry.count);
+  }
+  return "module=" + stats.module +
+         " cells=" + std::to_string(stats.cell_count) +
+         " wires=" + std::to_string(stats.wire_count) +
+         " depth=" + std::to_string(stats.logic_depth) +
+         " types=" + types;
 }
 
 // Metric values print at full useful precision: enough significant
@@ -1097,6 +1134,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.collections.clear();
         ctx.next_collection = 1;
         ctx.timing = CommandContext::TimingSession();
+        ctx.synth = CommandContext::SynthSession();
         return CommandResult::Ok(
             "restored=1 design=" + ctx.project.design->name() +
             " revision=" +
@@ -1149,9 +1187,194 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return *bad;
         }
         if (auto bad = CheckReadable(args[0])) return *bad;
+        // Changed semantics in synthesis unit S1: the file is
+        // really parsed by the Yosys front end, not only
+        // recorded. The path and top are still recorded for the
+        // timing commands, which read the file themselves, so
+        // run_timing and report_timing are unchanged. A file the
+        // front end rejects at command level, or a top that is
+        // not among the parsed modules, records nothing.
+        // A malformed file is the documented exception: Yosys
+        // aborts the calling process with exit 1, exactly as the
+        // yosys executable does; it is not a command result.
+        synth::YosysEngine engine;
+        const foundation::Result<synth::YosysDesignSummary> parsed =
+            engine.ParseVerilog(args[0]);
+        if (!parsed.ok()) return FromStatus(parsed.status());
+        std::string modules;
+        bool found = false;
+        for (const synth::YosysModuleSummary& module :
+             parsed.value().modules) {
+          if (!modules.empty()) modules += ",";
+          modules += module.name;
+          if (module.name == args[1]) found = true;
+        }
+        if (!found) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "top module '" + args[1] + "' not found in " + args[0] +
+                  " (modules: " + modules + ")");
+        }
         ctx.timing.verilog_path = args[0];
         ctx.timing.top_cell = args[1];
-        return CommandResult::Ok("verilog=" + args[0] + " top=" + args[1]);
+        ctx.synth = CommandContext::SynthSession();
+        ctx.synth.parsed = true;
+        ctx.synth.verilog_path = args[0];
+        ctx.synth.top_cell = args[1];
+        return CommandResult::Ok("verilog=" + args[0] + " top=" + args[1] +
+                                 " modules=" + modules);
+      });
+
+  add("elaborate", "elaborate",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "elaborate")) return *bad;
+        if (!ctx.synth.parsed) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no parsed design: eos::read_verilog first");
+        }
+        synth::YosysEngine engine;
+        const foundation::Result<synth::YosysNetlistStats> stats =
+            engine.Elaborate(ctx.synth.top_cell);
+        if (!stats.ok()) {
+          // A failed elaboration may have mutated the live
+          // design, so the session no longer holds the parsed
+          // design it claims: clear the synth state and let the
+          // caller re-run read_verilog. The timing recording is
+          // untouched; it names a file, not the live design.
+          ctx.synth = CommandContext::SynthSession();
+          return FromStatus(stats.status());
+        }
+        ctx.synth.elaborated = true;
+        ctx.synth.elaborated_cells = stats.value().cell_count;
+        ctx.synth.elaborated_wires = stats.value().wire_count;
+        ctx.synth.elaborated_depth = stats.value().logic_depth;
+        ctx.synth.generic_optimized = false;
+        ctx.synth.generic_script.clear();
+        ctx.synth.generic_verilog.clear();
+        return CommandResult::Ok(SynthStatsText(stats.value()));
+      });
+
+  add("synth_generic", "synth_generic [-script <name>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        std::string script = "default";
+        bool script_seen = false;
+        for (std::size_t i = 0; i < args.size(); ++i) {
+          if (args[i] != "-script") {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown synth_generic option: " + args[i]);
+          }
+          if (i + 1 >= args.size()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "option -script needs a value");
+          }
+          if (script_seen) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "option -script given twice");
+          }
+          script_seen = true;
+          script = args[++i];
+        }
+        if (script != "default" && script != "balance" &&
+            script != "rewrite" && script != "none") {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "unknown generic script: " + script);
+        }
+        if (!ctx.synth.parsed || !ctx.synth.elaborated) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no elaborated design: eos::elaborate first");
+        }
+        const int elaborated_cells = ctx.synth.elaborated_cells;
+        const int elaborated_wires = ctx.synth.elaborated_wires;
+        const int elaborated_depth = ctx.synth.elaborated_depth;
+        const std::string bridge = SynthTempPath("bridge", ".blif");
+        const std::string optimized = SynthTempPath("generic", ".v");
+        // The bridge runs Yosys first, then ABC, then Yosys
+        // again, each engine constructed and released in turn:
+        // both engines guard a process singleton, so they must
+        // never be alive at the same time. The Yosys design is
+        // mutated by aigmap before ABC runs, so any failure
+        // after that point clears the synth state: the live
+        // design is no longer the elaborated one, and the
+        // recovery is read_verilog followed by elaborate. The
+        // bridge is BLIF, not Verilog: see WriteBlif for why
+        // ABC cannot read Yosys's sequential Verilog form.
+        const auto fail_after_mutation =
+            [&ctx](const foundation::Status& status) {
+              ctx.synth = CommandContext::SynthSession();
+              return FromStatus(status);
+            };
+        synth::AbcGenericResult generic;
+        {
+          synth::YosysEngine yosys;
+          const foundation::Status mapped = yosys.AigMap();
+          if (!mapped.ok()) return fail_after_mutation(mapped);
+          const foundation::Status written =
+              yosys.WriteBlif(bridge, ctx.synth.top_cell);
+          if (!written.ok()) return fail_after_mutation(written);
+        }
+        {
+          synth::AbcEngine abc;
+          const foundation::Result<synth::AbcGenericResult> result =
+              abc.OptimizeGeneric(bridge, script, optimized);
+          std::error_code ec;
+          std::filesystem::remove(bridge, ec);
+          if (!result.ok()) return fail_after_mutation(result.status());
+          generic = result.value();
+        }
+        synth::YosysNetlistStats post;
+        {
+          synth::YosysEngine yosys;
+          const foundation::Result<synth::YosysDesignSummary> parsed =
+              yosys.ParseVerilog(optimized);
+          if (!parsed.ok()) return fail_after_mutation(parsed.status());
+          bool found = false;
+          for (const synth::YosysModuleSummary& module :
+               parsed.value().modules) {
+            if (module.name == ctx.synth.top_cell) found = true;
+          }
+          if (!found) {
+            return fail_after_mutation(foundation::Status::Error(
+                foundation::ErrorCode::kInvalidArgument,
+                "optimized netlist has no top module: " +
+                    ctx.synth.top_cell));
+          }
+          const foundation::Result<synth::YosysNetlistStats> stats =
+              yosys.Elaborate(ctx.synth.top_cell);
+          if (!stats.ok()) return fail_after_mutation(stats.status());
+          post = stats.value();
+        }
+        ctx.synth.elaborated = true;
+        ctx.synth.elaborated_cells = post.cell_count;
+        ctx.synth.elaborated_wires = post.wire_count;
+        ctx.synth.elaborated_depth = post.logic_depth;
+        ctx.synth.generic_optimized = true;
+        ctx.synth.generic_script = script;
+        ctx.synth.generic_before_and = generic.before.and_count;
+        ctx.synth.generic_before_levels = generic.before.levels;
+        ctx.synth.generic_after_and = generic.after.and_count;
+        ctx.synth.generic_after_levels = generic.after.levels;
+        ctx.synth.generic_verilog = optimized;
+        return CommandResult::Ok(
+            "script=" + script +
+            " elaborated_cells=" + std::to_string(elaborated_cells) +
+            " elaborated_wires=" + std::to_string(elaborated_wires) +
+            " elaborated_depth=" + std::to_string(elaborated_depth) +
+            " before_and=" + std::to_string(generic.before.and_count) +
+            " before_levels=" + std::to_string(generic.before.levels) +
+            " after_and=" + std::to_string(generic.after.and_count) +
+            " after_levels=" + std::to_string(generic.after.levels) +
+            " cells=" + std::to_string(post.cell_count) +
+            " wires=" + std::to_string(post.wire_count) +
+            " depth=" + std::to_string(post.logic_depth) +
+            " verilog=" + optimized);
       });
 
   add("read_sdc", "read_sdc <path>",

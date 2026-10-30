@@ -229,6 +229,118 @@ Status AbcEngine::MapForDelay(const std::string& input_verilog,
   return Status::Ok();
 }
 
+// Parses one print_stats line: "  and =%7d ... lev =%3d".
+// Returns false when either number is absent, so a caller never
+// mistakes an unreadable stats line for a measured zero.
+bool ParsePrintStats(const std::string& text, AbcNetworkStats& stats) {
+  const auto parse_after = [&text](const std::string& key, int& out) {
+    const std::size_t at = text.find(key);
+    if (at == std::string::npos) return false;
+    std::size_t i = at + key.size();
+    while (i < text.size() && text[i] == ' ') ++i;
+    if (i >= text.size() || text[i] < '0' || text[i] > '9') return false;
+    int value = 0;
+    while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
+      value = value * 10 + (text[i] - '0');
+      ++i;
+    }
+    out = value;
+    return true;
+  };
+  return parse_after("and =", stats.and_count) &&
+         parse_after("lev =", stats.levels);
+}
+
+std::string GenericScriptSteps(const std::string& script) {
+  if (script == "default") {
+    return "balance; rewrite; refactor; resub; balance";
+  }
+  if (script == "balance") return "balance";
+  if (script == "rewrite") return "rewrite";
+  if (script == "none") return "";
+  return "";
+}
+
+bool IsKnownGenericScript(const std::string& script) {
+  return script == "default" || script == "balance" ||
+         script == "rewrite" || script == "none";
+}
+
+Result<AbcGenericResult> AbcEngine::OptimizeGeneric(
+    const std::string& input_verilog, const std::string& script,
+    const std::string& output_verilog) {
+  if (impl_->frame == nullptr) {
+    return Status::Error(
+        ErrorCode::kInvalidState,
+        "another AbcEngine owns the upstream ABC frame; ABC "
+        "sessions must not overlap");
+  }
+  if (!IsKnownGenericScript(script)) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "unknown generic script: " + script);
+  }
+  if (!std::filesystem::exists(input_verilog)) {
+    return IoError("input netlist not found", input_verilog);
+  }
+  // Each step runs as its own checked command: the interpreter
+  // continues a semicolon script after a failed step, so a single
+  // script could optimize a stale network and report numbers for
+  // a run that never happened.
+  impl_->Restart();
+  {
+    std::error_code ec;
+    std::filesystem::remove(output_verilog, ec);
+  }
+  Status status = impl_->Execute("read " + Quote(input_verilog), "netlist read");
+  if (!status.ok()) return status;
+  status = impl_->Execute("strash", "structural hashing");
+  if (!status.ok()) return status;
+  AbcGenericResult result;
+  {
+    OutputCapture capture;
+    status = impl_->Execute("print_stats", "baseline stats");
+    const std::string captured = capture.Finish();
+    if (!status.ok()) return status;
+    if (!ParsePrintStats(captured, result.before)) {
+      return Status::Error(ErrorCode::kInvalidState,
+                           "ABC print_stats output could not be parsed");
+    }
+  }
+  const std::string steps = GenericScriptSteps(script);
+  std::size_t start = 0;
+  while (start < steps.size()) {
+    const std::size_t semi = steps.find(';', start);
+    std::string step = steps.substr(
+        start, semi == std::string::npos ? std::string::npos : semi - start);
+    const std::size_t first = step.find_first_not_of(" \t");
+    const std::size_t last = step.find_last_not_of(" \t");
+    if (first != std::string::npos) {
+      step = step.substr(first, last - first + 1);
+      status = impl_->Execute(step, "generic script step");
+      if (!status.ok()) return status;
+    }
+    if (semi == std::string::npos) break;
+    start = semi + 1;
+  }
+  {
+    OutputCapture capture;
+    status = impl_->Execute("print_stats", "optimized stats");
+    const std::string captured = capture.Finish();
+    if (!status.ok()) return status;
+    if (!ParsePrintStats(captured, result.after)) {
+      return Status::Error(ErrorCode::kInvalidState,
+                           "ABC print_stats output could not be parsed");
+    }
+  }
+  status = impl_->Execute("write_verilog " + Quote(output_verilog),
+                          "optimized netlist write");
+  if (!status.ok()) return status;
+  if (!std::filesystem::exists(output_verilog)) {
+    return IoError("ABC wrote no optimized netlist", output_verilog);
+  }
+  return result;
+}
+
 Result<EquivalenceVerdict> AbcEngine::ProveEquivalent(
     const std::string& first_verilog, const std::string& second_verilog,
     const std::string& genlib_path) {

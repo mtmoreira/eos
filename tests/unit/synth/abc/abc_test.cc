@@ -122,6 +122,102 @@ TEST(AbcFacade, ProveEquivalentRejectsACorruptedCone) {
   EXPECT_EQ(verdict.value(), EquivalenceVerdict::kNotEquivalent);
 }
 
+// The generic-script fixture: a six-input AND chain, written as
+// continuous assignments, the form the Yosys bridge produces.
+// Structural hashing alone leaves five ANDs at five levels; the
+// classic script's balance step must cut the depth, and no step
+// may grow the gate count. Both numbers are ABC print_stats
+// facts for this fixture at this pin.
+const char kChain[] = R"V(module chain (a, b, c, d, e, f, y);
+  input a, b, c, d, e, f;
+  output y;
+  assign y = (((((a & b) & c) & d) & e) & f);
+endmodule
+)V";
+
+TEST(AbcFacade, GenericDefaultScriptBalancesTheChain) {
+  TempDir dir;
+  const std::string chain = dir.Write("chain.v", kChain);
+  const std::string optimized = dir.Path("chain_opt.v");
+  AbcEngine engine;
+  const auto result = engine.OptimizeGeneric(chain, "default", optimized);
+  ASSERT_TRUE(result.ok()) << result.status().message();
+  EXPECT_EQ(result.value().before.and_count, 5);
+  EXPECT_EQ(result.value().before.levels, 5);
+  EXPECT_EQ(result.value().after.and_count, 5);
+  EXPECT_LE(result.value().after.levels, 3);
+  std::ifstream in(optimized);
+  ASSERT_TRUE(in.good());
+}
+
+TEST(AbcFacade, GenericNoneScriptIsTheHashedBaseline) {
+  TempDir dir;
+  const std::string chain = dir.Write("chain.v", kChain);
+  const std::string optimized = dir.Path("chain_opt.v");
+  AbcEngine engine;
+  const auto result = engine.OptimizeGeneric(chain, "none", optimized);
+  ASSERT_TRUE(result.ok()) << result.status().message();
+  EXPECT_EQ(result.value().before.and_count, result.value().after.and_count);
+  EXPECT_EQ(result.value().before.levels, result.value().after.levels);
+}
+
+TEST(AbcFacade, GenericUnknownScriptFailsBeforeAbcRuns) {
+  TempDir dir;
+  const std::string chain = dir.Write("chain.v", kChain);
+  const std::string optimized = dir.Path("chain_opt.v");
+  AbcEngine engine;
+  const auto result = engine.OptimizeGeneric(chain, "sideways", optimized);
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), foundation::ErrorCode::kInvalidArgument);
+  EXPECT_FALSE(std::filesystem::exists(optimized));
+}
+
+TEST(AbcFacade, GenericMissingInputFailsWithIoError) {
+  TempDir dir;
+  AbcEngine engine;
+  const auto result = engine.OptimizeGeneric(dir.Path("missing.v"), "default",
+                                             dir.Path("out.v"));
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), foundation::ErrorCode::kIoError);
+}
+
+// The BLIF-input form: the bridge Yosys hands ABC is BLIF,
+// so OptimizeGeneric must accept a .blif input, not only
+// Verilog. The fixture is the six-input AND chain from the
+// Verilog chain test, in BLIF form: five ANDs at five levels
+// before the script, five ANDs at no more than three levels
+// after its balance step.
+const char kChainBlif[] = R"B(.model chain
+.inputs a b c d e f
+.outputs y
+.names a b n1
+11 1
+.names n1 c n2
+11 1
+.names n2 d n3
+11 1
+.names n3 e n4
+11 1
+.names n4 f y
+11 1
+.end
+)B";
+
+TEST(AbcFacade, GenericBlifInputOptimizes) {
+  TempDir dir;
+  const std::string blif = dir.Write("chain.blif", kChainBlif);
+  const std::string optimized = dir.Path("chain_opt.v");
+  AbcEngine engine;
+  const auto result = engine.OptimizeGeneric(blif, "default", optimized);
+  ASSERT_TRUE(result.ok()) << result.status().message();
+  EXPECT_EQ(result.value().before.and_count, 5);
+  EXPECT_EQ(result.value().before.levels, 5);
+  EXPECT_EQ(result.value().after.and_count, 5);
+  EXPECT_LE(result.value().after.levels, 3);
+  std::ifstream in(optimized);
+  ASSERT_TRUE(in.good());
+}
+
 TEST(AbcFacade, ProveEquivalentIsUnknownWhenTheProofCannotRun) {
   TempDir dir;
   const std::string genlib = dir.Write("cells.genlib", kGenlib);

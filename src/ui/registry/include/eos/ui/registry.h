@@ -115,6 +115,35 @@ struct CommandContext {
   };
   TimingSession timing;
 
+  // Synthesis session state (unit S1): the design the synthesis
+  // commands have parsed, elaborated and generically optimized,
+  // as one advancing state machine. Like the timing session,
+  // this is interface session state, not project state: it names
+  // files and a live engine design the project checkpoint does
+  // not hold, it is cleared when the design closes, and a
+  // restore does not bring it back. The Yosys design itself
+  // lives in the engine session; these fields are the record of
+  // which stage it is at, so a command that needs a stage the
+  // session has not reached fails here instead of operating on
+  // whatever design a previous session left in the engine.
+  struct SynthSession {
+    bool parsed = false;
+    std::string verilog_path;
+    std::string top_cell;
+    bool elaborated = false;
+    int elaborated_cells = 0;
+    int elaborated_wires = 0;
+    int elaborated_depth = 0;
+    bool generic_optimized = false;
+    std::string generic_script;
+    int generic_before_and = 0;
+    int generic_before_levels = 0;
+    int generic_after_and = 0;
+    int generic_after_levels = 0;
+    std::string generic_verilog;
+  };
+  SynthSession synth;
+
   bool HasDesign() const { return project.HasDesign(); }
 };
 

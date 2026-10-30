@@ -55,7 +55,8 @@ TEST(Registry, UnknownCommandIsAnInvalidCommandDiagnostic) {
 TEST(Registry, CoreSetIsComplete) {
   Shell shell;
   // The count is a contract: adding a command means updating it.
-  EXPECT_EQ(shell.registry.Names().size(), 38u);
+  // S1 adds elaborate and synth_generic.
+  EXPECT_EQ(shell.registry.Names().size(), 40u);
   EXPECT_NE(shell.registry.Find("create_design"), nullptr);
   EXPECT_NE(shell.registry.Find("restore"), nullptr);
   EXPECT_NE(shell.registry.Find("report_timing"), nullptr);
@@ -822,6 +823,146 @@ TEST(CoreCommands, TimingRunDiagnostics) {
   ASSERT_FALSE(no_liberty.ok);
   EXPECT_EQ(no_liberty.diag, Diag::kInvalidConfiguration);
   EXPECT_NE(no_liberty.message.find("tt"), std::string::npos);
+}
+
+// The S1 synthesis fixtures: the registered adder from the
+// Yosys facade tests, and a combinational design with duplicate
+// and doubly-inverted logic, the form a generic script improves.
+// After elaboration (hierarchy, process lowering, FSM and memory
+// identification, no optimization) the combinational design is
+// five cells at depth 4 at the pinned Yosys 0.70: its proc pass
+// folds the double inversion, so the OR sits on the duplicated
+// product and the output chain is two ANDs deep from it.
+const char kSynthOptDemo[] = R"V(module optdemo (a, b, c, d, y);
+  input a, b, c, d;
+  output y;
+  wire n1, n2, n3, n4;
+  assign n1 = a & b;
+  assign n2 = a & b;
+  assign n3 = ~~n1;
+  assign n4 = n2 | n3;
+  assign y = (n4 & c) & d;
+endmodule
+)V";
+
+const char kSynthDemo[] = R"V(module demo (clk, rst, a, b, y);
+  input clk, rst;
+  input [3:0] a, b;
+  output reg [3:0] y;
+  reg [3:0] sum;
+  always @(posedge clk) begin
+    if (rst) sum <= 4'd0;
+    else sum <= a + b;
+  end
+  always @* y = sum;
+endmodule
+)V";
+
+TEST(CoreCommands, ReadVerilogParsesAndElaborateReportsStats) {
+  TimingTempDir dir;
+  Shell shell;
+  const CommandResult read = shell.Run(
+      "read_verilog", {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"});
+  ASSERT_TRUE(read.ok) << read.message;
+  EXPECT_NE(read.payload.find("modules=optdemo"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.parsed);
+  EXPECT_TRUE(shell.ctx.timing.verilog_path.find("optdemo.v") !=
+              std::string::npos);
+  const CommandResult elaborated = shell.Run("elaborate");
+  ASSERT_TRUE(elaborated.ok) << elaborated.message;
+  EXPECT_NE(elaborated.payload.find("module=optdemo"), std::string::npos);
+  EXPECT_NE(elaborated.payload.find("cells=5"), std::string::npos);
+  EXPECT_NE(elaborated.payload.find("depth=4"), std::string::npos);
+  EXPECT_EQ(shell.ctx.synth.elaborated_cells, 5);
+  EXPECT_EQ(shell.ctx.synth.elaborated_depth, 4);
+}
+
+TEST(CoreCommands, ReadVerilogUnknownTopRecordsNothing) {
+  TimingTempDir dir;
+  Shell shell;
+  const CommandResult read = shell.Run(
+      "read_verilog", {dir.Write("optdemo.v", kSynthOptDemo), "nope"});
+  EXPECT_FALSE(read.ok);
+  EXPECT_EQ(read.diag, Diag::kInvalidConfiguration);
+  EXPECT_TRUE(shell.ctx.timing.verilog_path.empty());
+  EXPECT_FALSE(shell.ctx.synth.parsed);
+}
+
+TEST(CoreCommands, ElaborateRequiresAParsedDesign) {
+  Shell shell;
+  const CommandResult elaborated = shell.Run("elaborate");
+  EXPECT_FALSE(elaborated.ok);
+  EXPECT_EQ(elaborated.diag, Diag::kInvalidConfiguration);
+  const CommandResult generic = shell.Run("synth_generic");
+  EXPECT_FALSE(generic.ok);
+  EXPECT_EQ(generic.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, SynthGenericImprovesTheDemo) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult generic = shell.Run("synth_generic");
+  ASSERT_TRUE(generic.ok) << generic.message;
+  EXPECT_NE(generic.payload.find("script=default"), std::string::npos);
+  // The generic script, judged against the unoptimized
+  // elaborated netlist: five cells at depth 4 become three cells
+  // at depth 2, the duplicated product folded away and the
+  // remaining four-input AND balanced into a two-level tree.
+  // The ABC script itself must not worsen either of its own
+  // numbers.
+  EXPECT_NE(generic.payload.find("elaborated_cells=5"), std::string::npos);
+  EXPECT_NE(generic.payload.find("elaborated_depth=4"), std::string::npos);
+  EXPECT_NE(generic.payload.find("cells=3"), std::string::npos);
+  EXPECT_NE(generic.payload.find("depth=2"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.generic_optimized);
+  EXPECT_LE(shell.ctx.synth.generic_after_and,
+            shell.ctx.synth.generic_before_and);
+  EXPECT_LE(shell.ctx.synth.generic_after_levels,
+            shell.ctx.synth.generic_before_levels);
+  std::ifstream in(shell.ctx.synth.generic_verilog);
+  EXPECT_TRUE(in.good());
+}
+
+TEST(CoreCommands, SynthGenericRejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  EXPECT_FALSE(shell.Run("synth_generic", {"-bogus", "1"}).ok);
+  EXPECT_FALSE(shell.Run("synth_generic", {"-script"}).ok);
+  EXPECT_FALSE(
+      shell.Run("synth_generic", {"-script", "default", "-script", "balance"})
+          .ok);
+  EXPECT_FALSE(shell.Run("synth_generic", {"-script", "sideways"}).ok);
+  // Every rejection above happened before any engine ran, so the
+  // elaborated state is untouched and a valid run still works.
+  EXPECT_TRUE(shell.ctx.synth.elaborated);
+  ASSERT_TRUE(shell.Run("synth_generic", {"-script", "balance"}).ok);
+}
+
+TEST(CoreCommands, SynthGenericOnTheRegisteredAdder) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("read_verilog", {dir.Write("demo.v", kSynthDemo), "demo"})
+          .ok);
+  const CommandResult elaborated = shell.Run("elaborate");
+  ASSERT_TRUE(elaborated.ok) << elaborated.message;
+  EXPECT_NE(elaborated.payload.find("cells=3"), std::string::npos);
+  EXPECT_NE(elaborated.payload.find("depth=2"), std::string::npos);
+  const CommandResult generic = shell.Run("synth_generic");
+  ASSERT_TRUE(generic.ok) << generic.message;
+  EXPECT_TRUE(shell.ctx.synth.generic_optimized);
+  EXPECT_LE(shell.ctx.synth.generic_after_and,
+            shell.ctx.synth.generic_before_and);
+  EXPECT_LE(shell.ctx.synth.generic_after_levels,
+            shell.ctx.synth.generic_before_levels);
 }
 
 TEST(CoreCommands, ImportOdbLoadsTheDatabase) {

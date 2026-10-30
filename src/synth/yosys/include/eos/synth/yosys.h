@@ -32,14 +32,20 @@
 //   unsupported construct in a pass) terminates the process with
 //   _Exit: that is upstream's behaviour for its executable, and
 //   there is no library hook that turns it into a return value.
-//   ParseVerilog therefore fails fast only on an unreadable file
-//   (kIoError, before Yosys is touched); a malformed file is a
-//   documented limitation of this unit, not a tested failure
-//   mode, because testing it would kill the test runner. Unit S1
-//   must resolve this before read_verilog changes semantics to
-//   parse: either a containment for the abort, or a documented
-//   rule that a malformed file aborts the shell the way a
-//   malformed file aborts the yosys executable.
+//   Unit S1 resolves this with the documented rule the S0 note
+//   allowed: a malformed file aborts the calling process with
+//   exit 1, exactly as it aborts the yosys executable, and that
+//   abort is not a Status. Everything else is a Status:
+//   ParseVerilog fails fast on an unreadable file (kIoError,
+//   before Yosys is touched); a command-level rejection (an
+//   unknown top in hierarchy, a pass that refuses the design)
+//   comes back through the command-error throw scope as
+//   kInvalidArgument; and Elaborate validates the top name
+//   before any pass runs, so a bad top name never reaches a pass
+//   at all. A malformed file is therefore not a tested failure
+//   mode in process (testing it would kill the test runner); its
+//   evidence is a separate-process run of the eos shell, recorded
+//   in the S1 unit report.
 // - Yosys's log sinks are installed by its executable's main,
 //   which this library does not compile, so the facade installs
 //   upstream's non-tty default sink (ConsoleLogSink) at first
@@ -76,6 +82,31 @@ struct YosysDesignSummary {
   std::vector<YosysModuleSummary> modules;
 };
 
+// One cell type in a netlist, with how many cells of that type the
+// netlist holds. Sorted by type name, so two runs of the same
+// design report the same order.
+struct YosysCellTypeCount {
+  std::string type;
+  int count = 0;
+};
+
+// The shape of one elaborated module, as the elaboration passes
+// left it: its cell and wire counts, the cell count per type, and
+// its logic depth. Logic depth is the longest chain of
+// combinational cells from a primary input or a sequential output
+// to any wire, counted in cells: a primary input and a sequential
+// output have depth 0, a combinational cell's output has depth
+// one more than the deepest of its inputs, and sequential cells
+// (flip-flops, memories, FSMs) break the chain. A design with no
+// combinational cell has depth 0.
+struct YosysNetlistStats {
+  std::string module;
+  int cell_count = 0;
+  int wire_count = 0;
+  int logic_depth = 0;
+  std::vector<YosysCellTypeCount> cells_by_type;
+};
+
 // One Yosys session. Move-only; the destructor releases only
 // the single-engine guard. The Yosys session itself lives for
 // the process: pass registration is one-shot per process (a
@@ -99,11 +130,70 @@ class YosysEngine {
   // Parses one Verilog file with the Yosys Verilog front end and
   // returns the module summary above. The design is fresh for
   // every call: a previous parse on this engine does not leak
-  // modules into the next one. Fails with kIoError when the file
-  // cannot be read, and with kInvalidState when the engine does
-  // not own the Yosys session. A malformed file aborts the
-  // process (see the header note); it is not a Status.
+  // modules into the next one. The parsed design stays live in
+  // the Yosys session after the call returns, so Elaborate can
+  // run on it; a later ParseVerilog replaces it. Fails with
+  // kIoError when the file cannot be read, and with
+  // kInvalidState when the engine does not own the Yosys
+  // session. A malformed file aborts the process (see the header
+  // note); it is not a Status.
   Result<YosysDesignSummary> ParseVerilog(const std::string& path);
+
+  // Elaborates the parsed design's top module: hierarchy
+  // resolution, process lowering, FSM and memory identification.
+  // This is the unoptimized netlist: no optimization pass runs
+  // here, so a later generic script has something to improve.
+  // The top name is validated before any Yosys pass runs (it must
+  // be a plain Verilog identifier), so a bad top name is a Status
+  // and never a pass command string. Fails with
+  // kInvalidArgument when the top module is not among the parsed
+  // modules or a pass rejects the design, and with kInvalidState
+  // when the engine does not own the Yosys session. The
+  // elaborated design stays live in the session, so AigMap and
+  // WriteVerilog can run on it.
+  Result<YosysNetlistStats> Elaborate(const std::string& top);
+
+  // Recomputes the stats of the design currently live in the
+  // session, for the named module, without running any pass.
+  // Fails with kInvalidArgument when the module is not in the
+  // live design, and with kInvalidState when the engine does not
+  // own the Yosys session.
+  Result<YosysNetlistStats> Stats(const std::string& top);
+
+  // Maps the live design onto the AIG form ABC reads: techmap
+  // first, which converts sequential cells to their simple
+  // forms ($dff to $_DFF_P_, so the BLIF backend writes them
+  // as .latch lines) using the staged share techmap.v, then
+  // aigmap for the combinational cells. Sequential cells stay
+  // sequential, only in the simple form. Fails with
+  // kInvalidArgument when a pass rejects the design, and with
+  // kInvalidState when the engine does not own the session.
+  Status AigMap();
+
+  // Writes the live design as Verilog to the given path, in the
+  // form the Verilog backend produces (simple gates as continuous
+  // assignments), without attributes: ABC's Verilog reader
+  // rejects Yosys attribute lines, so the bridge form omits
+  // them. Fails with kIoError when the file cannot be
+  // written, with kInvalidArgument when a pass rejects the
+  // design, and with kInvalidState when the engine does not own
+  // the session.
+  Status WriteVerilog(const std::string& path);
+
+  // Writes the live design as BLIF to the given path, for the
+  // named top module (validated as a plain identifier before
+  // any pass runs, like Elaborate). This is the bridge to ABC:
+  // the Verilog backend renders a sequential cell as a vector
+  // always block, and ABC's Verilog reader cannot parse a
+  // vector flop (it looks up the whole bus name as one net and
+  // reports the output wire undefined), while the BLIF backend
+  // bit-blasts buses and writes each flip-flop as a .latch
+  // line, which ABC's BLIF reader handles natively. Fails with
+  // kIoError when the file cannot be written, with
+  // kInvalidArgument when the top is not a plain identifier or
+  // a pass rejects the design, and with kInvalidState when the
+  // engine does not own the session.
+  Status WriteBlif(const std::string& path, const std::string& top);
 
  private:
   bool owns_ = false;

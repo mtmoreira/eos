@@ -22,6 +22,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -139,6 +140,120 @@ TEST(YosysFacade, ParseTwiceIsFresh) {
   EXPECT_EQ(second.value().modules.size(), 1u);
   EXPECT_NE(FindModule(second.value(), "other"), nullptr);
   EXPECT_EQ(FindModule(second.value(), "demo"), nullptr);
+}
+
+// The S1 elaboration fixture: the same registered adder as the
+// parse fixture. After hierarchy and process lowering it is three
+// cells (an adder, a flip-flop and the reset mux), and its logic
+// depth is 2 (adder, then mux, then the register, which breaks
+// the chain). The wire count is 8 at the pinned Yosys 0.70: its
+// proc_prune pass drops wires the older 0.33 frontend kept, so
+// the count is a pin fact, not a version-independent promise.
+TEST(YosysFacade, ElaborateDemoReportsUnoptimizedStats) {
+  TempDir dir;
+  const std::string demo = dir.Write("demo.v", kDemo);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(demo).ok());
+  const auto stats = engine.Elaborate("demo");
+  ASSERT_TRUE(stats.ok()) << stats.status().message();
+  EXPECT_EQ(stats.value().module, "demo");
+  EXPECT_EQ(stats.value().cell_count, 3);
+  EXPECT_EQ(stats.value().wire_count, 8);
+  EXPECT_EQ(stats.value().logic_depth, 2);
+  ASSERT_EQ(stats.value().cells_by_type.size(), 3u);
+  EXPECT_EQ(stats.value().cells_by_type[0].type, "$add");
+  EXPECT_EQ(stats.value().cells_by_type[0].count, 1);
+  EXPECT_EQ(stats.value().cells_by_type[1].type, "$dff");
+  EXPECT_EQ(stats.value().cells_by_type[1].count, 1);
+  EXPECT_EQ(stats.value().cells_by_type[2].type, "$mux");
+  EXPECT_EQ(stats.value().cells_by_type[2].count, 1);
+}
+
+TEST(YosysFacade, ElaborateUnknownTopFailsWithoutAPass) {
+  TempDir dir;
+  const std::string demo = dir.Write("demo.v", kDemo);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(demo).ok());
+  const auto stats = engine.Elaborate("nope");
+  ASSERT_FALSE(stats.ok());
+  EXPECT_EQ(stats.status().code(), foundation::ErrorCode::kInvalidArgument);
+}
+
+TEST(YosysFacade, ElaborateRejectsNonIdentifierTop) {
+  TempDir dir;
+  const std::string demo = dir.Write("demo.v", kDemo);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(demo).ok());
+  // A top name is interpolated into a pass command string, so
+  // anything that is not a plain identifier must fail here,
+  // before Yosys ever sees it.
+  const auto stats = engine.Elaborate("demo; proc");
+  ASSERT_FALSE(stats.ok());
+  EXPECT_EQ(stats.status().code(), foundation::ErrorCode::kInvalidArgument);
+}
+
+TEST(YosysFacade, StatsMatchesElaborateWithoutRunningPasses) {
+  TempDir dir;
+  const std::string demo = dir.Write("demo.v", kDemo);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(demo).ok());
+  const auto elaborated = engine.Elaborate("demo");
+  ASSERT_TRUE(elaborated.ok());
+  const auto stats = engine.Stats("demo");
+  ASSERT_TRUE(stats.ok()) << stats.status().message();
+  EXPECT_EQ(stats.value().cell_count, elaborated.value().cell_count);
+  EXPECT_EQ(stats.value().wire_count, elaborated.value().wire_count);
+  EXPECT_EQ(stats.value().logic_depth, elaborated.value().logic_depth);
+  const auto missing = engine.Stats("nope");
+  ASSERT_FALSE(missing.ok());
+  EXPECT_EQ(missing.status().code(), foundation::ErrorCode::kInvalidArgument);
+}
+
+// The BLIF bridge: after elaboration and aigmap, the
+// sequential demo writes as BLIF with its flip-flop as a
+// .latch line (the form ABC reads), not as a vector always
+// block (the form ABC's Verilog reader rejects).
+TEST(YosysFacade, AigMapAndWriteBlifRoundTrip) {
+  TempDir dir;
+  const std::string demo = dir.Write("demo.v", kDemo);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(demo).ok());
+  ASSERT_TRUE(engine.Elaborate("demo").ok());
+  ASSERT_TRUE(engine.AigMap().ok());
+  const std::string out = dir.Path("demo.blif");
+  ASSERT_TRUE(engine.WriteBlif(out, "demo").ok());
+  std::ifstream in(out);
+  ASSERT_TRUE(in.good());
+  std::stringstream contents;
+  contents << in.rdbuf();
+  EXPECT_NE(contents.str().find(".model demo"), std::string::npos);
+  EXPECT_NE(contents.str().find(".latch"), std::string::npos);
+  const auto unwritable = engine.WriteBlif(dir.Path("no_dir/out.blif"), "demo");
+  ASSERT_FALSE(unwritable.ok());
+  EXPECT_EQ(unwritable.code(), foundation::ErrorCode::kIoError);
+  const auto bad_top = engine.WriteBlif(dir.Path("bad.blif"), "demo; proc");
+  ASSERT_FALSE(bad_top.ok());
+  EXPECT_EQ(bad_top.code(), foundation::ErrorCode::kInvalidArgument);
+}
+
+TEST(YosysFacade, AigMapAndWriteVerilogRoundTrip) {
+  TempDir dir;
+  const std::string demo = dir.Write("demo.v", kDemo);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(demo).ok());
+  ASSERT_TRUE(engine.Elaborate("demo").ok());
+  ASSERT_TRUE(engine.AigMap().ok());
+  const std::string out = dir.Path("demo_aig.v");
+  ASSERT_TRUE(engine.WriteVerilog(out).ok());
+  std::ifstream in(out);
+  ASSERT_TRUE(in.good());
+  std::stringstream contents;
+  contents << in.rdbuf();
+  EXPECT_NE(contents.str().find("module demo"), std::string::npos);
+  EXPECT_FALSE(contents.str().empty());
+  const auto unwritable = engine.WriteVerilog(dir.Path("no_dir/out.v"));
+  ASSERT_FALSE(unwritable.ok());
+  EXPECT_EQ(unwritable.code(), foundation::ErrorCode::kIoError);
 }
 
 }  // namespace

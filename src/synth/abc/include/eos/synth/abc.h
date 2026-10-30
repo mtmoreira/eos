@@ -44,6 +44,24 @@ enum class EquivalenceVerdict {
   kUnknown,
 };
 
+// One network as ABC's print_stats reports it: the AIG size in
+// AND gates (inverters are free in an AIG and are not counted)
+// and the logic depth in AND levels. These are the generic
+// synthesis metrics: the "generic gate count" and "logic depth"
+// a generic script is judged by, before any technology mapping.
+struct AbcNetworkStats {
+  int and_count = 0;
+  int levels = 0;
+};
+
+// The result of one generic optimization: the network as read and
+// hashed, and the network after the script ran, both in the
+// print_stats terms above.
+struct AbcGenericResult {
+  AbcNetworkStats before;
+  AbcNetworkStats after;
+};
+
 // One ABC session. Move-only; the destructor releases the upstream
 // frame.
 class AbcEngine {
@@ -70,6 +88,25 @@ class AbcEngine {
   Status MapForDelay(const std::string& input_verilog,
                      const std::string& genlib_path,
                      const std::string& output_verilog);
+
+  // Generic (technology-agnostic) optimization of one Verilog
+  // or BLIF netlist, with the classic ABC script: the network
+  // is read unmapped (ABC's read dispatches on the file
+  // extension), hashed to an AIG, optimized with a named
+  // script, and written back out as Verilog. Scripts are data,
+  // not code:
+  // "default" is balance, rewrite, refactor, resub, balance;
+  // "balance" is balance alone; "rewrite" is rewrite alone; and
+  // "none" hashes only, which is the baseline the other scripts
+  // are judged against. The returned stats are print_stats
+  // before the script and after it, so a caller can judge the
+  // script by its own numbers. An unknown script name fails with
+  // kInvalidArgument before ABC is touched; a netlist ABC
+  // cannot read fails with kIoError and writes nothing. Fails
+  // with kInvalidState when the engine does not own the frame.
+  Result<AbcGenericResult> OptimizeGeneric(
+      const std::string& input_verilog, const std::string& script,
+      const std::string& output_verilog);
 
   // Combinational equivalence proof of two gate-level Verilog
   // netlists whose cells come from the same genlib library, run
