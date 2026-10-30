@@ -372,5 +372,20 @@ TEST(ExportGate, EveryBlockerIsReportedNotJustTheFirst) {
   EXPECT_EQ(verdict.blockers.size(), 3u);
 }
 
+// S6 backfill: Clear empties the project's bindings; the
+// registered report is no longer found afterwards.
+TEST(Reports, ClearRemovesEveryBinding) {
+  Fixture f;
+  ASSERT_TRUE(f.reports.RegisterReport(f.project, "timing",
+                                       ProofStatus::kPass, "NLDM", "build-42")
+                  .ok());
+  ASSERT_NE(f.reports.FindByName(f.project, "timing"), nullptr);
+  f.reports.Clear(f.project);
+  EXPECT_TRUE(f.project.report_bindings.empty());
+  EXPECT_EQ(f.reports.FindByName(f.project, "timing"), nullptr);
+  const ReportStatus status = f.reports.StatusFor(f.project, "timing");
+  EXPECT_FALSE(status.found);
+}
+
 }  // namespace
 }  // namespace eos::session

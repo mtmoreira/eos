@@ -3,6 +3,9 @@
 // real interpreter ran.
 #include "eos/ui/tcl_shell.h"
 
+#include <filesystem>
+#include <fstream>
+
 #include <gtest/gtest.h>
 
 namespace eos::ui {
@@ -57,6 +60,28 @@ TEST(TclShell, CommandFailureIsACatchableTclErrorWithTheDiagnostic) {
       "return $msg");
   ASSERT_TRUE(caught.ok());
   EXPECT_NE(caught.value().find("unclosed_design"), std::string::npos);
+}
+
+// S6 backfill: RunFiles executes a script file through the same
+// command set, and a missing file is a nonzero exit, not a crash.
+TEST(TclShell, RunFilesExecutesScriptFilesAndRejectsMissingFiles) {
+  Fixture f;
+  auto shell = TclShell::Create(f.registry, f.ctx);
+  ASSERT_TRUE(shell.ok());
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "eos_tcl_runfiles_test";
+  std::filesystem::create_directories(dir);
+  const std::filesystem::path script = dir / "setup.tcl";
+  {
+    std::ofstream out(script);
+    out << "eos::create_design top\n";
+    out << "eos::create_net n1\n";
+  }
+  EXPECT_EQ(shell.value()->RunFiles({script.string()}), 0);
+  EXPECT_TRUE(f.ctx.project.HasDesign());
+  EXPECT_EQ(shell.value()->RunFiles({(dir / "missing.tcl").string()}), 1);
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
 }
 
 }  // namespace

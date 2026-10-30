@@ -69,5 +69,36 @@ TEST(ScenarioSet, ActiveSetTracksToggles) {
   EXPECT_EQ(missing.code(), ErrorCode::kNotFound);
 }
 
+// S6 backfill: ExportState/FromState round-trips every scenario,
+// its inactive flag, and the next-id counter.
+TEST(ScenarioSet, StateRoundTripPreservesScenariosAndNextId) {
+  ScenarioSet set;
+  const ScenarioId a =
+      set.Create("a", "func", "tt", ParasiticsLevel::kEstimate).value();
+  const ScenarioId b =
+      set.Create("b", "func", "ss", ParasiticsLevel::kExtracted).value();
+  ASSERT_TRUE(set.SetActive(b, false).ok());
+  const ScenarioState state = set.ExportState();
+  Result<ScenarioSet> restored = ScenarioSet::FromState(state);
+  ASSERT_TRUE(restored.ok()) << restored.status().message();
+  ScenarioSet& back = restored.value();
+  EXPECT_EQ(back.size(), 2u);
+  const Scenario* ra = back.Find(a);
+  ASSERT_NE(ra, nullptr);
+  EXPECT_EQ(ra->name, "a");
+  EXPECT_TRUE(ra->active);
+  const Scenario* rb = back.Find(b);
+  ASSERT_NE(rb, nullptr);
+  EXPECT_EQ(rb->parasitics, ParasiticsLevel::kExtracted);
+  EXPECT_FALSE(rb->active);
+  ASSERT_EQ(back.ActiveScenarios().size(), 1u);
+  EXPECT_EQ(back.ActiveScenarios()[0]->id, a);
+  const Result<ScenarioId> c = back.Create(
+      "c", "func", "ff", ParasiticsLevel::kEstimate);
+  ASSERT_TRUE(c.ok());
+  EXPECT_NE(c.value(), a);
+  EXPECT_NE(c.value(), b);
+}
+
 }  // namespace
 }  // namespace eos::db

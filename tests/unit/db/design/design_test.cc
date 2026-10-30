@@ -116,5 +116,72 @@ TEST(Design, LookupByNameAndIdAgree) {
   EXPECT_EQ(design.FindNet(unknown), nullptr);
 }
 
+// S6 backfill: every Find* accessor returns the record it was
+// created from, and nullptr for an unknown id of that kind.
+TEST(Design, FindAccessorsReturnEveryRecordKind) {
+  Design design("top");
+  const ObjectId cell = design.CreateCell("buf").value();
+  const ObjectId inst = design.CreateInstance("u1", cell).value();
+  const ObjectId net = design.CreateNet("n1").value();
+  const ObjectId port = design.CreatePort("p", Direction::kOutput).value();
+  const ObjectId pin = design.Connect(inst, "Y", net).value();
+  const CellRecord* cell_rec = design.FindCell(cell);
+  ASSERT_NE(cell_rec, nullptr);
+  EXPECT_EQ(cell_rec->name, "buf");
+  const InstanceRecord* inst_rec = design.FindInstance(inst);
+  ASSERT_NE(inst_rec, nullptr);
+  EXPECT_EQ(inst_rec->cell, cell);
+  const NetRecord* net_rec = design.FindNet(net);
+  ASSERT_NE(net_rec, nullptr);
+  EXPECT_EQ(net_rec->name, "n1");
+  const PortRecord* port_rec = design.FindPort(port);
+  ASSERT_NE(port_rec, nullptr);
+  EXPECT_EQ(port_rec->direction, Direction::kOutput);
+  const TermRecord* term_rec = design.FindTerm(port_rec->term);
+  ASSERT_NE(term_rec, nullptr);
+  EXPECT_EQ(term_rec->port, port);
+  const PinRecord* pin_rec = design.FindPin(pin);
+  ASSERT_NE(pin_rec, nullptr);
+  EXPECT_EQ(pin_rec->instance, inst);
+  EXPECT_EQ(pin_rec->net, net);
+  EXPECT_EQ(design.Count(foundation::ObjectKind::kPin), 1u);
+  EXPECT_EQ(design.Count(foundation::ObjectKind::kTerm), 1u);
+  const ObjectId missing =
+      foundation::ObjectId::Make(foundation::ObjectKind::kCell, 999);
+  EXPECT_EQ(design.FindCell(missing), nullptr);
+  EXPECT_EQ(design.FindInstance(missing), nullptr);
+  EXPECT_EQ(design.FindPort(missing), nullptr);
+  EXPECT_EQ(design.FindTerm(missing), nullptr);
+  EXPECT_EQ(design.FindPin(missing), nullptr);
+}
+
+// S6 backfill: ExportState/FromState round-trips every record
+// kind and the allocator continues without reusing an id.
+TEST(Design, StateRoundTripPreservesRecordsAndAllocator) {
+  Design design("top");
+  const ObjectId cell = design.CreateCell("buf").value();
+  const ObjectId inst = design.CreateInstance("u1", cell).value();
+  const ObjectId net = design.CreateNet("n1").value();
+  const ObjectId port = design.CreatePort("p", Direction::kInput).value();
+  const ObjectId pin = design.Connect(inst, "A", net).value();
+  const std::uint32_t next_net =
+      design.allocator().next_index(foundation::ObjectKind::kNet);
+  const DesignState state = design.ExportState();
+  Result<Design> restored = Design::FromState(state);
+  ASSERT_TRUE(restored.ok()) << restored.status().message();
+  Design& back = restored.value();
+  EXPECT_EQ(back.name(), "top");
+  EXPECT_EQ(back.FindCell(cell)->name, "buf");
+  EXPECT_EQ(back.FindInstance(inst)->cell, cell);
+  EXPECT_EQ(back.FindNet(net)->name, "n1");
+  EXPECT_EQ(back.FindPort(port)->direction, Direction::kInput);
+  EXPECT_EQ(back.FindPin(pin)->net, net);
+  EXPECT_EQ(back.allocator().next_index(foundation::ObjectKind::kNet),
+            next_net);
+  const Result<ObjectId> fresh = back.CreateNet("n2");
+  ASSERT_TRUE(fresh.ok());
+  EXPECT_NE(fresh.value(), net);
+}
+
 }  // namespace
 }  // namespace eos::db

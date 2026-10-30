@@ -371,5 +371,29 @@ TEST(Project, SaveWithoutADesignFails) {
   Remove(path);
 }
 
+// S6 backfill: Reset clears every part of a populated project,
+// and a fresh design can be created afterwards.
+TEST(Project, ResetClearsDesignScenariosConstraintsLedgerAndBindings) {
+  Fixture f;
+  Project& project = f.project;
+  ASSERT_TRUE(project.HasDesign());
+  ASSERT_GT(project.scenarios.size(), 0u);
+  ASSERT_GT(project.ledger.current_revision(), 0u);
+  ReportBinding binding;
+  binding.name = "timing";
+  binding.artifact_id = 1;
+  project.report_bindings.push_back(binding);
+  ASSERT_FALSE(project.report_bindings.empty());
+  project.Reset();
+  EXPECT_FALSE(project.HasDesign());
+  EXPECT_EQ(project.scenarios.size(), 0u);
+  EXPECT_EQ(project.constraints.all().size(), 0u);
+  EXPECT_EQ(project.ledger.current_revision(), 0u);
+  EXPECT_TRUE(project.report_bindings.empty());
+  project.design.emplace("fresh");
+  EXPECT_TRUE(project.HasDesign());
+  EXPECT_EQ(project.design->name(), "fresh");
+}
+
 }  // namespace
 }  // namespace eos::session

@@ -2151,5 +2151,13 @@ TEST(CoreCommands, CloseTimingDiagnostics) {
   EXPECT_EQ(no_design.diag, Diag::kUnclosedDesign);
 }
 
+// S6 backfill: HasDesign mirrors the project's design state.
+TEST(CommandContext, HasDesignTracksCreateDesign) {
+  Shell shell;
+  EXPECT_FALSE(shell.ctx.HasDesign());
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  EXPECT_TRUE(shell.ctx.HasDesign());
+}
+
 }  // namespace
 }  // namespace eos::ui
