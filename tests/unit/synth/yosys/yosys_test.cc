@@ -259,5 +259,101 @@ TEST(YosysFacade, AigMapAndWriteVerilogRoundTrip) {
   EXPECT_EQ(unwritable.code(), foundation::ErrorCode::kIoError);
 }
 
+// The S4 file-list fixtures: a leaf module, and a top module
+// that includes a header for one wire declaration and selects
+// its shape with a -D define. The header lives in a
+// subdirectory, so only the -I directory makes the include
+// resolve; the top file's own directory holds no defs.vh.
+const char kFilelistSub[] = R"V(module sub(a, b, y);
+  input a, b;
+  output y;
+  assign y = a & b;
+endmodule
+)V";
+
+const char kFilelistTop[] = R"V(module filetop(a, b, c, d, y);
+  input a, b, c, d;
+  output y;
+`include "defs.vh"
+  sub u_sub(.a(a), .b(b), .y(s));
+`ifdef WIDE
+  wire t;
+  assign t = s & c;
+  assign y = t & d;
+`else
+  assign y = s;
+`endif
+endmodule
+)V";
+
+const char kFilelistDefs[] = "wire s;\n";
+
+TEST(YosysFacade, ParseVerilogFilesAppliesIncludesAndDefines) {
+  TempDir dir;
+  std::filesystem::create_directories(dir.Path("inc"));
+  const std::string sub = dir.Write("sub.v", kFilelistSub);
+  const std::string top = dir.Write("filetop.v", kFilelistTop);
+  const std::string inc = dir.Write("inc/defs.vh", kFilelistDefs);
+  (void)inc;
+  YosysEngine engine;
+  const auto summary = engine.ParseVerilogFiles(
+      {sub, top}, {dir.Path("inc")}, {"WIDE"});
+  ASSERT_TRUE(summary.ok()) << summary.status().message();
+  EXPECT_NE(FindModule(summary.value(), "sub"), nullptr);
+  EXPECT_NE(FindModule(summary.value(), "filetop"), nullptr);
+  // The WIDE branch is the two-AND chain on top of the sub
+  // instance: with the define, elaboration sees the sub cell
+  // plus two AND cells; without it, only the sub cell.
+  const auto wide = engine.Elaborate("filetop");
+  ASSERT_TRUE(wide.ok()) << wide.status().message();
+  EXPECT_EQ(wide.value().cell_count, 3);
+}
+
+TEST(YosysFacade, ParseVerilogFilesWithoutDefineTakesOtherBranch) {
+  TempDir dir;
+  std::filesystem::create_directories(dir.Path("inc"));
+  const std::string sub = dir.Write("sub.v", kFilelistSub);
+  const std::string top = dir.Write("filetop.v", kFilelistTop);
+  dir.Write("inc/defs.vh", kFilelistDefs);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilogFiles({sub, top}, {dir.Path("inc")}, {})
+                  .ok());
+  const auto stats = engine.Elaborate("filetop");
+  ASSERT_TRUE(stats.ok()) << stats.status().message();
+  EXPECT_EQ(stats.value().cell_count, 1);
+}
+
+TEST(YosysFacade, ParseVerilogFilesRejectsBadArguments) {
+  TempDir dir;
+  const std::string sub = dir.Write("sub.v", kFilelistSub);
+  YosysEngine engine;
+  const auto empty = engine.ParseVerilogFiles({}, {}, {});
+  ASSERT_FALSE(empty.ok());
+  EXPECT_EQ(empty.status().code(), foundation::ErrorCode::kInvalidArgument);
+  const auto missing = engine.ParseVerilogFiles(
+      {sub, dir.Path("no_such.v")}, {}, {});
+  ASSERT_FALSE(missing.ok());
+  EXPECT_EQ(missing.status().code(), foundation::ErrorCode::kIoError);
+  EXPECT_NE(missing.status().message().find("no_such.v"),
+            std::string::npos);
+  const auto empty_dir =
+      engine.ParseVerilogFiles({sub}, {""}, {});
+  ASSERT_FALSE(empty_dir.ok());
+  EXPECT_EQ(empty_dir.status().code(), foundation::ErrorCode::kInvalidArgument);
+  const auto bad_define =
+      engine.ParseVerilogFiles({sub}, {}, {"1BAD"});
+  ASSERT_FALSE(bad_define.ok());
+  EXPECT_EQ(bad_define.status().code(), foundation::ErrorCode::kInvalidArgument);
+  const auto spaced_define =
+      engine.ParseVerilogFiles({sub}, {}, {"WIDE; proc"});
+  ASSERT_FALSE(spaced_define.ok());
+  EXPECT_EQ(spaced_define.status().code(), foundation::ErrorCode::kInvalidArgument);
+  // A failed multi-file parse leaves no stale design behind:
+  // the next single-file parse still works.
+  ASSERT_TRUE(engine.ParseVerilog(sub).ok());
+  EXPECT_NE(FindModule(engine.ParseVerilog(sub).value(), "sub"),
+            nullptr);
+}
+
 }  // namespace
 }  // namespace eos::synth

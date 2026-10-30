@@ -103,6 +103,69 @@ Status RunPass(const std::string& command) {
   return Status::Ok();
 }
 
+// Builds one read_verilog pass command carrying every include
+// directory and define. The flags use the attached forms (-Idir,
+// -Dname) Yosys documents, so a directory or a define value is
+// one token each; callers validate that neither contains
+// whitespace or ';' before this runs.
+std::string BuildReadVerilogCommand(
+    const std::string& path, const std::vector<std::string>& include_dirs,
+    const std::vector<std::string>& defines) {
+  std::string command = "read_verilog";
+  for (const std::string& dir : include_dirs) command += " -I" + dir;
+  for (const std::string& define : defines) command += " -D" + define;
+  command += " " + path;
+  return command;
+}
+
+// A command-string token is safe only if Yosys's tokenizer
+// cannot split it: no whitespace (token separator) and no ';'
+// (command separator). A '#' is not rejected here: a value is
+// always a flag argument, never the first token, so it cannot
+// start Yosys's comment rule.
+bool IsSafeCommandToken(const std::string& token) {
+  for (const char c : token) {
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ';') {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Validates one -D token: NAME or NAME=VALUE, where NAME is a
+// plain Verilog identifier (the same rule as a top name, for
+// the same command-string reason).
+Status ValidateDefine(const std::string& define) {
+  if (define.empty() || !IsSafeCommandToken(define)) {
+    return InvalidArgument("malformed preprocessor define: " + define);
+  }
+  const std::size_t equal = define.find('=');
+  const std::string name =
+      equal == std::string::npos ? define : define.substr(0, equal);
+  if (!IsPlainIdentifier(name)) {
+    return InvalidArgument("malformed preprocessor define: " + define);
+  }
+  return Status::Ok();
+}
+
+// Summarizes the live design's modules the way ParseVerilog
+// reports them (names unescaped, ports in declaration order).
+YosysDesignSummary SummarizeDesign() {
+  YosysDesignSummary summary;
+  if (Yosys::yosys_design != nullptr) {
+    for (const auto& entry : Yosys::yosys_design->modules_) {
+      YosysModuleSummary module;
+      module.name = entry.first.unescape();
+      for (const auto& port : entry.second->ports) {
+        module.ports.push_back(port.unescape());
+      }
+      module.wire_count = static_cast<int>(entry.second->wires_.size());
+      summary.modules.push_back(std::move(module));
+    }
+  }
+  return summary;
+}
+
 // Finds a module of the live design by its source name, the way
 // ParseVerilog reports names (unescaped).
 Yosys::RTLIL::Module* FindModule(const std::string& name) {
@@ -293,6 +356,62 @@ Result<YosysDesignSummary> YosysEngine::ParseVerilog(
     }
   }
   return summary;
+}
+
+Result<YosysDesignSummary> YosysEngine::ParseVerilogFiles(
+    const std::vector<std::string>& paths,
+    const std::vector<std::string>& include_dirs,
+    const std::vector<std::string>& defines) {
+  if (!owns_) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "Yosys engine does not own the Yosys session");
+  }
+  if (paths.empty()) {
+    return InvalidArgument("no Verilog files to parse");
+  }
+  for (const std::string& dir : include_dirs) {
+    if (dir.empty()) {
+      return InvalidArgument("empty include directory");
+    }
+    if (!IsSafeCommandToken(dir)) {
+      return InvalidArgument("include directory is not a safe command "
+                             "token: " +
+                             dir);
+    }
+  }
+  for (const std::string& define : defines) {
+    const Status status = ValidateDefine(define);
+    if (!status.ok()) return status;
+  }
+  // Every file is checked before Yosys is touched, so a missing
+  // file fails fast with nothing parsed: the caller already
+  // resolved the entries, but this method is a public surface
+  // and must not depend on the caller's checks.
+  for (const std::string& path : paths) {
+    std::ifstream in(path);
+    if (!in.good()) {
+      return IoError("cannot read Verilog file", path);
+    }
+  }
+  // Fresh design for this parse, without touching the session,
+  // exactly as ParseVerilog does; the files then accumulate
+  // into the one design, in order.
+  delete Yosys::yosys_design;
+  Yosys::yosys_design = new Yosys::RTLIL::Design;
+  for (const std::string& path : paths) {
+    try {
+      auto guard = Yosys::logger().error_throw_scope();
+      Yosys::run_pass(BuildReadVerilogCommand(path, include_dirs, defines));
+    } catch (const Yosys::log_cmd_error_exception&) {
+      return Status::Error(
+          ErrorCode::kInvalidArgument,
+          "Yosys rejected the read_verilog command for file: " + path);
+    } catch (const std::exception& e) {
+      return Status::Error(ErrorCode::kInvalidState,
+                           std::string("Yosys failed: ") + e.what());
+    }
+  }
+  return SummarizeDesign();
 }
 
 Result<YosysNetlistStats> YosysEngine::Elaborate(const std::string& top) {

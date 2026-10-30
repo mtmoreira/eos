@@ -130,6 +130,17 @@ struct CommandContext {
     bool parsed = false;
     std::string verilog_path;
     std::string top_cell;
+    // Synthesis unit S4: the file list a parsed design came
+    // from, when it came from read_filelist rather than
+    // read_verilog. filelist_path is the list as given on the
+    // command line; filelist_files are the entries resolved
+    // against the list file's directory, in list order.
+    // read_verilog leaves both empty (the session reset clears
+    // them); the timing session is untouched by read_filelist,
+    // because it names a single Verilog file and a list file is
+    // not one.
+    std::string filelist_path;
+    std::vector<std::string> filelist_files;
     bool elaborated = false;
     int elaborated_cells = 0;
     int elaborated_wires = 0;

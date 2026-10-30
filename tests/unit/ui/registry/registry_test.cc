@@ -57,8 +57,9 @@ TEST(Registry, CoreSetIsComplete) {
   Shell shell;
   // The count is a contract: adding a command means updating it.
   // S1 adds elaborate and synth_generic; S2 adds synth_map; S3
-  // adds synth_opt.
-  EXPECT_EQ(shell.registry.Names().size(), 42u);
+  // adds synth_opt; S4 adds read_filelist.
+  EXPECT_EQ(shell.registry.Names().size(), 43u);
+  EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_opt"), nullptr);
   EXPECT_NE(shell.registry.Find("create_design"), nullptr);
   EXPECT_NE(shell.registry.Find("restore"), nullptr);
@@ -967,6 +968,187 @@ TEST(CoreCommands, SynthGenericOnTheRegisteredAdder) {
             shell.ctx.synth.generic_before_and);
   EXPECT_LE(shell.ctx.synth.generic_after_levels,
             shell.ctx.synth.generic_before_levels);
+}
+
+// The S4 file-list fixtures: the same leaf and top modules as
+// the Yosys facade file-list tests (each test binary carries
+// its own copies, as the S1 fixtures do), plus the single-file
+// form of the same design: the sub module, then the top module
+// with the header wire inlined and the WIDE branch taken
+// unconditionally. Elaborating the list (with -I and -D) and
+// the single file must report byte-identical stats.
+const char kFilelistSub[] = R"V(module sub(a, b, y);
+  input a, b;
+  output y;
+  assign y = a & b;
+endmodule
+)V";
+
+const char kFilelistTop[] = R"V(module filetop(a, b, c, d, y);
+  input a, b, c, d;
+  output y;
+`include "defs.vh"
+  sub u_sub(.a(a), .b(b), .y(s));
+`ifdef WIDE
+  wire t;
+  assign t = s & c;
+  assign y = t & d;
+`else
+  assign y = s;
+`endif
+endmodule
+)V";
+
+const char kFilelistDefs[] = "wire s;\n";
+
+const char kFilelistSingle[] = R"V(module sub(a, b, y);
+  input a, b;
+  output y;
+  assign y = a & b;
+endmodule
+module filetop(a, b, c, d, y);
+  input a, b, c, d;
+  output y;
+  wire s;
+  sub u_sub(.a(a), .b(b), .y(s));
+  wire t;
+  assign t = s & c;
+  assign y = t & d;
+endmodule
+)V";
+
+TEST(CoreCommands, ReadFilelistReproducesSingleFileElaboration) {
+  TimingTempDir dir;
+  std::filesystem::create_directories(dir.Path("inc"));
+  const std::string sub = dir.Write("sub.v", kFilelistSub);
+  (void)sub;
+  dir.Write("filetop.v", kFilelistTop);
+  dir.Write("inc/defs.vh", kFilelistDefs);
+  const std::string list = dir.Write(
+      "design.f",
+      "# a comment line\n// another comment\n\nsub.v\nfiletop.v\n");
+  Shell filelist_shell;
+  const CommandResult read = filelist_shell.Run(
+      "read_filelist",
+      {list, "filetop", "-I", dir.Path("inc"), "-D", "WIDE"});
+  ASSERT_TRUE(read.ok) << read.message;
+  EXPECT_NE(read.payload.find("files=2"), std::string::npos);
+  EXPECT_NE(read.payload.find("top=filetop"), std::string::npos);
+  EXPECT_NE(read.payload.find("entries=sub.v,filetop.v"),
+            std::string::npos);
+  EXPECT_TRUE(filelist_shell.ctx.synth.parsed);
+  EXPECT_EQ(filelist_shell.ctx.synth.filelist_path, list);
+  ASSERT_EQ(filelist_shell.ctx.synth.filelist_files.size(), 2u);
+  const CommandResult elaborated = filelist_shell.Run("elaborate");
+  ASSERT_TRUE(elaborated.ok) << elaborated.message;
+  Shell single_shell;
+  ASSERT_TRUE(single_shell.Run(
+      "read_verilog",
+      {dir.Write("single.v", kFilelistSingle), "filetop"}).ok);
+  const CommandResult single_elaborated = single_shell.Run("elaborate");
+  ASSERT_TRUE(single_elaborated.ok) << single_elaborated.message;
+  // Exact reproduction: same cells, wires, depth, and cell
+  // types, not just the same top name.
+  EXPECT_EQ(elaborated.payload, single_elaborated.payload);
+}
+
+TEST(CoreCommands, ReadFilelistAcceptsAttachedAndRepeatedFlags) {
+  TimingTempDir dir;
+  std::filesystem::create_directories(dir.Path("inc"));
+  dir.Write("sub.v", kFilelistSub);
+  dir.Write("filetop.v", kFilelistTop);
+  dir.Write("inc/defs.vh", kFilelistDefs);
+  const std::string list =
+      dir.Write("design.f", "sub.v\nfiletop.v\n");
+  Shell shell;
+  // Attached forms, a repeated -I (an unused directory first,
+  // the real one second), and a repeated -D.
+  const CommandResult read = shell.Run(
+      "read_filelist",
+      {list, "filetop", "-I" + dir.Path("no_such_dir"),
+       "-I" + dir.Path("inc"), "-DWIDE", "-DOTHER=1"});
+  ASSERT_TRUE(read.ok) << read.message;
+  const CommandResult elaborated = shell.Run("elaborate");
+  ASSERT_TRUE(elaborated.ok) << elaborated.message;
+  EXPECT_NE(elaborated.payload.find("cells=3"), std::string::npos);
+}
+
+TEST(CoreCommands, ReadFilelistMissingEntryNamesListAndEntry) {
+  TimingTempDir dir;
+  dir.Write("sub.v", kFilelistSub);
+  const std::string list =
+      dir.Write("design.f", "sub.v\nmissing.v\n");
+  Shell shell;
+  // A good design first: a pre-engine failure must leave it
+  // alone, because the live Yosys design is untouched.
+  ASSERT_TRUE(shell.Run(
+      "read_verilog",
+      {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"}).ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult read =
+      shell.Run("read_filelist", {list, "filetop"});
+  EXPECT_FALSE(read.ok);
+  EXPECT_EQ(read.diag, Diag::kIoError);
+  EXPECT_NE(read.message.find(list), std::string::npos);
+  EXPECT_NE(read.message.find("missing.v"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.elaborated);
+}
+
+TEST(CoreCommands, ReadFilelistRejectsBadOptionsAndInputs) {
+  TimingTempDir dir;
+  std::filesystem::create_directories(dir.Path("inc"));
+  dir.Write("sub.v", kFilelistSub);
+  dir.Write("filetop.v", kFilelistTop);
+  dir.Write("inc/defs.vh", kFilelistDefs);
+  const std::string list =
+      dir.Write("design.f", "sub.v\nfiletop.v\n");
+  const std::string empty_list =
+      dir.Write("empty.f", "# only a comment\n\n");
+  Shell shell;
+  ASSERT_TRUE(shell.Run(
+      "read_verilog",
+      {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"}).ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  // Every rejection here happens before any engine runs, so
+  // the elaborated state is untouched afterwards.
+  EXPECT_FALSE(
+      shell.Run("read_filelist", {list, "filetop", "-bogus", "1"}).ok);
+  EXPECT_FALSE(
+      shell.Run("read_filelist", {list, "filetop", "-I"}).ok);
+  EXPECT_FALSE(
+      shell.Run("read_filelist", {list, "filetop", "-D"}).ok);
+  EXPECT_FALSE(
+      shell.Run("read_filelist", {list, "filetop", "-I", ""}).ok);
+  EXPECT_FALSE(
+      shell.Run("read_filelist",
+                {list, "filetop", "-D", "1BAD"}).ok);
+  EXPECT_FALSE(shell.Run("read_filelist", {list}).ok);
+  const CommandResult empty =
+      shell.Run("read_filelist", {empty_list, "filetop"});
+  EXPECT_FALSE(empty.ok);
+  EXPECT_NE(empty.message.find(empty_list), std::string::npos);
+  const CommandResult unreadable = shell.Run(
+      "read_filelist", {dir.Path("no_such.f"), "filetop"});
+  EXPECT_FALSE(unreadable.ok);
+  EXPECT_EQ(unreadable.diag, Diag::kIoError);
+  EXPECT_TRUE(shell.ctx.synth.elaborated);
+  // An unknown top parses the list, so the live design is no
+  // longer the old one: the session is cleared and nothing is
+  // recorded, and a valid read still works afterwards. The
+  // case passes -I, so the parse itself succeeds and only the
+  // top check fails: without -I the list's `include would
+  // abort the process (upstream log_error), which is not a
+  // testable failure here.
+  const CommandResult unknown_top = shell.Run(
+      "read_filelist",
+      {list, "nope", "-I", dir.Path("inc"), "-D", "WIDE"});
+  EXPECT_FALSE(unknown_top.ok);
+  EXPECT_NE(unknown_top.message.find("nope"), std::string::npos);
+  EXPECT_FALSE(shell.ctx.synth.parsed);
+  ASSERT_TRUE(shell.Run(
+      "read_filelist",
+      {list, "filetop", "-I", dir.Path("inc"), "-D", "WIDE"}).ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
 }
 
 // The S2 mapping fixtures: a Liberty with the cells the

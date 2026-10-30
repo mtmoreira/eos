@@ -145,6 +145,35 @@ class YosysEngine {
   // note); it is not a Status.
   Result<YosysDesignSummary> ParseVerilog(const std::string& path);
 
+  // Parses several Verilog files into one design, in order, with
+  // the given include directories and preprocessor defines
+  // applied to every file. This is the engine half of
+  // read_filelist: the caller owns the list-file format, resolves
+  // each entry, and checks readability first, so this call only
+  // validates its own arguments and parses. The design is fresh
+  // for the call (a previous parse does not leak modules in),
+  // and stays live afterwards, so Elaborate can run on it. Each
+  // file is read with one read_verilog pass carrying every -I
+  // and -D flag, so a define or an include directory applies to
+  // the whole list, not to one file. Fails with kInvalidArgument
+  // when the file list is empty, an include directory is empty,
+  // or a define token is malformed (its name, before any '=',
+  // must be a plain Verilog identifier); with kIoError when a
+  // file cannot be read; and with kInvalidState when the engine
+  // does not own the Yosys session. A define token or an
+  // include directory containing whitespace or ';' is rejected
+  // for the same reason a top name must be a plain identifier:
+  // the values are interpolated into a Yosys pass command
+  // string, which Yosys tokenizes on whitespace and splits on
+  // ';', so such a value could smuggle a second command in. A
+  // malformed file aborts the process, exactly as for
+  // ParseVerilog; a missing `include target is the same class
+  // of upstream abort, not a Status.
+  Result<YosysDesignSummary> ParseVerilogFiles(
+      const std::vector<std::string>& paths,
+      const std::vector<std::string>& include_dirs,
+      const std::vector<std::string>& defines);
+
   // Elaborates the parsed design's top module: hierarchy
   // resolution, process lowering, FSM and memory identification.
   // This is the unoptimized netlist: no optimization pass runs
