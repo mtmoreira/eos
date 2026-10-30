@@ -218,6 +218,170 @@ TEST(AbcFacade, GenericBlifInputOptimizes) {
   ASSERT_TRUE(in.good());
 }
 
+// The S2 Liberty fixture: three combinational cells with scalar
+// delays, one sequential cell, and one table-delay cell. The
+// converter must emit exactly the combinational scalar cells,
+// in alphabetical order, with each cell's delay as its PIN line.
+const char kMapLiberty[] = R"LIB(library (eos_map_fixture) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  cell (AND2) {
+    area : 2.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (B) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A*B";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("0.6"); }
+        cell_fall (scalar) { values ("0.5"); }
+      }
+    }
+  }
+  cell (INV) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("0.5"); }
+        cell_fall (scalar) { values ("0.5"); }
+      }
+    }
+  }
+  cell (BUF) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("0.4"); }
+        cell_fall (scalar) { values ("0.4"); }
+      }
+    }
+  }
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) { direction : input; capacitance : 0.001; }
+    pin (CK) { direction : input; capacitance : 0.001; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (TABLED) {
+    area : 3.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        cell_rise (table) { values ("0.9"); }
+      }
+    }
+  }
+}
+)LIB";
+
+TEST(AbcFacade, LibertyToGenlibEmitsOnlyQualifyingCells) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kMapLiberty);
+  const std::string genlib = dir.Path("cells.genlib");
+  AbcEngine engine;
+  const auto cells = engine.LibertyToGenlib(liberty, genlib);
+  ASSERT_TRUE(cells.ok()) << cells.status().message();
+  ASSERT_EQ(cells.value().size(), 3u);
+  EXPECT_EQ(cells.value()[0], "AND2");
+  EXPECT_EQ(cells.value()[1], "BUF");
+  EXPECT_EQ(cells.value()[2], "INV");
+  const std::string text = ReadFile(genlib);
+  EXPECT_NE(text.find("GATE AND2 2 Y=A*B;"), std::string::npos);
+  EXPECT_NE(text.find("PIN * INV 1 999 0.6 0.0 0.6 0.0;"),
+            std::string::npos);
+  EXPECT_NE(text.find("GATE INV 1 Y=!A;"), std::string::npos);
+  EXPECT_EQ(text.find("DFF"), std::string::npos);
+  EXPECT_EQ(text.find("TABLED"), std::string::npos);
+}
+
+TEST(AbcFacade, LibertyToGenlibAcceptsPlusAsOr) {
+  TempDir dir;
+  const std::string liberty = dir.Write(
+      "or.lib",
+      "library (x) { cell (OR2) { area : 2.0; "
+      "pin (A) { direction : input; capacitance : 0.001; } "
+      "pin (B) { direction : input; capacitance : 0.001; } "
+      "pin (Y) { direction : output; function : \"A+B\"; "
+      "timing () { related_pin : \"A\"; "
+      "cell_rise (scalar) { values (\"0.6\"); } "
+      "cell_fall (scalar) { values (\"0.6\"); } } } } }\n");
+  const std::string genlib = dir.Path("or.genlib");
+  AbcEngine engine;
+  const auto cells = engine.LibertyToGenlib(liberty, genlib);
+  ASSERT_TRUE(cells.ok()) << cells.status().message();
+  ASSERT_EQ(cells.value().size(), 1u);
+  EXPECT_EQ(cells.value()[0], "OR2");
+  EXPECT_NE(ReadFile(genlib).find("GATE OR2 2 Y=A+B;"),
+            std::string::npos);
+}
+
+TEST(AbcFacade, LibertyToGenlibFailures) {
+  TempDir dir;
+  AbcEngine engine;
+  const auto missing =
+      engine.LibertyToGenlib(dir.Path("no_such.lib"), dir.Path("out.genlib"));
+  ASSERT_FALSE(missing.ok());
+  EXPECT_EQ(missing.status().code(), foundation::ErrorCode::kIoError);
+  const std::string sequential_only = dir.Write(
+      "seq.lib",
+      "library (x) { cell (DFF) { area : 1.0; ff (IQ, IQN) { "
+      "next_state : \"D\"; clocked_on : \"CK\"; } "
+      "pin (Q) { direction : output; function : \"IQ\"; } } }\n");
+  const auto none = engine.LibertyToGenlib(sequential_only,
+                                           dir.Path("seq.genlib"));
+  ASSERT_FALSE(none.ok());
+  EXPECT_EQ(none.status().code(), foundation::ErrorCode::kUnsupported);
+  EXPECT_FALSE(std::filesystem::exists(dir.Path("seq.genlib")));
+}
+
+TEST(AbcFacade, MapTechnologyDelayAndAreaMapTheChain) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kMapLiberty);
+  const std::string genlib = dir.Path("cells.genlib");
+  const std::string chain = dir.Write("chain.blif", kChainBlif);
+  AbcEngine engine;
+  const auto cells = engine.LibertyToGenlib(liberty, genlib);
+  ASSERT_TRUE(cells.ok()) << cells.status().message();
+  const std::string delay_mapped = dir.Path("delay.v");
+  ASSERT_TRUE(engine.MapTechnology(chain, genlib, delay_mapped,
+                                   MapTarget::kDelay)
+                  .ok());
+  const std::string delay_text = ReadFile(delay_mapped);
+  EXPECT_NE(delay_text.find("AND2"), std::string::npos);
+  const std::string area_mapped = dir.Path("area.v");
+  ASSERT_TRUE(engine.MapTechnology(chain, genlib, area_mapped,
+                                   MapTarget::kArea)
+                  .ok());
+  const std::string area_text = ReadFile(area_mapped);
+  EXPECT_NE(area_text.find("AND2"), std::string::npos);
+  const auto missing_input = engine.MapTechnology(
+      dir.Path("missing.blif"), genlib, dir.Path("out.v"),
+      MapTarget::kDelay);
+  ASSERT_FALSE(missing_input.ok());
+  EXPECT_EQ(missing_input.code(), foundation::ErrorCode::kIoError);
+  const auto missing_lib = engine.MapTechnology(
+      chain, dir.Path("missing.genlib"), dir.Path("out.v"),
+      MapTarget::kDelay);
+  ASSERT_FALSE(missing_lib.ok());
+  EXPECT_EQ(missing_lib.code(), foundation::ErrorCode::kIoError);
+}
+
 TEST(AbcFacade, ProveEquivalentIsUnknownWhenTheProofCannotRun) {
   TempDir dir;
   const std::string genlib = dir.Write("cells.genlib", kGenlib);

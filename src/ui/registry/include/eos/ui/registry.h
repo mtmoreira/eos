@@ -141,6 +141,28 @@ struct CommandContext {
     int generic_after_and = 0;
     int generic_after_levels = 0;
     std::string generic_verilog;
+    // Synthesis unit S2: the technology-mapping record. The
+    // mapped netlist is the file synth_map wrote (its cells are
+    // Liberty cells, so the timing session is pointed at it on
+    // success); mapped_genlib is the Liberty-to-genlib
+    // conversion the run produced, kept as evidence; mapped_types
+    // is the "Type:count" list scanned from ABC's mapped Verilog.
+    // The STA record is the synth_map-time judgement when the
+    // timing session could build scenes, and is otherwise
+    // untouched: a mapping without timing setup has no record
+    // to carry, and the next run_timing supplies it.
+    bool mapped = false;
+    std::string mapped_target;
+    std::string mapped_liberty;
+    std::string mapped_genlib;
+    std::string mapped_verilog;
+    std::string mapped_genlib_cells;
+    int mapped_cells = 0;
+    std::string mapped_types;
+    bool mapped_timing_judged = false;
+    double mapped_worst_slack_ns = 0.0;
+    double mapped_total_negative_slack_ns = 0.0;
+    int mapped_electrical_violations = 0;
   };
   SynthSession synth;
 

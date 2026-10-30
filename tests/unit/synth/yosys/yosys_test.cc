@@ -167,6 +167,9 @@ TEST(YosysFacade, ElaborateDemoReportsUnoptimizedStats) {
   EXPECT_EQ(stats.value().cells_by_type[1].count, 1);
   EXPECT_EQ(stats.value().cells_by_type[2].type, "$mux");
   EXPECT_EQ(stats.value().cells_by_type[2].count, 1);
+  // S2's sequential guard reads this count: the adder's one
+  // flip-flop is the only sequential cell of the three.
+  EXPECT_EQ(stats.value().sequential_cells, 1);
 }
 
 TEST(YosysFacade, ElaborateUnknownTopFailsWithoutAPass) {

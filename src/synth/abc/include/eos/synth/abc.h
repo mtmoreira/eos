@@ -25,6 +25,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "eos/foundation/errors.h"
 
@@ -42,6 +43,15 @@ enum class EquivalenceVerdict {
   kEquivalent,
   kNotEquivalent,
   kUnknown,
+};
+
+// One technology-mapping target: delay-driven mapping (ABC's
+// plain `map`) or area-driven mapping (ABC's `map -a`, which
+// sets an infinite delay target and recovers area). The two are
+// strategies of one command, not two commands.
+enum class MapTarget {
+  kDelay,
+  kArea,
 };
 
 // One network as ABC's print_stats reports it: the AIG size in
@@ -88,6 +98,48 @@ class AbcEngine {
   Status MapForDelay(const std::string& input_verilog,
                      const std::string& genlib_path,
                      const std::string& output_verilog);
+
+  // Converts a Liberty library to ABC's genlib format and writes
+  // it to the given path, returning the emitted cell names in
+  // alphabetical order. The conversion covers the Liberty subset
+  // a genlib needs: a cell qualifies when it is combinational,
+  // has exactly one output pin, that pin carries a function over
+  // the cell's own input pins, and its delay is scalar (the
+  // maximum of the pin's cell_rise and cell_fall scalar values).
+  // Sequential cells (an ff or latch block), cells with a table
+  // delay, and cells whose function cannot be expressed in
+  // genlib syntax are skipped, never guessed at. The emitted
+  // genlib line per cell is the same format the ECO cone
+  // resynthesis uses internally (one PIN * line carrying the
+  // scalar delay); this facade keeps its own copy because that
+  // converter is internal to the timing-eco module, which
+  // already depends on this facade, so sharing it would be a
+  // circular link. Fails with kIoError when the Liberty file
+  // cannot be read, holds no cells, or the genlib cannot be
+  // written; and with kUnsupported when no cell qualifies.
+  // The conversion itself does not touch the upstream frame,
+  // so it does not fail on frame ownership: it is a method of
+  // this engine only because genlib is ABC's format.
+  Result<std::vector<std::string>> LibertyToGenlib(
+      const std::string& liberty_path, const std::string& genlib_path);
+
+  // Technology mapping of one unmapped network (the BLIF form
+  // Yosys hands over, or an assign-form Verilog netlist) onto
+  // the cells of a genlib library: reads the library and the
+  // network, hashes it to an AIG, optimizes it at mapping time
+  // (structural hashing, rewriting, balancing, the same steps
+  // MapForDelay runs), maps it for the requested target, and
+  // writes the mapped netlist as Verilog. The output module
+  // keeps the input module's name and port names; internal net
+  // and instance names are ABC's. Unlike MapForDelay, the input
+  // is read unmapped: a mapped gate netlist belongs to
+  // MapForDelay, not here. Fails with kIoError when an input
+  // file cannot be read or the output cannot be written, and
+  // with kInvalidState when the engine does not own the frame.
+  Status MapTechnology(const std::string& input_network,
+                       const std::string& genlib_path,
+                       const std::string& output_verilog,
+                       MapTarget target);
 
   // Generic (technology-agnostic) optimization of one Verilog
   // or BLIF netlist, with the classic ABC script: the network

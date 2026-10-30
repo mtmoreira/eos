@@ -136,6 +136,9 @@ YosysNetlistStats ComputeStats(Yosys::RTLIL::Module* module) {
   std::map<std::string, int> by_type;
   for (const auto& entry : module->cells_) {
     by_type[entry.second->type.str()]++;
+    if (IsSequentialCell(entry.second->type.str())) {
+      ++stats.sequential_cells;
+    }
   }
   for (const auto& entry : by_type) {
     stats.cells_by_type.push_back(YosysCellTypeCount{entry.first, entry.second});
