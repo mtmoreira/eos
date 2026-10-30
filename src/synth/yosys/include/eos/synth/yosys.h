@@ -98,12 +98,18 @@ struct YosysCellTypeCount {
 // output have depth 0, a combinational cell's output has depth
 // one more than the deepest of its inputs, and sequential cells
 // (flip-flops, memories, FSMs) break the chain. A design with no
-// combinational cell has depth 0.
+// combinational cell has depth 0. sequential_cells counts the
+// cells whose type the facade treats as sequential (the same
+// types that break the depth chain); synthesis unit S2 uses it
+// to refuse mapping a sequential design, whose latches ABC's
+// mapped Verilog writer renders as behavioural blocks rather
+// than mapped gates.
 struct YosysNetlistStats {
   std::string module;
   int cell_count = 0;
   int wire_count = 0;
   int logic_depth = 0;
+  int sequential_cells = 0;
   std::vector<YosysCellTypeCount> cells_by_type;
 };
 

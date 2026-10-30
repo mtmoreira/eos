@@ -55,11 +55,12 @@ TEST(Registry, UnknownCommandIsAnInvalidCommandDiagnostic) {
 TEST(Registry, CoreSetIsComplete) {
   Shell shell;
   // The count is a contract: adding a command means updating it.
-  // S1 adds elaborate and synth_generic.
-  EXPECT_EQ(shell.registry.Names().size(), 40u);
+  // S1 adds elaborate and synth_generic; S2 adds synth_map.
+  EXPECT_EQ(shell.registry.Names().size(), 41u);
   EXPECT_NE(shell.registry.Find("create_design"), nullptr);
   EXPECT_NE(shell.registry.Find("restore"), nullptr);
   EXPECT_NE(shell.registry.Find("report_timing"), nullptr);
+  EXPECT_NE(shell.registry.Find("synth_map"), nullptr);
   EXPECT_NE(shell.registry.Find("help"), nullptr);
 }
 
@@ -963,6 +964,294 @@ TEST(CoreCommands, SynthGenericOnTheRegisteredAdder) {
             shell.ctx.synth.generic_before_and);
   EXPECT_LE(shell.ctx.synth.generic_after_levels,
             shell.ctx.synth.generic_before_levels);
+}
+
+// The S2 mapping fixtures: a Liberty with the cells the
+// optdemo maps to, plus a sequential cell the converter must
+// skip, and the combinational SDC that judges the mapped
+// netlist: a virtual 10 ns clock with zero input and output
+// delay, so the mapped path delay is the arrival and the slack
+// is 10 ns minus that delay.
+const char kSynthMapLiberty[] = R"LIB(library (eos_map_fixture) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+  cell (AND2) {
+    area : 2.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (B) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A*B";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.6"); }
+        cell_fall (scalar) { values ("0.6"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (OR2) {
+    area : 2.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (B) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A+B";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.6"); }
+        cell_fall (scalar) { values ("0.6"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (INV) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      timing () {
+        related_pin : "A";
+        timing_sense : negative_unate;
+        cell_rise (scalar) { values ("0.5"); }
+        cell_fall (scalar) { values ("0.5"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (BUF) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.4"); }
+        cell_fall (scalar) { values ("0.4"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) {
+      direction : input;
+      capacitance : 0.001;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
+    pin (CK) {
+      direction : input;
+      capacitance : 0.001;
+      clock : true;
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+}
+)LIB";
+
+const char kSynthMapSdc[] =
+    "create_clock -name vclk -period 10\n"
+    "set_input_delay -clock vclk 0 [all_inputs]\n"
+    "set_output_delay -clock vclk 0 [all_outputs]\n";
+
+TEST(CoreCommands, SynthMapDelayJudgedByStaAndRunTimingReproducesIt) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kSynthMapLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kSynthMapSdc)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  const CommandResult mapped = shell.Run("synth_map");
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  EXPECT_NE(mapped.payload.find("target=delay"), std::string::npos);
+  EXPECT_NE(mapped.payload.find("genlib_cells=AND2,BUF,INV,OR2"),
+            std::string::npos);
+  EXPECT_NE(mapped.payload.find("cells=3"), std::string::npos);
+  EXPECT_NE(mapped.payload.find("types=AND2:3"), std::string::npos);
+  EXPECT_NE(mapped.payload.find("scene=func_tt"), std::string::npos);
+  EXPECT_NE(mapped.payload.find("electrical_violations=0"),
+            std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+  EXPECT_EQ(shell.ctx.synth.mapped_target, "delay");
+  EXPECT_TRUE(shell.ctx.synth.mapped_timing_judged);
+  EXPECT_EQ(shell.ctx.timing.verilog_path,
+            shell.ctx.synth.mapped_verilog);
+  std::ifstream genlib_in(shell.ctx.synth.mapped_genlib);
+  ASSERT_TRUE(genlib_in.good());
+  std::stringstream genlib_text;
+  genlib_text << genlib_in.rdbuf();
+  EXPECT_NE(genlib_text.str().find("GATE AND2 2 Y=A*B;"),
+            std::string::npos);
+  std::ifstream mapped_in(shell.ctx.synth.mapped_verilog);
+  ASSERT_TRUE(mapped_in.good());
+  std::stringstream mapped_text;
+  mapped_text << mapped_in.rdbuf();
+  EXPECT_NE(mapped_text.str().find("AND2"), std::string::npos);
+  // The mapped netlist is three AND2 cells at logic depth 2
+  // (the balanced four-input AND tree), so the arrival is
+  // 2 * 0.6 = 1.2 ns against the 10 ns virtual clock: worst
+  // slack 8.8 ns, no negative slack. The payload number is
+  // parsed, not string-matched, as in the timing tests.
+  const auto payload_number = [&mapped](const std::string& key) {
+    const std::size_t at = mapped.payload.find(key + "=");
+    EXPECT_NE(at, std::string::npos) << "missing " << key;
+    if (at == std::string::npos) return 0.0;
+    return std::stod(mapped.payload.substr(at + key.size() + 1));
+  };
+  EXPECT_NEAR(payload_number("worst_slack_ns"), 8.8, 1e-6);
+  EXPECT_NEAR(payload_number("total_negative_slack_ns"), 0.0, 1e-6);
+  // The next run_timing is the end-to-end STA on the mapped
+  // netlist, and must reproduce the mapping record exactly.
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  const auto run_number = [&run](const std::string& key) {
+    const std::size_t at = run.payload.find(key + "=");
+    EXPECT_NE(at, std::string::npos) << "missing " << key;
+    if (at == std::string::npos) return 0.0;
+    return std::stod(run.payload.substr(at + key.size() + 1));
+  };
+  EXPECT_NEAR(run_number("worst_slack_ns"),
+              payload_number("worst_slack_ns"), 1e-6);
+  EXPECT_NEAR(run_number("total_negative_slack_ns"), 0.0, 1e-6);
+}
+
+TEST(CoreCommands, SynthMapAreaWithExplicitLibertyAndNoTiming) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string liberty = dir.Write("cells.lib", kSynthMapLiberty);
+  ASSERT_TRUE(shell.Run("read_liberty", {"tt", liberty}).ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-target", "area", "-liberty", liberty});
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  EXPECT_NE(mapped.payload.find("target=area"), std::string::npos);
+  EXPECT_NE(mapped.payload.find("cells=3"), std::string::npos);
+  EXPECT_NE(mapped.payload.find("types=AND2:3"), std::string::npos);
+  EXPECT_NE(mapped.payload.find("timing=not_run"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+  EXPECT_FALSE(shell.ctx.synth.mapped_timing_judged);
+  EXPECT_EQ(shell.ctx.timing.verilog_path,
+            shell.ctx.synth.mapped_verilog);
+}
+
+TEST(CoreCommands, SynthMapRejectsBadOptionsAndLeavesState) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  EXPECT_FALSE(shell.Run("synth_map", {"-bogus", "1"}).ok);
+  EXPECT_FALSE(shell.Run("synth_map", {"-target"}).ok);
+  EXPECT_FALSE(shell.Run("synth_map", {"-target", "sideways"}).ok);
+  EXPECT_FALSE(
+      shell.Run("synth_map", {"-target", "delay", "-target", "area"}).ok);
+  const CommandResult missing_liberty = shell.Run(
+      "synth_map", {"-liberty", dir.Path("no_such.lib")});
+  EXPECT_FALSE(missing_liberty.ok);
+  EXPECT_EQ(missing_liberty.diag, Diag::kIoError);
+  // No Liberty recorded yet: the mapping fails naming it, and
+  // every rejection above left the elaborated state untouched.
+  EXPECT_FALSE(shell.Run("synth_map").ok);
+  EXPECT_TRUE(shell.ctx.synth.elaborated);
+  EXPECT_FALSE(shell.ctx.synth.mapped);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kSynthMapLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("synth_map").ok);
+}
+
+TEST(CoreCommands, SynthMapRequiresAnElaboratedDesign) {
+  Shell shell;
+  const CommandResult bare = shell.Run("synth_map");
+  EXPECT_FALSE(bare.ok);
+  EXPECT_EQ(bare.diag, Diag::kInvalidConfiguration);
+  TimingTempDir dir;
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                    .ok);
+  const CommandResult parsed_only = shell.Run("synth_map");
+  EXPECT_FALSE(parsed_only.ok);
+  EXPECT_EQ(parsed_only.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, SynthMapRejectsSequentialDesigns) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string liberty = dir.Write("cells.lib", kSynthMapLiberty);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("demo.v", kSynthDemo), "demo"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  EXPECT_EQ(shell.ctx.synth.elaborated_cells, 3);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-liberty", liberty});
+  EXPECT_FALSE(mapped.ok);
+  EXPECT_EQ(mapped.diag, Diag::kUnsupportedFeature);
+  EXPECT_NE(mapped.message.find("combinational"), std::string::npos);
+  // The rejection happened before the bridge, so the elaborated
+  // state is untouched and the design is not marked mapped.
+  EXPECT_TRUE(shell.ctx.synth.elaborated);
+  EXPECT_EQ(shell.ctx.synth.elaborated_cells, 3);
+  EXPECT_FALSE(shell.ctx.synth.mapped);
 }
 
 TEST(CoreCommands, ImportOdbLoadsTheDatabase) {

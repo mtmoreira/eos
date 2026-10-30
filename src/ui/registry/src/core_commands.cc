@@ -20,6 +20,7 @@
 #include <iomanip>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -1375,6 +1376,295 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             " wires=" + std::to_string(post.wire_count) +
             " depth=" + std::to_string(post.logic_depth) +
             " verilog=" + optimized);
+      });
+
+  // Technology mapping (synthesis unit S2): the elaborated
+  // design, mapped onto the cells of a Liberty library through
+  // the Liberty-to-genlib conversion, and judged by STA when
+  // the timing session can build scenes. The Liberty comes
+  // from -liberty, else the sole recorded Liberty, else the
+  // Liberty shared by every active scenario's corner; anything
+  // else fails naming the ambiguity, before any engine runs.
+  // Sequential designs fail before the bridge: ABC's mapped
+  // Verilog writes latches as behavioural always blocks, not
+  // mapped gates, so a mapped sequential netlist would be a
+  // lie the STA Verilog path cannot link. The bridge runs
+  // Yosys first, then ABC, then nothing else, each engine
+  // constructed and released in turn (both guard a process
+  // singleton). The Yosys design is mutated by aigmap before
+  // ABC runs, so any failure after that point clears the synth
+  // state, exactly as synth_generic does. The STA judgement
+  // runs on the mapped netlist without registering a report
+  // binding (that is run_timing's job); on success the timing
+  // session is pointed at the mapped netlist, so the next
+  // run_timing is the end-to-end STA on the mapped design.
+  add("synth_map", "synth_map [-target delay|area] [-liberty <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        std::string target = "delay";
+        bool target_seen = false;
+        std::string liberty;
+        bool liberty_seen = false;
+        for (std::size_t i = 0; i < args.size(); ++i) {
+          if (args[i] == "-target") {
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -target needs a value");
+            }
+            if (target_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -target given twice");
+            }
+            target_seen = true;
+            target = args[++i];
+            if (target != "delay" && target != "area") {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "unknown mapping target: " + target);
+            }
+          } else if (args[i] == "-liberty") {
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -liberty needs a value");
+            }
+            if (liberty_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -liberty given twice");
+            }
+            if (auto bad = CheckReadable(args[i + 1])) return *bad;
+            liberty_seen = true;
+            liberty = args[++i];
+          } else {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown synth_map option: " + args[i]);
+          }
+        }
+        if (!ctx.synth.parsed || !ctx.synth.elaborated) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no elaborated design: eos::elaborate first");
+        }
+        std::string liberty_path = liberty;
+        if (liberty_path.empty()) {
+          if (ctx.timing.liberty_by_corner.size() == 1) {
+            liberty_path = ctx.timing.liberty_by_corner.begin()->second;
+          } else {
+            const std::vector<const db::Scenario*> active =
+                ctx.project.scenarios.ActiveScenarios();
+            std::string shared;
+            bool shared_ok = !active.empty();
+            for (const db::Scenario* scenario : active) {
+              const auto found =
+                  ctx.timing.liberty_by_corner.find(scenario->corner);
+              if (found == ctx.timing.liberty_by_corner.end()) {
+                shared_ok = false;
+                break;
+              }
+              if (shared.empty()) {
+                shared = found->second;
+              } else if (shared != found->second) {
+                shared_ok = false;
+                break;
+              }
+            }
+            if (shared_ok) liberty_path = shared;
+          }
+        }
+        if (liberty_path.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no Liberty for mapping: eos::synth_map -liberty "
+              "<path> or eos::read_liberty first");
+        }
+        const auto fail_after_mutation =
+            [&ctx](const foundation::Status& status) {
+              ctx.synth = CommandContext::SynthSession();
+              return FromStatus(status);
+            };
+        // The sequential guard runs before any mutation, so a
+        // rejected sequential design leaves the session
+        // untouched. Stats itself does not mutate the design.
+        int sequential_cells = 0;
+        {
+          synth::YosysEngine yosys;
+          const foundation::Result<synth::YosysNetlistStats> stats =
+              yosys.Stats(ctx.synth.top_cell);
+          if (!stats.ok()) {
+            // The session claims an elaborated design the live
+            // engine does not hold; clear it rather than let a
+            // later command operate on the disagreement.
+            ctx.synth = CommandContext::SynthSession();
+            return FromStatus(stats.status());
+          }
+          sequential_cells = stats.value().sequential_cells;
+        }
+        if (sequential_cells > 0) {
+          return CommandResult::Fail(
+              Diag::kUnsupportedFeature,
+              "synth_map maps combinational designs only: the "
+              "elaborated design has " +
+                  std::to_string(sequential_cells) +
+                  " sequential cell(s), which ABC's mapped "
+                  "Verilog renders as behavioural blocks rather "
+                  "than mapped gates");
+        }
+        const std::string bridge = SynthTempPath("map_bridge", ".blif");
+        const std::string genlib = SynthTempPath("map_genlib", ".genlib");
+        const std::string mapped = SynthTempPath("mapped", ".v");
+        {
+          synth::YosysEngine yosys;
+          const foundation::Status mapped_aig = yosys.AigMap();
+          if (!mapped_aig.ok()) return fail_after_mutation(mapped_aig);
+          const foundation::Status written =
+              yosys.WriteBlif(bridge, ctx.synth.top_cell);
+          if (!written.ok()) return fail_after_mutation(written);
+        }
+        std::vector<std::string> genlib_cells;
+        {
+          synth::AbcEngine abc;
+          const foundation::Result<std::vector<std::string>> converted =
+              abc.LibertyToGenlib(liberty_path, genlib);
+          if (!converted.ok()) return fail_after_mutation(converted.status());
+          genlib_cells = converted.value();
+          const foundation::Status status = abc.MapTechnology(
+              bridge, genlib, mapped,
+              target == "area" ? synth::MapTarget::kArea
+                               : synth::MapTarget::kDelay);
+          std::error_code ec;
+          std::filesystem::remove(bridge, ec);
+          if (!status.ok()) return fail_after_mutation(status);
+        }
+        // Cell counts scanned from ABC's mapped Verilog writer
+        // format: each gate line starts with its cell name.
+        // The mapped netlist is not re-parsed by Yosys: its
+        // Liberty cells are unknown modules there.
+        std::set<std::string> cell_set(genlib_cells.begin(),
+                                       genlib_cells.end());
+        std::map<std::string, int> by_type;
+        int total_cells = 0;
+        {
+          std::ifstream in(mapped);
+          std::string line;
+          while (std::getline(in, line)) {
+            const std::size_t first =
+                line.find_first_not_of(" \t");
+            if (first == std::string::npos) continue;
+            const std::size_t end = line.find_first_of(" \t", first);
+            const std::string token =
+                line.substr(first, end == std::string::npos
+                                     ? std::string::npos
+                                     : end - first);
+            if (cell_set.count(token) == 0) continue;
+            ++by_type[token];
+            ++total_cells;
+          }
+        }
+        std::string types;
+        for (const auto& entry : by_type) {
+          if (!types.empty()) types += ",";
+          types += entry.first + ":" + std::to_string(entry.second);
+        }
+        std::string genlib_list;
+        for (const std::string& cell : genlib_cells) {
+          if (!genlib_list.empty()) genlib_list += ",";
+          genlib_list += cell;
+        }
+        // The STA judgement: scenes are built exactly as
+        // run_timing builds them. No scenes (no scenario, no
+        // SDC, no corner Liberty) is not a mapping failure:
+        // the mapping stands and the record says so, and the
+        // next run_timing supplies the judgement. A scene
+        // set that builds but whose analysis fails is a
+        // mapping failure: the record cannot be judged, and
+        // the mutated live design is cleared with it.
+        bool judged = false;
+        double worst_slack = 0.0;
+        double total_negative = 0.0;
+        int electrical_violations = 0;
+        std::string timing_lines;
+        {
+          bool from_odb = false;
+          std::vector<analysis::SceneAnalysis> scenes;
+          if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+            timing_lines = " timing=not_run reason=" + bad->message;
+          } else {
+            analysis::TimingService service;
+            const foundation::Result<std::vector<analysis::SceneResult>>
+                analyzed = service.Analyze(
+                    analysis::VerilogDesign{mapped, ctx.synth.top_cell,
+                                            ctx.timing.sdc_path},
+                    scenes);
+            if (!analyzed.ok()) {
+              return fail_after_mutation(analyzed.status());
+            }
+            const auto metric = [](const analysis::SceneResult& result,
+                                   const std::string& name, double* out) {
+              const auto found = result.metrics.find(name);
+              if (found == result.metrics.end()) return false;
+              *out = found->second.value;
+              return true;
+            };
+            judged = true;
+            bool first = true;
+            for (const analysis::SceneResult& result : analyzed.value()) {
+              double slack = 0.0;
+              double tns = 0.0;
+              double transition = 0.0;
+              double capacitance = 0.0;
+              double fanout = 0.0;
+              if (!metric(result, "worst_slack_ns", &slack) ||
+                  !metric(result, "total_negative_slack_ns", &tns) ||
+                  !metric(result, "max_transition_violations",
+                          &transition) ||
+                  !metric(result, "max_capacitance_violations",
+                          &capacitance) ||
+                  !metric(result, "max_fanout_violations", &fanout)) {
+                return fail_after_mutation(foundation::Status::Error(
+                    foundation::ErrorCode::kInvalidState,
+                    "STA record is missing a mapping metric for scene " +
+                        result.scenario.name));
+              }
+              if (first || slack < worst_slack) worst_slack = slack;
+              total_negative += tns;
+              electrical_violations += static_cast<int>(transition) +
+                                       static_cast<int>(capacitance) +
+                                       static_cast<int>(fanout);
+              first = false;
+              timing_lines +=
+                  "\nscene=" + result.scenario.name +
+                  " worst_slack_ns=" + FormatNumber(slack) +
+                  " total_negative_slack_ns=" + FormatNumber(tns) +
+                  " electrical_violations=" +
+                  std::to_string(static_cast<int>(transition) +
+                                 static_cast<int>(capacitance) +
+                                 static_cast<int>(fanout));
+            }
+          }
+        }
+        ctx.synth.mapped = true;
+        ctx.synth.mapped_target = target;
+        ctx.synth.mapped_liberty = liberty_path;
+        ctx.synth.mapped_genlib = genlib;
+        ctx.synth.mapped_verilog = mapped;
+        ctx.synth.mapped_genlib_cells = genlib_list;
+        ctx.synth.mapped_cells = total_cells;
+        ctx.synth.mapped_types = types;
+        ctx.synth.mapped_timing_judged = judged;
+        ctx.synth.mapped_worst_slack_ns = worst_slack;
+        ctx.synth.mapped_total_negative_slack_ns = total_negative;
+        ctx.synth.mapped_electrical_violations = electrical_violations;
+        ctx.timing.verilog_path = mapped;
+        ctx.timing.top_cell = ctx.synth.top_cell;
+        return CommandResult::Ok(
+            "target=" + target + " liberty=" + liberty_path +
+            " genlib=" + genlib + " genlib_cells=" + genlib_list +
+            " cells=" + std::to_string(total_cells) +
+            " types=" + types + " verilog=" + mapped + timing_lines);
       });
 
   add("read_sdc", "read_sdc <path>",
