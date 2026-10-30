@@ -6,6 +6,7 @@
 // run the operation and map its Status onto the diagnostic taxonomy.
 #include "eos/ui/registry.h"
 
+#include "eos/analysis/sta.h"
 #include "eos/session/flow.h"
 #include "eos/synth/abc.h"
 #include "eos/synth/yosys.h"
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <charconv>
 #include <cstdint>
 #include <filesystem>
@@ -236,6 +238,40 @@ std::string SynthTempPath(const std::string& stem,
       .string();
 }
 
+// Counts the mapped cells of one ABC mapped Verilog file: each
+// gate line starts with its cell name, so a line whose first
+// token is a genlib cell counts once for that cell. Shared by
+// synth_map and synth_opt so the two commands never disagree
+// about what a mapped netlist holds.
+void ScanMappedCells(const std::string& path,
+                     const std::set<std::string>& cell_set,
+                     std::map<std::string, int>* by_type, int* total) {
+  by_type->clear();
+  *total = 0;
+  std::ifstream in(path);
+  std::string line;
+  while (std::getline(in, line)) {
+    const std::size_t first = line.find_first_not_of(" \t");
+    if (first == std::string::npos) continue;
+    const std::size_t end = line.find_first_of(" \t", first);
+    const std::string token =
+        line.substr(first, end == std::string::npos ? std::string::npos
+                                                    : end - first);
+    if (cell_set.count(token) == 0) continue;
+    ++(*by_type)[token];
+    ++(*total);
+  }
+}
+
+std::string CellTypesText(const std::map<std::string, int>& by_type) {
+  std::string types;
+  for (const auto& entry : by_type) {
+    if (!types.empty()) types += ",";
+    types += entry.first + ":" + std::to_string(entry.second);
+  }
+  return types;
+}
+
 std::string SynthStatsText(const synth::YosysNetlistStats& stats) {
   std::string types;
   for (const synth::YosysCellTypeCount& entry : stats.cells_by_type) {
@@ -261,6 +297,204 @@ std::string MetricText(const analysis::TimingMetricMap& metrics,
                        const std::string& name) {
   const auto it = metrics.find(name);
   return it == metrics.end() ? "none" : FormatNumber(it->second.value);
+}
+
+// --- synth_opt (unit S3): the every-path optimization loop. ---
+
+// The loop's comparison tolerance: slacks are float-derived
+// upstream values, so a difference at or below this is equality,
+// never an improvement and never a regression.
+constexpr double kOptEpsNs = 1e-9;
+
+bool ParseOptDouble(const std::string& token, double& out) {
+  try {
+    std::size_t used = 0;
+    const double value = std::stod(token, &used);
+    if (used != token.size() || !std::isfinite(value)) return false;
+    out = value;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool ParseOptStrategy(const std::string& name,
+                      synth::OptStrategy* out) {
+  if (name == "classic") {
+    *out = synth::OptStrategy::kClassic;
+  } else if (name == "choice") {
+    *out = synth::OptStrategy::kChoice;
+  } else if (name == "abc9") {
+    *out = synth::OptStrategy::kAbc9;
+  } else if (name == "retime") {
+    *out = synth::OptStrategy::kRetime;
+  } else if (name == "delay") {
+    *out = synth::OptStrategy::kDelay;
+  } else if (name == "area") {
+    *out = synth::OptStrategy::kArea;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+const char* OptStrategyName(synth::OptStrategy strategy) {
+  switch (strategy) {
+    case synth::OptStrategy::kClassic: return "classic";
+    case synth::OptStrategy::kChoice: return "choice";
+    case synth::OptStrategy::kAbc9: return "abc9";
+    case synth::OptStrategy::kRetime: return "retime";
+    case synth::OptStrategy::kDelay: return "delay";
+    case synth::OptStrategy::kArea: return "area";
+  }
+  return "unknown";
+}
+
+// One STA evaluation of one candidate netlist inside the loop's
+// single resident StaEngine: the Liberty is loaded once by the
+// caller, and every evaluation after the first clears the
+// previous design out of the same session before loading its
+// own netlist, so no evaluation pays for a fresh STA session.
+struct OptEval {
+  bool ok = false;
+  std::string error;
+  double worst_slack = 0.0;
+  double total_negative = 0.0;
+  double worst_hold = 0.0;
+  double total_negative_hold = 0.0;
+  int electrical_violations = 0;
+  // Setup endpoint slacks in the facade's worst-first order.
+  std::vector<analysis::EndpointSlack> endpoints;
+};
+
+OptEval EvaluateOptCandidate(analysis::StaEngine& sta,
+                             const std::string& verilog,
+                             const std::string& top,
+                             const std::string& sdc, bool first) {
+  OptEval eval;
+  const auto fail = [&eval](const foundation::Status& status) {
+    eval.error = status.message();
+    return eval;
+  };
+  if (!first) {
+    const foundation::Status cleared = sta.ClearDesign();
+    if (!cleared.ok()) return fail(cleared);
+  }
+  foundation::Status status = sta.ReadVerilog(verilog);
+  if (!status.ok()) return fail(status);
+  status = sta.LinkDesign(top);
+  if (!status.ok()) return fail(status);
+  status = sta.ReadSdc(sdc);
+  if (!status.ok()) return fail(status);
+  const auto slack = [&eval](foundation::Result<double> result,
+                             double* out) {
+    if (!result.ok()) {
+      eval.error = result.status().message();
+      return false;
+    }
+    *out = result.value();
+    return true;
+  };
+  if (!slack(sta.WorstSlackNs(), &eval.worst_slack)) return eval;
+  if (!slack(sta.TotalNegativeSlackNs(), &eval.total_negative)) {
+    return eval;
+  }
+  if (!slack(sta.WorstHoldSlackNs(), &eval.worst_hold)) return eval;
+  if (!slack(sta.TotalNegativeHoldSlackNs(),
+             &eval.total_negative_hold)) {
+    return eval;
+  }
+  foundation::Result<std::vector<analysis::EndpointSlack>> endpoints =
+      sta.EndpointsBySlack(analysis::CheckKind::kSetup);
+  if (!endpoints.ok()) return fail(endpoints.status());
+  eval.endpoints = endpoints.value();
+  const auto electrical =
+      [&eval](foundation::Result<analysis::ElectricalCheck> check) {
+        if (!check.ok()) {
+          eval.error = check.status().message();
+          return false;
+        }
+        eval.electrical_violations +=
+            static_cast<int>(check.value().violation_count);
+        return true;
+      };
+  if (!electrical(sta.MaxTransitionCheck())) return eval;
+  if (!electrical(sta.MaxCapacitanceCheck())) return eval;
+  if (!electrical(sta.MaxFanoutCheck())) return eval;
+  eval.ok = true;
+  return eval;
+}
+
+// The plan's lexicographic cost: worst setup slack, then total
+// negative setup slack, then worst hold slack, then total
+// negative hold slack, then the electrical violation count.
+// Returns +1 when a is better than b, -1 when worse, 0 when
+// equal within the loop tolerance.
+int CompareOptCost(const OptEval& a, const OptEval& b) {
+  const auto cmp = [](double a_value, double b_value,
+                      bool higher_better) {
+    if (a_value > b_value + kOptEpsNs) return higher_better ? 1 : -1;
+    if (b_value > a_value + kOptEpsNs) return higher_better ? -1 : 1;
+    return 0;
+  };
+  if (int c = cmp(a.worst_slack, b.worst_slack, true)) return c;
+  if (int c = cmp(a.total_negative, b.total_negative, true)) return c;
+  if (int c = cmp(a.worst_hold, b.worst_hold, true)) return c;
+  if (int c = cmp(a.total_negative_hold, b.total_negative_hold,
+                 true)) {
+    return c;
+  }
+  return cmp(static_cast<double>(a.electrical_violations),
+             static_cast<double>(b.electrical_violations), false);
+}
+
+// A candidate must not regress any working-set endpoint, even
+// when its global cost improves: fixing one path at another's
+// expense is a rollback, not a commit. A working-set endpoint
+// the candidate no longer reports counts as a regression, since
+// its slack can no longer be shown.
+bool OptRegressesWorkingSet(const OptEval& candidate,
+                            const OptEval& incumbent,
+                            const std::vector<std::string>& pins) {
+  std::map<std::string, double> candidate_by_pin;
+  for (const analysis::EndpointSlack& endpoint : candidate.endpoints) {
+    candidate_by_pin[endpoint.pin] = endpoint.slack_ns;
+  }
+  std::map<std::string, double> incumbent_by_pin;
+  for (const analysis::EndpointSlack& endpoint : incumbent.endpoints) {
+    incumbent_by_pin[endpoint.pin] = endpoint.slack_ns;
+  }
+  for (const std::string& pin : pins) {
+    const auto found = candidate_by_pin.find(pin);
+    const auto was = incumbent_by_pin.find(pin);
+    if (found == candidate_by_pin.end() ||
+        was == incumbent_by_pin.end() ||
+        found->second < was->second - kOptEpsNs) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string OptEndpointListText(
+    const std::vector<std::pair<std::string, double>>& entries) {
+  if (entries.empty()) return "none";
+  std::string text;
+  for (const auto& entry : entries) {
+    if (!text.empty()) text += ",";
+    text += entry.first + ":" + FormatNumber(entry.second);
+  }
+  return text;
+}
+
+std::string OptNameListText(const std::vector<std::string>& names) {
+  if (names.empty()) return "none";
+  std::string text;
+  for (const std::string& name : names) {
+    if (!text.empty()) text += ",";
+    text += name;
+  }
+  return text;
 }
 
 // Builds the scene list for the active scenarios from the timing
@@ -1547,28 +1781,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                                        genlib_cells.end());
         std::map<std::string, int> by_type;
         int total_cells = 0;
-        {
-          std::ifstream in(mapped);
-          std::string line;
-          while (std::getline(in, line)) {
-            const std::size_t first =
-                line.find_first_not_of(" \t");
-            if (first == std::string::npos) continue;
-            const std::size_t end = line.find_first_of(" \t", first);
-            const std::string token =
-                line.substr(first, end == std::string::npos
-                                     ? std::string::npos
-                                     : end - first);
-            if (cell_set.count(token) == 0) continue;
-            ++by_type[token];
-            ++total_cells;
-          }
-        }
-        std::string types;
-        for (const auto& entry : by_type) {
-          if (!types.empty()) types += ",";
-          types += entry.first + ":" + std::to_string(entry.second);
-        }
+        ScanMappedCells(mapped, cell_set, &by_type, &total_cells);
+        const std::string types = CellTypesText(by_type);
         std::string genlib_list;
         for (const std::string& cell : genlib_cells) {
           if (!genlib_list.empty()) genlib_list += ",";
@@ -1665,6 +1879,401 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             " genlib=" + genlib + " genlib_cells=" + genlib_list +
             " cells=" + std::to_string(total_cells) +
             " types=" + types + " verilog=" + mapped + timing_lines);
+      });
+
+  // The every-path optimization loop (synthesis unit S3).
+  // Starts from the mapped netlist (or the previous loop's
+  // winner on a re-run) and judges every candidate the same
+  // way: one resident StaEngine evaluates the incumbent and
+  // every strategy candidate in turn, the Liberty loaded once
+  // and each candidate loaded into the same session after a
+  // clear, so no candidate pays for a fresh STA session. The
+  // working set is every setup endpoint within the margin of
+  // violation at the baseline (violating endpoints plus
+  // endpoints within margin_ns of violating; margin default
+  // 0.1 ns, the plan's value). Each iteration tries every
+  // strategy, proves each candidate equivalent to the
+  // incumbent with ABC cec (a candidate that is not
+  // kEquivalent is rejected, never committed), and commits
+  // the best candidate that strictly improves the
+  // lexicographic cost without regressing any working-set
+  // endpoint. The loop ends when every working-set endpoint
+  // meets timing, when no strategy improves the incumbent, or
+  // at the iteration cap; a run that ends on the cap names
+  // exactly which endpoints still violate. The loop judges on
+  // the mapping corner (the mapped Liberty) under the session
+  // SDC, a single scene, so every comparison is on identical
+  // inputs. Cloning is not a strategy here: the strategy list
+  // is whole-design ABC strategies, none of which needs a
+  // fanout clone, so the plan's cloning work item does not
+  // arise. Per-path ECO sizing and buffering stay the ECO
+  // engine's existing surface and are not candidates of this
+  // loop. On success the timing session is pointed at the
+  // winning netlist, so the next run_timing is the STA on the
+  // optimized design; the synth_map record is left untouched.
+  add("synth_opt",
+      "synth_opt [-strategies <list>] [-margin <ns>] "
+      "[-max_iterations <n>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        std::vector<synth::OptStrategy> strategies;
+        bool strategies_seen = false;
+        double margin = 0.1;
+        bool margin_seen = false;
+        std::uint64_t max_iterations = 20;
+        bool max_iterations_seen = false;
+        for (std::size_t i = 0; i < args.size(); ++i) {
+          if (args[i] == "-strategies") {
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -strategies needs a value");
+            }
+            if (strategies_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -strategies given twice");
+            }
+            strategies_seen = true;
+            const std::string list = args[++i];
+            if (list.empty()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -strategies needs a non-empty list");
+            }
+            std::set<std::string> seen_names;
+            std::size_t start = 0;
+            while (start <= list.size()) {
+              const std::size_t comma = list.find(',', start);
+              const std::string name = list.substr(
+                  start, comma == std::string::npos ? std::string::npos
+                                                    : comma - start);
+              synth::OptStrategy strategy;
+              if (name.empty() || !ParseOptStrategy(name, &strategy)) {
+                return CommandResult::Fail(
+                    Diag::kInvalidConfiguration,
+                    "unknown optimization strategy: " + name);
+              }
+              if (!seen_names.insert(name).second) {
+                return CommandResult::Fail(
+                    Diag::kInvalidConfiguration,
+                    "strategy given twice: " + name);
+              }
+              strategies.push_back(strategy);
+              if (comma == std::string::npos) break;
+              start = comma + 1;
+            }
+          } else if (args[i] == "-margin") {
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -margin needs a value");
+            }
+            if (margin_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -margin given twice");
+            }
+            margin_seen = true;
+            if (!ParseOptDouble(args[++i], margin) || margin < 0.0) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -margin needs a non-negative number");
+            }
+          } else if (args[i] == "-max_iterations") {
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -max_iterations needs a value");
+            }
+            if (max_iterations_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -max_iterations given twice");
+            }
+            max_iterations_seen = true;
+            if (!ParseU64(args[++i], max_iterations) ||
+                max_iterations < 1) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -max_iterations needs a positive integer");
+            }
+          } else {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown synth_opt option: " + args[i]);
+          }
+        }
+        if (!strategies_seen) {
+          strategies = {synth::OptStrategy::kClassic,
+                        synth::OptStrategy::kChoice,
+                        synth::OptStrategy::kAbc9};
+        }
+        // Every precondition is checked before any engine runs,
+        // so a rejected run leaves the session untouched.
+        if (!ctx.synth.mapped) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no mapped design: eos::synth_map first");
+        }
+        if (ctx.timing.sdc_path.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no SDC: eos::read_sdc first");
+        }
+        if (auto bad = CheckReadable(ctx.timing.sdc_path)) return *bad;
+        if (auto bad = CheckReadable(ctx.synth.mapped_liberty)) {
+          return *bad;
+        }
+        if (auto bad = CheckReadable(ctx.synth.mapped_genlib)) {
+          return *bad;
+        }
+        std::string incumbent =
+            ctx.synth.opt_verilog.empty()
+                ? ctx.synth.mapped_verilog
+                : ctx.synth.opt_verilog;
+        if (auto bad = CheckReadable(incumbent)) return *bad;
+        std::set<std::string> cell_set;
+        {
+          std::size_t start = 0;
+          const std::string& cells = ctx.synth.mapped_genlib_cells;
+          while (start <= cells.size()) {
+            const std::size_t comma = cells.find(',', start);
+            const std::string cell = cells.substr(
+                start, comma == std::string::npos ? std::string::npos
+                                                  : comma - start);
+            if (!cell.empty()) cell_set.insert(cell);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+          }
+        }
+        // The resident STA session: Liberty loaded once, then
+        // one evaluation per netlist in the same session.
+        analysis::StaEngine sta;
+        foundation::Status status =
+            sta.ReadLiberty(ctx.synth.mapped_liberty);
+        if (!status.ok()) return FromStatus(status);
+        int sta_evaluations = 0;
+        OptEval incumbent_eval = EvaluateOptCandidate(
+            sta, incumbent, ctx.synth.top_cell, ctx.timing.sdc_path,
+            true);
+        if (!incumbent_eval.ok) return FromStatus(foundation::Status::Error(
+            foundation::ErrorCode::kIoError, incumbent_eval.error));
+        ++sta_evaluations;
+        std::vector<std::string> working_pins;
+        std::vector<std::pair<std::string, double>> working_baseline;
+        for (const analysis::EndpointSlack& endpoint :
+             incumbent_eval.endpoints) {
+          if (endpoint.slack_ns < margin) {
+            working_pins.push_back(endpoint.pin);
+            working_baseline.emplace_back(endpoint.pin,
+                                          endpoint.slack_ns);
+          }
+        }
+        const auto scan_incumbent = [&]() {
+          std::map<std::string, int> by_type;
+          int total = 0;
+          ScanMappedCells(incumbent, cell_set, &by_type, &total);
+          return std::pair<std::string, int>(CellTypesText(by_type),
+                                             total);
+        };
+        // An empty working set means nothing to optimize: no
+        // strategy runs, and the record says so.
+        if (working_pins.empty()) {
+          const auto scanned = scan_incumbent();
+          ctx.synth.opt_run = true;
+          ctx.synth.opt_winner.clear();
+          ctx.synth.opt_iterations = 0;
+          ctx.synth.opt_verilog = incumbent;
+          ctx.synth.opt_types = scanned.first;
+          ctx.synth.opt_cells = scanned.second;
+          ctx.synth.opt_worst_slack_ns = incumbent_eval.worst_slack;
+          ctx.synth.opt_total_negative_slack_ns =
+              incumbent_eval.total_negative;
+          ctx.synth.opt_still_violating.clear();
+          ctx.timing.verilog_path = incumbent;
+          return CommandResult::Ok(
+              "iterations=0 max_iterations=" +
+              std::to_string(max_iterations) +
+              " margin_ns=" + FormatNumber(margin) +
+              " working_set=none winner=none" +
+              " final_worst_slack_ns=" +
+              FormatNumber(incumbent_eval.worst_slack) +
+              " final_total_negative_slack_ns=" +
+              FormatNumber(incumbent_eval.total_negative) +
+              " sta_evaluations=" + std::to_string(sta_evaluations) +
+              " sta_sessions=1 verilog=" + incumbent +
+              " endpoints=none still_violating=none");
+        }
+        const double baseline_worst_slack = incumbent_eval.worst_slack;
+        const double baseline_total_negative =
+            incumbent_eval.total_negative;
+        std::vector<std::string> committed;
+        std::vector<std::string> failed_strategies;
+        int equivalence_rejected = 0;
+        std::uint64_t iterations = 0;
+        std::string incumbent_temp;
+        bool cleared = false;
+        for (std::uint64_t iteration = 1;
+             iteration <= max_iterations; ++iteration) {
+          iterations = iteration;
+          // The best improving candidate of this iteration, or
+          // none: ties keep the earliest strategy in list order.
+          bool have_best = false;
+          synth::OptStrategy best_strategy =
+              synth::OptStrategy::kClassic;
+          std::string best_file;
+          OptEval best_eval;
+          for (synth::OptStrategy strategy : strategies) {
+            const std::string candidate = SynthTempPath("opt", ".v");
+            foundation::Status abc_status;
+            {
+              synth::AbcEngine abc;
+              abc_status = abc.OptimizeMapped(
+                  incumbent, ctx.synth.mapped_genlib, strategy,
+                  candidate);
+            }
+            if (!abc_status.ok()) {
+              failed_strategies.push_back(
+                  OptStrategyName(strategy));
+              std::error_code ec;
+              std::filesystem::remove(candidate, ec);
+              continue;
+            }
+            synth::EquivalenceVerdict verdict;
+            {
+              synth::AbcEngine abc;
+              const foundation::Result<synth::EquivalenceVerdict>
+                  proof = abc.ProveEquivalent(
+                      incumbent, candidate, ctx.synth.mapped_genlib);
+              if (!proof.ok()) {
+                failed_strategies.push_back(
+                    OptStrategyName(strategy));
+                std::error_code ec;
+                std::filesystem::remove(candidate, ec);
+                continue;
+              }
+              verdict = proof.value();
+            }
+            if (verdict != synth::EquivalenceVerdict::kEquivalent) {
+              ++equivalence_rejected;
+              std::error_code ec;
+              std::filesystem::remove(candidate, ec);
+              continue;
+            }
+            OptEval candidate_eval = EvaluateOptCandidate(
+                sta, candidate, ctx.synth.top_cell,
+                ctx.timing.sdc_path, false);
+            if (!candidate_eval.ok) {
+              failed_strategies.push_back(
+                  OptStrategyName(strategy));
+              std::error_code ec;
+              std::filesystem::remove(candidate, ec);
+              continue;
+            }
+            ++sta_evaluations;
+            if (CompareOptCost(candidate_eval, incumbent_eval) <= 0 ||
+                OptRegressesWorkingSet(candidate_eval, incumbent_eval,
+                                       working_pins)) {
+              std::error_code ec;
+              std::filesystem::remove(candidate, ec);
+              continue;
+            }
+            if (!have_best ||
+                CompareOptCost(candidate_eval, best_eval) > 0) {
+              if (have_best) {
+                std::error_code ec;
+                std::filesystem::remove(best_file, ec);
+              }
+              have_best = true;
+              best_strategy = strategy;
+              best_file = candidate;
+              best_eval = candidate_eval;
+            } else {
+              std::error_code ec;
+              std::filesystem::remove(candidate, ec);
+            }
+          }
+          if (!have_best) break;
+          committed.push_back(OptStrategyName(best_strategy));
+          if (!incumbent_temp.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(incumbent_temp, ec);
+          }
+          incumbent_temp = best_file;
+          incumbent = best_file;
+          incumbent_eval = best_eval;
+          cleared = true;
+          for (const std::string& pin : working_pins) {
+            bool met = false;
+            for (const analysis::EndpointSlack& endpoint :
+                 incumbent_eval.endpoints) {
+              if (endpoint.pin == pin &&
+                  endpoint.slack_ns >= -kOptEpsNs) {
+                met = true;
+              }
+            }
+            if (!met) cleared = false;
+          }
+          if (cleared) break;
+        }
+        std::vector<std::pair<std::string, double>> final_endpoints;
+        std::vector<std::string> still_violating;
+        for (const std::string& pin : working_pins) {
+          double slack = 0.0;
+          bool found = false;
+          for (const analysis::EndpointSlack& endpoint :
+               incumbent_eval.endpoints) {
+            if (endpoint.pin == pin) {
+              slack = endpoint.slack_ns;
+              found = true;
+            }
+          }
+          if (found) {
+            final_endpoints.emplace_back(pin, slack);
+            if (slack < -kOptEpsNs) {
+              still_violating.push_back(pin + ":" +
+                                        FormatNumber(slack));
+            }
+          }
+        }
+        const auto scanned = scan_incumbent();
+        ctx.synth.opt_run = true;
+        ctx.synth.opt_winner =
+            committed.empty() ? "" : committed.back();
+        ctx.synth.opt_iterations = static_cast<int>(iterations);
+        ctx.synth.opt_verilog = incumbent;
+        ctx.synth.opt_types = scanned.first;
+        ctx.synth.opt_cells = scanned.second;
+        ctx.synth.opt_worst_slack_ns = incumbent_eval.worst_slack;
+        ctx.synth.opt_total_negative_slack_ns =
+            incumbent_eval.total_negative;
+        ctx.synth.opt_still_violating = still_violating;
+        ctx.timing.verilog_path = incumbent;
+        return CommandResult::Ok(
+            "iterations=" + std::to_string(iterations) +
+            " max_iterations=" + std::to_string(max_iterations) +
+            " margin_ns=" + FormatNumber(margin) +
+            " baseline_worst_slack_ns=" +
+            FormatNumber(baseline_worst_slack) +
+            " baseline_total_negative_slack_ns=" +
+            FormatNumber(baseline_total_negative) +
+            " working_set=" + OptEndpointListText(working_baseline) +
+            " committed=" + OptNameListText(committed) +
+            " winner=" +
+            (committed.empty() ? "none" : committed.back()) +
+            " final_worst_slack_ns=" +
+            FormatNumber(incumbent_eval.worst_slack) +
+            " final_total_negative_slack_ns=" +
+            FormatNumber(incumbent_eval.total_negative) +
+            " sta_evaluations=" + std::to_string(sta_evaluations) +
+            " sta_sessions=1 verilog=" + incumbent +
+            " endpoints=" + OptEndpointListText(final_endpoints) +
+            " still_violating=" + OptNameListText(still_violating) +
+            " equivalence_rejected=" +
+            std::to_string(equivalence_rejected) +
+            " failed_strategies=" +
+            OptNameListText(failed_strategies));
       });
 
   add("read_sdc", "read_sdc <path>",

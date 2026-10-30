@@ -54,6 +54,31 @@ enum class MapTarget {
   kArea,
 };
 
+// One optimization strategy of the every-path loop (synthesis
+// unit S3), applied to an already mapped netlist and mapped
+// again onto the same genlib library. Every strategy reads the
+// netlist as mapped, hashes it to an AIG, runs its steps, and
+// maps for delay unless the strategy says otherwise:
+// kClassic is the generic script (balance, rewrite, refactor,
+// resub, balance); kChoice computes a choice network with `dch`
+// and maps with the choices retained; kAbc9 moves the network
+// to the new-generation form, optimizes it with `&dc2`, and
+// moves it back before mapping; kRetime retimes registers
+// where the design permits it (a combinational design has
+// nothing to retime, so the strategy leaves it unchanged);
+// kDelay maps with no optimization step; kArea maps for area
+// (`map -a`). A strategy never promises an improvement: the
+// loop judges every candidate by STA and by an equivalence
+// proof, and a candidate that does not improve is discarded.
+enum class OptStrategy {
+  kClassic,
+  kChoice,
+  kAbc9,
+  kRetime,
+  kDelay,
+  kArea,
+};
+
 // One network as ABC's print_stats reports it: the AIG size in
 // AND gates (inverters are free in an AIG and are not counted)
 // and the logic depth in AND levels. These are the generic
@@ -140,6 +165,27 @@ class AbcEngine {
                        const std::string& genlib_path,
                        const std::string& output_verilog,
                        MapTarget target);
+
+  // One optimization strategy (synthesis unit S3) applied to a
+  // mapped gate-level Verilog netlist, mapped again onto the
+  // cells of the same genlib library and written as Verilog.
+  // The output module keeps the input module's name and port
+  // names; internal net and instance names are ABC's. The
+  // caller judges the candidate: this method reports only that
+  // the strategy ran and wrote a netlist. A genlib that yields
+  // exactly one mapping function besides buffers and constants
+  // is refused with kInvalidArgument before ABC runs: upstream
+  // ABC's map aborts the process on such a library (its root
+  // collection self-compares a one-element list), so refusing
+  // it here is what keeps a degenerate library a failed
+  // strategy instead of a dead process. Fails with kIoError
+  // when an input file cannot be read, the output cannot be
+  // written, or a strategy step fails; and with kInvalidState
+  // when the engine does not own the frame.
+  Status OptimizeMapped(const std::string& input_verilog,
+                        const std::string& genlib_path,
+                        OptStrategy strategy,
+                        const std::string& output_verilog);
 
   // Generic (technology-agnostic) optimization of one Verilog
   // or BLIF netlist, with the classic ABC script: the network

@@ -528,6 +528,27 @@ Status StaEngine::ReadSpef(const std::string& path) {
   return impl_->Run("read_spef", path, "could not read SPEF file");
 }
 
+Status StaEngine::ClearDesign() {
+  if (impl_->sta == nullptr) {
+    return Status::Error(
+        ErrorCode::kInvalidState,
+        "another StaEngine is alive; upstream STA is a singleton");
+  }
+  try {
+    // Upstream clear() drops the network, the SDC and the
+    // parasitics, and keeps the library scenes: exactly the
+    // reset a multi-candidate loop needs. The facade flags
+    // follow, so no query answers on the cleared session until
+    // it is linked and constrained again.
+    impl_->sta->clear();
+  } catch (const std::exception& ex) {
+    return Status::Error(ErrorCode::kIoError, ex.what());
+  }
+  impl_->linked = false;
+  impl_->constrained = false;
+  return Status::Ok();
+}
+
 Result<double> StaEngine::WorstSlackNs() { return impl_->SlackNs(false, false); }
 
 Result<double> StaEngine::TotalNegativeSlackNs() {

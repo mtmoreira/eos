@@ -322,6 +322,38 @@ TEST(StaFacade, NegativeSlackAndTnsMatchUpstream) {
               1e-6 * std::abs(kTnsTightNs) + 1e-7);
 }
 
+TEST(StaFacade, ClearDesignReloadsAnotherNetlistInOneSession) {
+  // Synthesis unit S3's session-resident STA: one engine
+  // evaluates two designs in turn. After a clear the session
+  // answers no query until it is linked and constrained again,
+  // and the second design loads WITHOUT re-reading the Liberty,
+  // which proves the libraries survive the clear: the tight
+  // clock then reports the same -0.1 ns the fresh-session test
+  // measures, not a missing-library failure.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto relaxed = engine.WorstSlackNs();
+  ASSERT_TRUE(relaxed.ok()) << relaxed.status().message();
+  EXPECT_NEAR(relaxed.value(), kWorstSlackNs,
+              1e-6 * std::abs(kWorstSlackNs));
+  ASSERT_TRUE(engine.ClearDesign().ok());
+  const auto cleared = engine.WorstSlackNs();
+  EXPECT_FALSE(cleared.ok());
+  EXPECT_EQ(cleared.status().code(), ErrorCode::kInvalidState);
+  ASSERT_TRUE(engine.ReadVerilog(dir.Write("top2.v", kVerilog)).ok());
+  ASSERT_TRUE(engine.LinkDesign("top").ok());
+  ASSERT_TRUE(engine.ReadSdc(dir.Write("top2.sdc", kSdcTight)).ok());
+  const auto tight = engine.WorstSlackNs();
+  ASSERT_TRUE(tight.ok()) << tight.status().message();
+  EXPECT_NEAR(tight.value(), kWorstSlackTightNs,
+              1e-6 * std::abs(kWorstSlackTightNs) + 1e-7);
+  const auto tns = engine.TotalNegativeSlackNs();
+  ASSERT_TRUE(tns.ok()) << tns.status().message();
+  EXPECT_NEAR(tns.value(), kTnsTightNs,
+              1e-6 * std::abs(kTnsTightNs) + 1e-7);
+}
+
 TEST(StaFacade, ViolatingEndpointsMatchUpstream) {
   // With the 0.5 ns clock the only violating endpoint is r2's D
   // pin, at the same -0.1 ns the scalar queries report (see the
