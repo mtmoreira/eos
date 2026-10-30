@@ -131,7 +131,10 @@ struct PathReport {
 // the upstream analyzer and its interpreter. The intended order is
 // ReadLiberty, ReadVerilog, LinkDesign, ReadSdc, then the slack
 // queries; ReadSpef may be called after linking to annotate
-// parasitics before querying.
+// parasitics before querying. ClearDesign (synthesis unit S3)
+// resets the session for the next candidate netlist without
+// releasing the engine: the Liberty stays loaded, so a loop that
+// evaluates many candidates pays the library load once.
 class StaEngine {
  public:
   StaEngine();
@@ -157,6 +160,21 @@ class StaEngine {
   // Reads one SPEF parasitics file. Fails with kIoError when the
   // file cannot be read or does not parse.
   Status ReadSpef(const std::string& path);
+  // Clears the timing graph, the SDC and the parasitics, and
+  // resets the linked and constrained flags, so the session can
+  // evaluate another netlist: ReadVerilog, LinkDesign and
+  // ReadSdc run again on the cleared session, and the slack
+  // queries work exactly as on the first design. Module
+  // definitions are replaced when the next netlist is read
+  // (upstream deletes a same-named cell before redefining it),
+  // and the Liberty libraries are NOT cleared: upstream keeps
+  // its library scenes across a clear, which is what makes a
+  // multi-candidate loop session-resident instead of a fresh
+  // session per candidate. A cleared session answers no slack
+  // query until it is linked and constrained again. Fails with
+  // kInvalidState when the engine does not own the upstream
+  // singleton.
+  Status ClearDesign();
 
   // Worst setup (max) slack in nanoseconds. Fails with
   // kInvalidState before the design is linked and constrained.

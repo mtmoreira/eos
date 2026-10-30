@@ -600,6 +600,372 @@ Status AbcEngine::MapTechnology(const std::string& input_network,
   return Status::Ok();
 }
 
+// --- The single-function library guard (synthesis unit S3). ---
+//
+// Upstream ABC's map path aborts the process when the library
+// yields exactly one root gate: Mio_CollectRoots sorts its root
+// list and then asserts the first element compares less than or
+// equal to the last, which a one-element list fails by
+// self-comparison (mioUtils.c, Mio_DelayCompare's assert(0)).
+// Roots are distinct function truths, excluding constants (the
+// all-0 and all-1 truths, skipped by Mio itself) and the
+// identity truth (buffers, whose truth Mio skips
+// unconditionally); the inverter truth counts as a root. This
+// was measured, not assumed: AND+BUF aborts, AND alone aborts,
+// AND+AND2_FAST+BUF aborts (one truth), while AND+OR+BUF maps
+// and AND+INV+BUF maps. A one-truth library is therefore refused
+// here with a clean Status before ABC runs, so the loop records
+// it as a failed strategy instead of the process dying mid-loop.
+// The guard is conservative in the safe direction: any genlib it
+// cannot parse cleanly is left for ABC to accept or reject as
+// before (it returns -1), and only a cleanly parsed one-truth
+// library is refused.
+namespace {
+
+// One node of a parsed genlib function expression.
+struct GenlibExpr {
+  enum class Kind { kVar, kConst, kNot, kAnd, kOr, kXor };
+  Kind kind = Kind::kConst;
+  std::string var;
+  bool value = false;
+  std::vector<GenlibExpr> children;
+};
+
+struct GenlibExprParser {
+  std::string text;
+  std::size_t pos = 0;
+  std::vector<std::string> vars;
+  bool failed = false;
+
+  void SkipSpace() {
+    while (pos < text.size() &&
+           std::isspace(static_cast<unsigned char>(text[pos]))) {
+      ++pos;
+    }
+  }
+
+  GenlibExpr ParseOr() {
+    GenlibExpr left = ParseXor();
+    while (true) {
+      SkipSpace();
+      if (pos >= text.size() || text[pos] != '+') break;
+      ++pos;
+      GenlibExpr right = ParseXor();
+      GenlibExpr node;
+      node.kind = GenlibExpr::Kind::kOr;
+      node.children.push_back(std::move(left));
+      node.children.push_back(std::move(right));
+      left = std::move(node);
+    }
+    return left;
+  }
+
+  GenlibExpr ParseXor() {
+    GenlibExpr left = ParseAnd();
+    while (true) {
+      SkipSpace();
+      if (pos >= text.size() || text[pos] != '^') break;
+      ++pos;
+      GenlibExpr right = ParseAnd();
+      GenlibExpr node;
+      node.kind = GenlibExpr::Kind::kXor;
+      node.children.push_back(std::move(left));
+      node.children.push_back(std::move(right));
+      left = std::move(node);
+    }
+    return left;
+  }
+
+  GenlibExpr ParseAnd() {
+    GenlibExpr left = ParseUnary();
+    while (true) {
+      SkipSpace();
+      if (pos >= text.size() || text[pos] != '*') break;
+      ++pos;
+      GenlibExpr right = ParseUnary();
+      GenlibExpr node;
+      node.kind = GenlibExpr::Kind::kAnd;
+      node.children.push_back(std::move(left));
+      node.children.push_back(std::move(right));
+      left = std::move(node);
+    }
+    return left;
+  }
+
+  GenlibExpr ParseUnary() {
+    SkipSpace();
+    if (pos < text.size() && text[pos] == '!') {
+      ++pos;
+      GenlibExpr node;
+      node.kind = GenlibExpr::Kind::kNot;
+      node.children.push_back(ParseUnary());
+      return node;
+    }
+    return ParsePrimary();
+  }
+
+  GenlibExpr ParsePrimary() {
+    SkipSpace();
+    GenlibExpr node;
+    if (pos >= text.size()) {
+      failed = true;
+      return node;
+    }
+    const char c = text[pos];
+    if (c == '(') {
+      ++pos;
+      node = ParseOr();
+      SkipSpace();
+      if (pos >= text.size() || text[pos] != ')') {
+        failed = true;
+        return node;
+      }
+      ++pos;
+      return node;
+    }
+    if (c == '0' || c == '1') {
+      ++pos;
+      node.kind = GenlibExpr::Kind::kConst;
+      node.value = c == '1';
+      return node;
+    }
+    if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
+      std::size_t j = pos;
+      while (j < text.size() &&
+             (std::isalnum(static_cast<unsigned char>(text[j])) ||
+              text[j] == '_')) {
+        ++j;
+      }
+      node.kind = GenlibExpr::Kind::kVar;
+      node.var = text.substr(pos, j - pos);
+      pos = j;
+      if (std::find(vars.begin(), vars.end(), node.var) ==
+          vars.end()) {
+        vars.push_back(node.var);
+      }
+      return node;
+    }
+    failed = true;
+    return node;
+  }
+};
+
+bool EvalGenlibExpr(const GenlibExpr& expr,
+                    const std::vector<std::string>& vars,
+                    unsigned long long assignment) {
+  switch (expr.kind) {
+    case GenlibExpr::Kind::kConst:
+      return expr.value;
+    case GenlibExpr::Kind::kVar: {
+      const auto at =
+          std::find(vars.begin(), vars.end(), expr.var);
+      if (at == vars.end()) return false;
+      const std::size_t index =
+          static_cast<std::size_t>(at - vars.begin());
+      return (assignment >> index) & 1ULL;
+    }
+    case GenlibExpr::Kind::kNot:
+      return !EvalGenlibExpr(expr.children[0], vars, assignment);
+    case GenlibExpr::Kind::kAnd:
+      return EvalGenlibExpr(expr.children[0], vars, assignment) &&
+             EvalGenlibExpr(expr.children[1], vars, assignment);
+    case GenlibExpr::Kind::kOr:
+      return EvalGenlibExpr(expr.children[0], vars, assignment) ||
+             EvalGenlibExpr(expr.children[1], vars, assignment);
+    case GenlibExpr::Kind::kXor:
+      return EvalGenlibExpr(expr.children[0], vars, assignment) !=
+             EvalGenlibExpr(expr.children[1], vars, assignment);
+  }
+  return false;
+}
+
+// Counts the distinct root functions of a genlib file: the
+// distinct function truths, excluding constants and the identity
+// truth. Returns -1 when the file cannot be parsed cleanly (the
+// caller then leaves the library for ABC to accept or reject);
+// a gate with more than six inputs falls back to its stripped
+// function string as its signature, since its truth table no
+// longer fits the 64-bit form Mio itself uses.
+int CountGenlibRootFunctions(const std::string& genlib_path) {
+  const std::string text = ReadTextFile(genlib_path);
+  if (text.empty()) return -1;
+  std::set<std::string> signatures;
+  std::size_t pos = 0;
+  bool any_gate = false;
+  while (true) {
+    const std::size_t at = text.find("GATE", pos);
+    if (at == std::string::npos) break;
+    // GATE must be a token of its own, not part of another word.
+    if ((at > 0 &&
+         (std::isalnum(static_cast<unsigned char>(text[at - 1])) ||
+          text[at - 1] == '_')) ||
+        (at + 4 < text.size() &&
+         !std::isspace(static_cast<unsigned char>(text[at + 4])))) {
+      pos = at + 4;
+      continue;
+    }
+    std::size_t i = at + 4;
+    const auto skip_space = [&]() {
+      while (i < text.size() &&
+             std::isspace(static_cast<unsigned char>(text[i]))) {
+        ++i;
+      }
+    };
+    const auto read_token = [&]() {
+      skip_space();
+      const std::size_t start = i;
+      while (i < text.size() &&
+             (std::isalnum(static_cast<unsigned char>(text[i])) ||
+              text[i] == '_')) {
+        ++i;
+      }
+      return text.substr(start, i - start);
+    };
+    if (read_token().empty()) return -1;
+    if (read_token().empty()) return -1;
+    skip_space();
+    // The output assignment: <output>=<function>;
+    const std::size_t equals = text.find('=', i);
+    const std::size_t semi = text.find(';', i);
+    if (equals == std::string::npos || semi == std::string::npos ||
+        equals > semi) {
+      return -1;
+    }
+    std::string function;
+    for (std::size_t k = equals + 1; k < semi; ++k) {
+      if (!std::isspace(static_cast<unsigned char>(text[k]))) {
+        function += text[k];
+      }
+    }
+    if (function.empty()) return -1;
+    any_gate = true;
+    GenlibExprParser parser;
+    parser.text = function;
+    GenlibExpr expr = parser.ParseOr();
+    parser.SkipSpace();
+    if (parser.failed || parser.pos != function.size()) return -1;
+    const std::vector<std::string>& vars = parser.vars;
+    if (vars.size() > 6) {
+      signatures.insert(function);
+      pos = semi + 1;
+      continue;
+    }
+    const unsigned long long count = 1ULL << vars.size();
+    unsigned long long signature = 0;
+    for (unsigned long long a = 0; a < count; ++a) {
+      if (EvalGenlibExpr(expr, vars, a)) signature |= (1ULL << a);
+    }
+    const unsigned long long all =
+        count == 64 ? ~0ULL : ((1ULL << count) - 1ULL);
+    if (signature == 0 || signature == all) {
+      pos = semi + 1;
+      continue;
+    }
+    bool identity = false;
+    for (std::size_t v = 0; v < vars.size(); ++v) {
+      unsigned long long var_signature = 0;
+      for (unsigned long long a = 0; a < count; ++a) {
+        if ((a >> v) & 1ULL) var_signature |= (1ULL << a);
+      }
+      if (signature == var_signature) identity = true;
+    }
+    if (identity) {
+      pos = semi + 1;
+      continue;
+    }
+    signatures.insert(std::to_string(signature));
+    pos = semi + 1;
+  }
+  if (!any_gate) return -1;
+  return static_cast<int>(signatures.size());
+}
+
+}  // namespace
+
+Status AbcEngine::OptimizeMapped(const std::string& input_verilog,
+                                 const std::string& genlib_path,
+                                 OptStrategy strategy,
+                                 const std::string& output_verilog) {
+  if (impl_->frame == nullptr) {
+    return Status::Error(
+        ErrorCode::kInvalidState,
+        "another AbcEngine owns the upstream ABC frame; ABC "
+        "sessions must not overlap");
+  }
+  if (!std::filesystem::exists(input_verilog)) {
+    return IoError("input netlist not found", input_verilog);
+  }
+  if (!std::filesystem::exists(genlib_path)) {
+    return IoError("genlib library not found", genlib_path);
+  }
+  // The single-function guard above runs before ABC is touched:
+  // a library that yields exactly one root function aborts
+  // upstream's map, and no strategy result is worth a dead
+  // process. A library the guard cannot parse is left for ABC.
+  if (CountGenlibRootFunctions(genlib_path) == 1) {
+    return Status::Error(
+        ErrorCode::kInvalidArgument,
+        "genlib library yields a single mapping function besides "
+        "buffers and constants; ABC's map aborts on such a "
+        "library (upstream Mio_CollectRoots self-compare), so "
+        "the strategy is refused here: " +
+            genlib_path);
+  }
+  // Each step runs as its own checked command, as in
+  // MapTechnology: the interpreter continues a semicolon script
+  // after a failed step, so a single script could map a stale
+  // network and report a result that never happened. The input
+  // is read as mapped: with a library loaded, ABC's Verilog
+  // reader refuses a gate netlist without the mapped flag.
+  impl_->Restart();
+  {
+    std::error_code ec;
+    std::filesystem::remove(output_verilog, ec);
+  }
+  Status status = impl_->Execute("read_library " + Quote(genlib_path),
+                                 "genlib read");
+  if (!status.ok()) return status;
+  status = impl_->Execute("read -m " + Quote(input_verilog),
+                          "mapped netlist read");
+  if (!status.ok()) return status;
+  status = impl_->Execute("strash", "structural hashing");
+  if (!status.ok()) return status;
+  std::vector<const char*> steps;
+  const char* map_command = "map";
+  switch (strategy) {
+    case OptStrategy::kClassic:
+      steps = {"balance", "rewrite", "refactor", "resub", "balance"};
+      break;
+    case OptStrategy::kChoice:
+      steps = {"dch"};
+      break;
+    case OptStrategy::kAbc9:
+      steps = {"&get", "&dc2", "&put"};
+      break;
+    case OptStrategy::kRetime:
+      steps = {"retime"};
+      break;
+    case OptStrategy::kDelay:
+      break;
+    case OptStrategy::kArea:
+      map_command = "map -a";
+      break;
+  }
+  for (const char* step : steps) {
+    status = impl_->Execute(step, "strategy step");
+    if (!status.ok()) return status;
+  }
+  status = impl_->Execute(map_command, "technology mapping");
+  if (!status.ok()) return status;
+  status = impl_->Execute("write_verilog " + Quote(output_verilog),
+                          "mapped netlist write");
+  if (!status.ok()) return status;
+  if (!std::filesystem::exists(output_verilog)) {
+    return IoError("ABC wrote no mapped netlist", output_verilog);
+  }
+  return Status::Ok();
+}
+
 // Parses one print_stats line: "  and =%7d ... lev =%3d".
 // Returns false when either number is absent, so a caller never
 // mistakes an unreadable stats line for a measured zero.

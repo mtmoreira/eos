@@ -1,6 +1,7 @@
 // Unit tests: ui/registry and the core command set.
 #include "eos/ui/registry.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -55,8 +56,10 @@ TEST(Registry, UnknownCommandIsAnInvalidCommandDiagnostic) {
 TEST(Registry, CoreSetIsComplete) {
   Shell shell;
   // The count is a contract: adding a command means updating it.
-  // S1 adds elaborate and synth_generic; S2 adds synth_map.
-  EXPECT_EQ(shell.registry.Names().size(), 41u);
+  // S1 adds elaborate and synth_generic; S2 adds synth_map; S3
+  // adds synth_opt.
+  EXPECT_EQ(shell.registry.Names().size(), 42u);
+  EXPECT_NE(shell.registry.Find("synth_opt"), nullptr);
   EXPECT_NE(shell.registry.Find("create_design"), nullptr);
   EXPECT_NE(shell.registry.Find("restore"), nullptr);
   EXPECT_NE(shell.registry.Find("report_timing"), nullptr);
@@ -1252,6 +1255,423 @@ TEST(CoreCommands, SynthMapRejectsSequentialDesigns) {
   EXPECT_TRUE(shell.ctx.synth.elaborated);
   EXPECT_EQ(shell.ctx.synth.elaborated_cells, 3);
   EXPECT_FALSE(shell.ctx.synth.mapped);
+}
+
+// The S3 loop fixtures: a two-output design whose outputs both
+// compute the same four-input AND (AND is commutative, so ABC's
+// structural hashing shares the tree), a Liberty with a slow
+// cheap AND2 and a fast expensive AND2_FAST for the same
+// function, plus INV and BUF. Area mapping shares the tree and
+// drives y2 from y1 through a buffer (three AND2 cells plus one
+// BUF, arrivals 1.2 ns on y1 and 1.6 ns on y2), and the classic
+// strategy duplicates the tree instead (four AND2 cells,
+// arrival 1.2 ns on both endpoints). The fast cell is in the
+// library so the delay strategies have a faster cover to choose
+// from, but ABC's map does not in fact pick it here (measured:
+// the classic candidate is four AND2 cells); the loop's
+// improvement comes from the buffer removal, and the tests
+// assert the measured numbers, not the hoped-for ones. Both
+// input pins of each two-input cell carry a timing arc at the
+// same delay, so the STA arrival does not depend on which pin
+// ABC's mapper wires the deep net to. The library also carries
+// INV: ABC's map aborts on a library that yields exactly one
+// root function, and INV is a second root here, so the loop's
+// strategies run instead of hitting that upstream abort (the
+// abort itself is covered by the facade's single-function
+// refusal test).
+const char kSynthOptLoopDemo[] = R"V(module optloop (a, b, c, d, y1, y2);
+  input a, b, c, d;
+  output y1, y2;
+  assign y1 = ((a & b) & c) & d;
+  assign y2 = ((a & c) & b) & d;
+endmodule
+)V";
+
+const char kSynthOptLiberty[] = R"LIB(library (eos_opt_fixture) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+  cell (AND2) {
+    area : 2.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (B) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A*B";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.6"); }
+        cell_fall (scalar) { values ("0.6"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.6"); }
+        cell_fall (scalar) { values ("0.6"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (AND2_FAST) {
+    area : 4.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (B) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A*B";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (INV) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      timing () {
+        related_pin : "A";
+        timing_sense : negative_unate;
+        cell_rise (scalar) { values ("0.5"); }
+        cell_fall (scalar) { values ("0.5"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (BUF) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.4"); }
+        cell_fall (scalar) { values ("0.4"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+const char kSynthOptSdcTight[] =
+    "create_clock -name vclk -period 1\n"
+    "set_input_delay -clock vclk 0 [all_inputs]\n"
+    "set_output_delay -clock vclk 0 [all_outputs]\n";
+
+// The clears case: a 1.25 ns virtual clock. The area incumbent
+// arrives at 1.2 ns on y1 (slack +0.05 ns, inside the 0.1 ns
+// margin, so y1 is in the working set) and at 1.6 ns on y2
+// (slack -0.35 ns, violating), and the classic strategy's
+// duplicate-tree candidate arrives at 1.2 ns on both, clearing
+// every working-set endpoint in one iteration.
+const char kSynthOptSdcClear[] =
+    "create_clock -name vclk -period 1.25\n"
+    "set_input_delay -clock vclk 0 [all_inputs]\n"
+    "set_output_delay -clock vclk 0 [all_outputs]\n";
+
+const char kSynthOptSdcRelaxed[] =
+    "create_clock -name vclk -period 10\n"
+    "set_input_delay -clock vclk 0 [all_inputs]\n"
+    "set_output_delay -clock vclk 0 [all_outputs]\n";
+
+// Runs the S3 fixture flow to an area-mapped design under the
+// given SDC: scenario, Liberty, Verilog, SDC, elaborate,
+// generic, area mapping. Returns false when any step fails.
+bool SynthOptFlowToMapped(Shell& shell, TimingTempDir& dir,
+                          const char* sdc) {
+  if (!shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+           .ok) {
+    return false;
+  }
+  if (!shell.Run("read_liberty",
+                 {"tt", dir.Write("cells.lib", kSynthOptLiberty)})
+           .ok) {
+    return false;
+  }
+  if (!shell.Run("read_verilog",
+                 {dir.Write("optloop.v", kSynthOptLoopDemo), "optloop"})
+           .ok) {
+    return false;
+  }
+  if (!shell.Run("read_sdc", {dir.Write("top.sdc", sdc)}).ok) {
+    return false;
+  }
+  if (!shell.Run("elaborate").ok) return false;
+  if (!shell.Run("synth_generic").ok) return false;
+  return shell.Run("synth_map", {"-target", "area"}).ok;
+}
+
+double SynthPayloadNumber(const CommandResult& result,
+                          const std::string& key) {
+  const std::size_t at = result.payload.find(key + "=");
+  EXPECT_NE(at, std::string::npos) << "missing " << key;
+  if (at == std::string::npos) return 0.0;
+  return std::stod(result.payload.substr(at + key.size() + 1));
+}
+
+TEST(CoreCommands, SynthOptClearsEveryWorkingSetEndpoint) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+  EXPECT_EQ(shell.ctx.synth.mapped_target, "area");
+  // The area incumbent shares one AND tree between the outputs
+  // (both outputs compute the same four-input AND) and drives
+  // y2 from y1 through a buffer: three AND2 cells plus one BUF,
+  // arrivals 1.2 ns on y1 and 1.6 ns on y2. The classic
+  // candidate duplicates the tree instead (four AND2 cells),
+  // arriving at 1.2 ns on both endpoints.
+  EXPECT_EQ(shell.ctx.synth.mapped_cells, 4);
+  EXPECT_NE(shell.ctx.synth.mapped_types.find("AND2:3"),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.synth.mapped_types.find("BUF:1"),
+            std::string::npos);
+  const CommandResult loop =
+      shell.Run("synth_opt", {"-strategies", "classic"});
+  ASSERT_TRUE(loop.ok) << loop.message;
+  EXPECT_NE(loop.payload.find("iterations=1"), std::string::npos);
+  EXPECT_NE(loop.payload.find("winner=classic"), std::string::npos);
+  EXPECT_NE(loop.payload.find("committed=classic"), std::string::npos);
+  EXPECT_NE(loop.payload.find("sta_sessions=1"), std::string::npos);
+  EXPECT_NE(loop.payload.find("sta_evaluations=2"), std::string::npos);
+  EXPECT_NE(loop.payload.find("still_violating=none"),
+            std::string::npos);
+  EXPECT_NE(loop.payload.find("equivalence_rejected=0"),
+            std::string::npos);
+  EXPECT_NE(loop.payload.find("failed_strategies=none"),
+            std::string::npos);
+  EXPECT_NEAR(SynthPayloadNumber(loop, "baseline_worst_slack_ns"),
+              -0.35, 1e-4);
+  EXPECT_NEAR(
+      SynthPayloadNumber(loop, "baseline_total_negative_slack_ns"),
+      -0.35, 1e-4);
+  EXPECT_NEAR(SynthPayloadNumber(loop, "final_worst_slack_ns"), 0.05,
+              1e-4);
+  EXPECT_NEAR(
+      SynthPayloadNumber(loop, "final_total_negative_slack_ns"),
+      0.0, 1e-4);
+  // Two working-set endpoints, both cleared: the endpoints list
+  // carries two pin:slack entries.
+  const std::size_t endpoints_at =
+      loop.payload.find("endpoints=");
+  ASSERT_NE(endpoints_at, std::string::npos);
+  const std::size_t endpoints_end =
+      loop.payload.find(' ', endpoints_at);
+  const std::string endpoints = loop.payload.substr(
+      endpoints_at + 10,
+      endpoints_end == std::string::npos
+          ? std::string::npos
+          : endpoints_end - endpoints_at - 10);
+  EXPECT_EQ(std::count(endpoints.begin(), endpoints.end(), ','), 1);
+  EXPECT_TRUE(shell.ctx.synth.opt_run);
+  EXPECT_EQ(shell.ctx.synth.opt_winner, "classic");
+  EXPECT_EQ(shell.ctx.synth.opt_iterations, 1);
+  EXPECT_TRUE(shell.ctx.synth.opt_still_violating.empty());
+  EXPECT_EQ(shell.ctx.synth.opt_cells, 4);
+  EXPECT_NE(shell.ctx.synth.opt_types.find("AND2:4"),
+            std::string::npos);
+  EXPECT_EQ(shell.ctx.timing.verilog_path,
+            shell.ctx.synth.opt_verilog);
+  // The next run_timing is the STA on the optimized netlist and
+  // must reproduce the loop's final record.
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  EXPECT_NEAR(SynthPayloadNumber(run, "worst_slack_ns"), 0.05, 1e-4);
+  EXPECT_NEAR(SynthPayloadNumber(run, "total_negative_slack_ns"),
+              0.0, 1e-4);
+}
+
+// The improves-but-does-not-clear case, at the tight 1 ns clock:
+// the same classic candidate improves every working-set endpoint
+// (y2 from -0.6 ns to -0.2 ns, y1 held at -0.2 ns, no regression)
+// without clearing either, so a second iteration finds no
+// further improvement and the loop reports exactly which
+// endpoints still violate. This is the acceptance's second
+// branch: improve every endpoint, or report the rest exactly.
+TEST(CoreCommands, SynthOptImprovesEveryEndpointAndReportsTheRest) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcTight));
+  const CommandResult loop =
+      shell.Run("synth_opt", {"-strategies", "classic"});
+  ASSERT_TRUE(loop.ok) << loop.message;
+  EXPECT_NE(loop.payload.find("iterations=2"), std::string::npos);
+  EXPECT_NE(loop.payload.find("winner=classic"), std::string::npos);
+  EXPECT_NE(loop.payload.find("committed=classic"), std::string::npos);
+  EXPECT_NE(loop.payload.find("sta_sessions=1"), std::string::npos);
+  EXPECT_NE(loop.payload.find("sta_evaluations=3"), std::string::npos);
+  EXPECT_NE(loop.payload.find("equivalence_rejected=0"),
+            std::string::npos);
+  EXPECT_NE(loop.payload.find("failed_strategies=none"),
+            std::string::npos);
+  EXPECT_EQ(loop.payload.find("still_violating=none"),
+            std::string::npos);
+  EXPECT_NEAR(SynthPayloadNumber(loop, "baseline_worst_slack_ns"),
+              -0.6, 1e-4);
+  EXPECT_NEAR(
+      SynthPayloadNumber(loop, "baseline_total_negative_slack_ns"),
+      -0.8, 1e-4);
+  EXPECT_NEAR(SynthPayloadNumber(loop, "final_worst_slack_ns"), -0.2,
+              1e-4);
+  EXPECT_NEAR(
+      SynthPayloadNumber(loop, "final_total_negative_slack_ns"),
+      -0.4, 1e-4);
+  EXPECT_TRUE(shell.ctx.synth.opt_run);
+  EXPECT_EQ(shell.ctx.synth.opt_winner, "classic");
+  EXPECT_EQ(shell.ctx.synth.opt_iterations, 2);
+  EXPECT_EQ(shell.ctx.synth.opt_still_violating.size(), 2u);
+  EXPECT_EQ(shell.ctx.synth.opt_cells, 4);
+  EXPECT_NE(shell.ctx.synth.opt_types.find("AND2:4"),
+            std::string::npos);
+  EXPECT_EQ(shell.ctx.timing.verilog_path,
+            shell.ctx.synth.opt_verilog);
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  EXPECT_NEAR(SynthPayloadNumber(run, "worst_slack_ns"), -0.2, 1e-4);
+  EXPECT_NEAR(SynthPayloadNumber(run, "total_negative_slack_ns"),
+              -0.4, 1e-4);
+}
+
+TEST(CoreCommands, SynthOptLeavesACleanDesignAlone) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcRelaxed));
+  // At the relaxed clock the area incumbent meets timing with
+  // 8.8 ns of slack, so the working set is empty and no strategy
+  // runs: the one STA evaluation is the baseline alone.
+  const CommandResult loop = shell.Run("synth_opt");
+  ASSERT_TRUE(loop.ok) << loop.message;
+  EXPECT_NE(loop.payload.find("iterations=0"), std::string::npos);
+  EXPECT_NE(loop.payload.find("winner=none"), std::string::npos);
+  EXPECT_NE(loop.payload.find("working_set=none"), std::string::npos);
+  EXPECT_NE(loop.payload.find("sta_evaluations=1"), std::string::npos);
+  EXPECT_NE(loop.payload.find("sta_sessions=1"), std::string::npos);
+  EXPECT_NE(loop.payload.find("still_violating=none"),
+            std::string::npos);
+  EXPECT_EQ(shell.ctx.synth.opt_iterations, 0);
+  EXPECT_TRUE(shell.ctx.synth.opt_winner.empty());
+  EXPECT_EQ(shell.ctx.synth.opt_verilog,
+            shell.ctx.synth.mapped_verilog);
+}
+
+TEST(CoreCommands, SynthOptReportsStillViolatingAtTheCap) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcTight));
+  // The area strategy on the area incumbent cannot improve it,
+  // so the single allowed iteration ends with both endpoints
+  // still violating, named exactly, and the incumbent untouched.
+  const CommandResult loop = shell.Run(
+      "synth_opt", {"-strategies", "area", "-max_iterations", "1"});
+  ASSERT_TRUE(loop.ok) << loop.message;
+  EXPECT_NE(loop.payload.find("iterations=1"), std::string::npos);
+  EXPECT_NE(loop.payload.find("winner=none"), std::string::npos);
+  EXPECT_NE(loop.payload.find("committed=none"), std::string::npos);
+  EXPECT_NE(loop.payload.find("failed_strategies=none"),
+            std::string::npos);
+  EXPECT_NE(loop.payload.find("equivalence_rejected=0"),
+            std::string::npos);
+  EXPECT_EQ(loop.payload.find("still_violating=none"),
+            std::string::npos);
+  const std::size_t at = loop.payload.find("still_violating=");
+  ASSERT_NE(at, std::string::npos);
+  const std::size_t end = loop.payload.find(' ', at);
+  const std::string still = loop.payload.substr(
+      at + 16,
+      end == std::string::npos ? std::string::npos : end - at - 16);
+  EXPECT_EQ(std::count(still.begin(), still.end(), ','), 1);
+  EXPECT_TRUE(shell.ctx.synth.opt_still_violating.size() == 2u);
+  EXPECT_EQ(shell.ctx.synth.opt_verilog,
+            shell.ctx.synth.mapped_verilog);
+}
+
+TEST(CoreCommands, SynthOptRejectsBadOptionsAndLeavesState) {
+  Shell shell;
+  EXPECT_FALSE(shell.Run("synth_opt").ok);
+  TimingTempDir dir;
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optloop.v", kSynthOptLoopDemo), "optloop"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  EXPECT_FALSE(shell.Run("synth_opt", {"-bogus", "1"}).ok);
+  EXPECT_FALSE(shell.Run("synth_opt", {"-strategies"}).ok);
+  EXPECT_FALSE(
+      shell.Run("synth_opt", {"-strategies", "sideways"}).ok);
+  EXPECT_FALSE(
+      shell.Run("synth_opt", {"-strategies", "classic,classic"})
+          .ok);
+  EXPECT_FALSE(shell.Run("synth_opt", {"-strategies", ""}).ok);
+  EXPECT_FALSE(shell.Run("synth_opt", {"-margin"}).ok);
+  EXPECT_FALSE(shell.Run("synth_opt", {"-margin", "-1"}).ok);
+  EXPECT_FALSE(shell.Run("synth_opt", {"-margin", "abc"}).ok);
+  EXPECT_FALSE(shell.Run("synth_opt", {"-max_iterations"}).ok);
+  EXPECT_FALSE(shell.Run("synth_opt", {"-max_iterations", "0"}).ok);
+  EXPECT_FALSE(shell.Run("synth_opt", {"-max_iterations", "x"}).ok);
+  EXPECT_FALSE(shell.Run("synth_opt", {"-margin", "0.1", "-margin",
+                                       "0.2"})
+                   .ok);
+  // Every rejection happened before any engine ran, and none of
+  // them mapped the design, so the elaborated state is untouched.
+  EXPECT_TRUE(shell.ctx.synth.elaborated);
+  EXPECT_FALSE(shell.ctx.synth.mapped);
+  EXPECT_FALSE(shell.ctx.synth.opt_run);
+}
+
+TEST(CoreCommands, SynthOptRequiresAnSdc) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kSynthOptLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optloop.v", kSynthOptLoopDemo), "optloop"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_map", {"-liberty", dir.Path("cells.lib")})
+                    .ok);
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+  const CommandResult loop = shell.Run("synth_opt");
+  EXPECT_FALSE(loop.ok);
+  EXPECT_NE(loop.message.find("SDC"), std::string::npos);
 }
 
 TEST(CoreCommands, ImportOdbLoadsTheDatabase) {

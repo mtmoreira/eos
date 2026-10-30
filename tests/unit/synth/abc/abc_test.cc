@@ -382,6 +382,118 @@ TEST(AbcFacade, MapTechnologyDelayAndAreaMapTheChain) {
   EXPECT_EQ(missing_lib.code(), foundation::ErrorCode::kIoError);
 }
 
+// Synthesis unit S3: the loop's strategy set, applied to an
+// already mapped netlist. The classic strategy folds the double
+// inversion the mapped cone carries, and the result still proves
+// equivalent to the cone it came from.
+TEST(AbcFacade, OptimizeMappedClassicFoldsTheDoubleInversion) {
+  TempDir dir;
+  const std::string genlib = dir.Write("cells.genlib", kGenlib);
+  const std::string cone = dir.Write("cone.v", kCone);
+  const std::string optimized = dir.Path("classic.v");
+  AbcEngine engine;
+  ASSERT_TRUE(engine.OptimizeMapped(cone, genlib, OptStrategy::kClassic,
+                                     optimized)
+                  .ok());
+  const std::string text = ReadFile(optimized);
+  EXPECT_NE(text.find("AND2_X1"), std::string::npos);
+  EXPECT_EQ(text.find("INV_X1"), std::string::npos);
+  const auto verdict = engine.ProveEquivalent(cone, optimized, genlib);
+  ASSERT_TRUE(verdict.ok()) << verdict.status().message();
+  EXPECT_EQ(verdict.value(), EquivalenceVerdict::kEquivalent);
+}
+
+// Every strategy of the loop's set, run on the same mapped cone:
+// each one must write a netlist that proves equivalent to the
+// cone it came from. This is the measured behaviour at this pin:
+// retime on a latch-free network has nothing to retime, so it
+// maps the cone unchanged rather than failing, and still proves
+// equivalent; the loop's failed-strategy path is covered at the
+// command level by the missing-input and bad-option tests, and
+// a candidate that is not kEquivalent is never committed.
+TEST(AbcFacade, OptimizeMappedStrategiesProveEquivalent) {
+  TempDir dir;
+  const std::string genlib = dir.Write("cells.genlib", kGenlib);
+  const std::string cone = dir.Write("cone.v", kCone);
+  const OptStrategy strategies[] = {
+      OptStrategy::kClassic, OptStrategy::kChoice, OptStrategy::kAbc9,
+      OptStrategy::kRetime, OptStrategy::kDelay, OptStrategy::kArea,
+  };
+  for (const OptStrategy strategy : strategies) {
+    AbcEngine engine;
+    const std::string out = dir.Path("strategy.v");
+    const auto status = engine.OptimizeMapped(cone, genlib, strategy, out);
+    ASSERT_TRUE(status.ok()) << status.message();
+    const auto verdict = engine.ProveEquivalent(cone, out, genlib);
+    ASSERT_TRUE(verdict.ok()) << verdict.status().message();
+    EXPECT_EQ(verdict.value(), EquivalenceVerdict::kEquivalent);
+  }
+}
+
+TEST(AbcFacade, OptimizeMappedMissingInputFailsWithIoError) {
+  TempDir dir;
+  const std::string genlib = dir.Write("cells.genlib", kGenlib);
+  AbcEngine engine;
+  const auto status = engine.OptimizeMapped(dir.Path("missing.v"), genlib,
+                                            OptStrategy::kClassic,
+                                            dir.Path("out.v"));
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), foundation::ErrorCode::kIoError);
+  EXPECT_FALSE(std::filesystem::exists(dir.Path("out.v")));
+}
+
+// Synthesis unit S3: a genlib that yields exactly one mapping
+// function besides buffers and constants is refused cleanly,
+// because upstream ABC's map aborts the process on such a
+// library (its root collection self-compares a one-element
+// list). Both single-function shapes are covered: one cell, and
+// two cells for the same function (the dedup is by truth, not
+// by cell name). The inverter truth counts as a root, so a
+// library with AND plus INV still maps: that is the measured
+// boundary, and the positive control below pins it.
+TEST(AbcFacade, OptimizeMappedSingleFunctionLibraryFailsCleanly) {
+  TempDir dir;
+  const std::string cone = dir.Write("cone.v", kCone);
+  const std::string one_cell = dir.Write(
+      "one.genlib",
+      "GATE AND2 2 Y=A*B;\nPIN * INV 1 999 0.6 0.0 0.6 0.0;\n"
+      "GATE BUF 1 Y=A;\nPIN * INV 1 999 0.4 0.0 0.4 0.0;\n");
+  const std::string two_cells_one_truth = dir.Write(
+      "two.genlib",
+      "GATE AND2 2 Y=A*B;\nPIN * INV 1 999 0.6 0.0 0.6 0.0;\n"
+      "GATE AND2_FAST 4 Y=A*B;\nPIN * INV 1 999 0.3 0.0 0.3 0.0;\n"
+      "GATE BUF 1 Y=A;\nPIN * INV 1 999 0.4 0.0 0.4 0.0;\n");
+  for (const std::string& genlib : {one_cell, two_cells_one_truth}) {
+    AbcEngine engine;
+    const std::string out = dir.Path("refused.v");
+    const auto status = engine.OptimizeMapped(cone, genlib,
+                                              OptStrategy::kDelay, out);
+    ASSERT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), foundation::ErrorCode::kInvalidArgument);
+    EXPECT_FALSE(std::filesystem::exists(out));
+  }
+  // Positive control: AND plus INV is two roots, so it maps.
+  const std::string and_inv = dir.Write(
+      "andinv.genlib",
+      "GATE AND2 2 Y=A*B;\nPIN * INV 1 999 0.6 0.0 0.6 0.0;\n"
+      "GATE INV 1 Y=!A;\nPIN * INV 1 999 0.5 0.0 0.5 0.0;\n"
+      "GATE BUF 1 Y=A;\nPIN * INV 1 999 0.4 0.0 0.4 0.0;\n");
+  const std::string netlist = dir.Write(
+      "net.v",
+      "module probe (a, b, y);\n"
+      "  input a, b;\n  output y;\n"
+      "  wire n1;\n"
+      "  AND2 u1 (.A(a), .B(b), .Y(n1));\n"
+      "  INV u2 (.A(n1), .Y(y));\nendmodule\n");
+  AbcEngine engine;
+  ASSERT_TRUE(engine.OptimizeMapped(netlist, and_inv,
+                                     OptStrategy::kDelay,
+                                     dir.Path("mapped.v"))
+                  .ok());
+  std::ifstream in(dir.Path("mapped.v"));
+  EXPECT_TRUE(in.good());
+}
+
 TEST(AbcFacade, ProveEquivalentIsUnknownWhenTheProofCannotRun) {
   TempDir dir;
   const std::string genlib = dir.Write("cells.genlib", kGenlib);

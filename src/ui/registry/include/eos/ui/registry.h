@@ -163,6 +163,28 @@ struct CommandContext {
     double mapped_worst_slack_ns = 0.0;
     double mapped_total_negative_slack_ns = 0.0;
     int mapped_electrical_violations = 0;
+    // Synthesis unit S3: the every-path optimization loop's
+    // record. The loop starts from the mapped netlist, or from
+    // the previous loop's winner when the loop runs again, and
+    // on success the timing session is pointed at the winner,
+    // so the next run_timing is the STA on the optimized
+    // netlist. The mapped record above is untouched: it
+    // describes synth_map's output, not the loop's. opt_winner
+    // is the winning strategy's name, or empty when no strategy
+    // improved the incumbent; opt_still_violating lists the
+    // working-set endpoints that still violate at the end of
+    // the run, as "pin:slack_ns" entries, and is empty when the
+    // loop cleared every working-set endpoint (or when the
+    // working set was empty to begin with).
+    bool opt_run = false;
+    std::string opt_winner;
+    int opt_iterations = 0;
+    std::string opt_verilog;
+    std::string opt_types;
+    int opt_cells = 0;
+    double opt_worst_slack_ns = 0.0;
+    double opt_total_negative_slack_ns = 0.0;
+    std::vector<std::string> opt_still_violating;
   };
   SynthSession synth;
 
