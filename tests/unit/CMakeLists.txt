@@ -59,6 +59,19 @@ target_link_libraries(eda_synth_abc_unit_test
   PRIVATE eda_synth_abc GTest::gtest GTest::gtest_main)
 add_test(NAME synth.abc COMMAND eda_synth_abc_unit_test)
 
+# Yosys must be linked whole-archive: it registers its passes and
+# frontends through global constructors, and a plain static-archive
+# pull never includes an object nothing references, so read_verilog
+# (and every other pass) would be unregistered at runtime. This is
+# the mechanism upstream's static users use (its shared default
+# hides it); every consumer of eda_synth_yosys must link it this
+# way, not plain. LINK_LIBRARY needs CMake 3.24 or later.
+add_executable(eda_synth_yosys_unit_test synth/yosys/yosys_test.cc)
+target_link_libraries(eda_synth_yosys_unit_test
+  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,eda_synth_yosys>"
+          GTest::gtest GTest::gtest_main)
+add_test(NAME synth.yosys COMMAND eda_synth_yosys_unit_test)
+
 add_executable(eda_db_odb_unit_test db/odb/odb_test.cc)
 target_link_libraries(eda_db_odb_unit_test
   PRIVATE eda_db_odb GTest::gtest GTest::gtest_main)
