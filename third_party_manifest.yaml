@@ -16,6 +16,7 @@ components:
     licence: ISC
     module: src/synth/yosys
     patches: 0
+    note: "Imported 2026-10-29 by synthesis unit S0: tag v0.70, commit 28ba3cb926fe376fa05ebfc1b921747d011d4557, 845 files, zero patches. Submodule pins inside the import: cxxopts 4bf61f08697b110d9e3991864650a405b3dd515d, symfpu 5d5e50867437fe5cabd6ab5aad3b3808ec86701f."
   - name: abc
     upstream: https://github.com/berkeley-abc/abc
     version: commit 416199292fbd
