@@ -32,5 +32,12 @@ TEST(Result, HoldsStatusOnFailure) {
   EXPECT_EQ(r.status().message(), "old");
 }
 
+// S6 backfill: the rvalue value() overload moves the value out.
+TEST(Result, MoveValueOverload) {
+  Result<std::string> r(std::string("moved"));
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(std::move(r).value(), "moved");
+}
+
 }  // namespace
 }  // namespace eos::foundation

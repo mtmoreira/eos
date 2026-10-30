@@ -556,5 +556,90 @@ TEST(TimingService, OdbWithoutTopBlockIsInvalidState) {
   EXPECT_EQ(results.status().code(), ErrorCode::kInvalidState);
 }
 
+// S6 backfill: ReportPaths at the service level. The fixture's
+// data path is 0.5 ns (0.2 CK->Q plus 0.3 BUF) against a 10 ns
+// clock with a 0.1 ns setup constraint, so the setup worst path
+// arrives at 0.5 ns, is required at 9.9 ns and slacks 9.4 ns,
+// and the hold worst path slacks 0.45 ns.
+TEST(TimingService, ReportPathsReturnsSetupWorstPath) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  PathReportRequest request;
+  const auto reports = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, request);
+  ASSERT_TRUE(reports.ok()) << reports.status().message();
+  ASSERT_EQ(reports.value().size(), 1u);
+  ASSERT_EQ(reports.value()[0].paths.size(), 1u);
+  const PathReport& path = reports.value()[0].paths[0];
+  EXPECT_EQ(path.endpoint, "r2/D");
+  EXPECT_NEAR(path.slack_ns, 9.4, 1e-6);
+  EXPECT_NEAR(path.arrival_ns, 0.5, 1e-6);
+  EXPECT_NEAR(path.required_ns, 9.9, 1e-6);
+  EXPECT_FALSE(path.points.empty());
+  EXPECT_FALSE(path.startpoint.empty());
+}
+
+TEST(TimingService, ReportPathsHoldKindAndEndpointFilter) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  PathReportRequest hold;
+  hold.kind = CheckKind::kHold;
+  const auto held = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, hold);
+  ASSERT_TRUE(held.ok()) << held.status().message();
+  ASSERT_EQ(held.value()[0].paths.size(), 1u);
+  EXPECT_NEAR(held.value()[0].paths[0].slack_ns, 0.45, 1e-6);
+
+  PathReportRequest to;
+  to.endpoint = "r2/D";
+  const auto filtered = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, to);
+  ASSERT_TRUE(filtered.ok()) << filtered.status().message();
+  ASSERT_EQ(filtered.value()[0].paths.size(), 1u);
+  EXPECT_EQ(filtered.value()[0].paths[0].endpoint, "r2/D");
+
+  PathReportRequest unknown;
+  unknown.endpoint = "r9/D";
+  const auto failed = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, unknown);
+  EXPECT_FALSE(failed.ok());
+}
+
+TEST(TimingService, ReportPathsRespectsMaxPathsAndSlackFilter) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  PathReportRequest capped;
+  capped.max_paths = 1;
+  capped.slack_lesser_than = 9.5;
+  const auto one = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, capped);
+  ASSERT_TRUE(one.ok()) << one.status().message();
+  ASSERT_EQ(one.value()[0].paths.size(), 1u);
+  EXPECT_LT(one.value()[0].paths[0].slack_ns, 9.5);
+
+  PathReportRequest none;
+  none.slack_lesser_than = -1.0;
+  const auto empty = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, none);
+  ASSERT_TRUE(empty.ok()) << empty.status().message();
+  EXPECT_TRUE(empty.value()[0].paths.empty());
+
+  PathReportRequest zero;
+  zero.max_paths = 0;
+  const auto rejected = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, zero);
+  ASSERT_FALSE(rejected.ok());
+  EXPECT_EQ(rejected.status().code(), ErrorCode::kInvalidArgument);
+}
+
 }  // namespace
 }  // namespace eos::analysis

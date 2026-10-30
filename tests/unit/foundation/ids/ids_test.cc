@@ -85,5 +85,17 @@ TEST(IdAllocator, ExhaustionIsAnErrorNotAReuse) {
   EXPECT_EQ(over.status().code(), ErrorCode::kOutOfRange);
 }
 
+// S6 backfill: ordering is raw-value order, so kind dominates index.
+TEST(ObjectId, OrderingIsKindThenIndex) {
+  const ObjectId a = ObjectId::Make(ObjectKind::kInstance, 2);
+  const ObjectId b = ObjectId::Make(ObjectKind::kInstance, 10);
+  const ObjectId c = ObjectId::Make(ObjectKind::kNet, 1);
+  EXPECT_TRUE(a < b);
+  EXPECT_FALSE(b < a);
+  EXPECT_FALSE(a < a);
+  EXPECT_TRUE(b < c);
+  EXPECT_TRUE(a != b);
+}
+
 }  // namespace
 }  // namespace eos::foundation

@@ -114,5 +114,38 @@ TEST(Constraints, RebindResolvesWhatTheDesignGained) {
   EXPECT_TRUE(set.Coverage().complete());
 }
 
+// S6 backfill: ExportState/FromState round-trips bound and
+// unresolved constraints with their coverage counts, and the
+// restored set still rebinds against the design.
+TEST(Constraints, StateRoundTripPreservesBindingsAndCoverage) {
+  Fixture f;
+  ConstraintSet set;
+  const ConstraintId bound =
+      set.Add(ConstraintKind::kClock, "clk_100", "clk", f.design);
+  const ConstraintId open =
+      set.Add(ConstraintKind::kInputDelay, "din", "missing", f.design);
+  const ConstraintState state = set.ExportState();
+  foundation::Result<ConstraintSet> restored =
+      ConstraintSet::FromState(state);
+  ASSERT_TRUE(restored.ok()) << restored.status().message();
+  ConstraintSet& back = restored.value();
+  EXPECT_EQ(back.all().size(), 2u);
+  const Constraint* rb = back.Find(bound);
+  ASSERT_NE(rb, nullptr);
+  EXPECT_EQ(rb->status, BindingStatus::kBound);
+  EXPECT_EQ(rb->bound_object, f.clk_port);
+  const Constraint* ro = back.Find(open);
+  ASSERT_NE(ro, nullptr);
+  EXPECT_EQ(ro->status, BindingStatus::kUnresolved);
+  const CoverageReport coverage = back.Coverage();
+  EXPECT_EQ(coverage.total, 2u);
+  EXPECT_EQ(coverage.bound, 1u);
+  EXPECT_EQ(coverage.unresolved, 1u);
+  EXPECT_FALSE(coverage.complete());
+  back.RebindAll(f.design);
+  EXPECT_EQ(back.Find(bound)->status, BindingStatus::kBound);
+  EXPECT_EQ(back.Find(open)->status, BindingStatus::kUnresolved);
+}
+
 }  // namespace
 }  // namespace eos::db
