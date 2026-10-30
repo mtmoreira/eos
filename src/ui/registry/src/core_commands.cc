@@ -272,6 +272,93 @@ std::string CellTypesText(const std::map<std::string, int>& by_type) {
   return types;
 }
 
+// File-list format (synthesis unit S4): one source entry per
+// line. Blank lines are ignored, and a line whose first
+// non-blank characters are '#' or '//' is a comment. An entry
+// is resolved against the list file's directory unless it is
+// absolute; a list given with no directory (a bare filename)
+// resolves its entries against the working directory, which
+// is where the list itself lives. The format is deliberately
+// narrow: no inline comments, no wildcards, no nesting, so a
+// list always means exactly the entries it names, in order.
+// This is EOS-owned input handling, not upstream's
+// read_verilog_file_list: that pass takes no -I or -D flags
+// and aborts the process (exit 1) on a missing list file,
+// while this command fails fast with a Status naming the
+// list and the entry. File scope, not a registration-local
+// lambda: command handlers outlive the registration function,
+// so anything they capture must outlive it too.
+struct FilelistEntry {
+  std::string as_written;
+  std::string resolved;
+};
+
+std::string TrimFilelistLine(const std::string& text) {
+  const std::size_t first = text.find_first_not_of(" \t\r");
+  if (first == std::string::npos) return std::string();
+  const std::size_t last = text.find_last_not_of(" \t\r");
+  return text.substr(first, last - first + 1);
+}
+
+// A -D token is NAME or NAME=VALUE, where NAME is a plain
+// Verilog identifier, and neither a define token nor an
+// include directory may contain whitespace or ';': both are
+// interpolated into a Yosys pass command string, which Yosys
+// tokenizes on whitespace and splits on ';' (the same rule
+// that makes a top name a plain identifier in the facade).
+// The registry validates these before the engine runs, so a
+// bad flag is a pre-engine rejection that leaves the session
+// untouched; the facade validates again as a public surface.
+bool IsFilelistCommandToken(const std::string& token) {
+  for (const char c : token) {
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ';') {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsFilelistDefine(const std::string& define) {
+  if (define.empty() || !IsFilelistCommandToken(define)) return false;
+  const std::size_t equal = define.find('=');
+  const std::string name =
+      equal == std::string::npos ? define : define.substr(0, equal);
+  if (name.empty()) return false;
+  const auto is_alpha = [](char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+  };
+  const auto is_digit = [](char c) { return c >= '0' && c <= '9'; };
+  if (!is_alpha(name[0])) return false;
+  for (std::size_t i = 1; i < name.size(); ++i) {
+    if (!is_alpha(name[i]) && !is_digit(name[i])) return false;
+  }
+  return true;
+}
+
+// Reads one list file into entries. Returns an error string on
+// failure, empty on success; an empty list is not an error
+// here, the caller reports it with the list's name.
+std::string ReadFilelistEntries(const std::string& list_path,
+                                std::vector<FilelistEntry>* entries) {
+  std::ifstream in(list_path);
+  if (!in.good()) return "could not read file: " + list_path;
+  const std::filesystem::path base =
+      std::filesystem::path(list_path).parent_path();
+  std::string line;
+  while (std::getline(in, line)) {
+    const std::string entry = TrimFilelistLine(line);
+    if (entry.empty()) continue;
+    if (entry[0] == '#') continue;
+    if (entry.size() >= 2 && entry[0] == '/' && entry[1] == '/') {
+      continue;
+    }
+    std::filesystem::path resolved(entry);
+    if (!resolved.is_absolute()) resolved = base / resolved;
+    entries->push_back(FilelistEntry{entry, resolved.string()});
+  }
+  return std::string();
+}
+
 std::string SynthStatsText(const synth::YosysNetlistStats& stats) {
   std::string types;
   for (const synth::YosysCellTypeCount& entry : stats.cells_by_type) {
@@ -1412,6 +1499,165 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.timing.liberty_by_corner[args[0]] = args[1];
         return CommandResult::Ok("corner=" + args[0] +
                                  " liberty=" + args[1]);
+      });
+
+  add("read_filelist",
+      "read_filelist <path> <top> [-I <dir>...] [-D <define>...]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        // The plan's Section 1b signature shows only the list
+        // path and the flags; the top is positional here,
+        // mirroring read_verilog, because elaborate needs a top
+        // and the S4 acceptance (reproduce a single-file
+        // elaboration exactly) is unstatable without one. A top
+        // is never inferred from the list: inferring it would
+        // make two lists with the same entries but different
+        // intended tops elaborate differently by accident.
+        if (args.size() < 2) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::read_filelist <path> <top> "
+              "[-I <dir>...] [-D <define>...]");
+        }
+        const std::string& list_path = args[0];
+        const std::string& top = args[1];
+        std::vector<std::string> include_dirs;
+        std::vector<std::string> defines;
+        for (std::size_t i = 2; i < args.size(); ++i) {
+          const std::string& arg = args[i];
+          std::string flag;
+          if (arg == "-I" || arg == "-D") {
+            flag = arg;
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option " + arg + " needs a value");
+            }
+            if (arg == "-I") {
+              include_dirs.push_back(args[++i]);
+            } else {
+              defines.push_back(args[++i]);
+            }
+          } else if (arg.size() > 2 && arg.compare(0, 2, "-I") == 0) {
+            flag = "-I";
+            include_dirs.push_back(arg.substr(2));
+          } else if (arg.size() > 2 && arg.compare(0, 2, "-D") == 0) {
+            flag = "-D";
+            defines.push_back(arg.substr(2));
+          } else {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown read_filelist option: " + arg);
+          }
+          // -I and -D repeat by design (a list takes several
+          // of each), so there is no duplicate-option rejection
+          // for them, unlike synth_generic's single -script.
+          // An empty value is a rejection, not a silent skip,
+          // and so is a value the engine could not safely
+          // carry in a pass command string.
+          const std::string& value =
+              flag == "-I" ? include_dirs.back() : defines.back();
+          if (value.empty()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "option " + flag + " needs a non-empty value");
+          }
+          if (flag == "-I" && !IsFilelistCommandToken(value)) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "invalid read_filelist include directory: " + value);
+          }
+          if (flag == "-D" && !IsFilelistDefine(value)) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "invalid read_filelist define: " + value);
+          }
+        }
+        if (auto bad = CheckReadable(list_path)) return *bad;
+        std::vector<FilelistEntry> entries;
+        const std::string list_error =
+            ReadFilelistEntries(list_path, &entries);
+        if (!list_error.empty()) {
+          return CommandResult::Fail(Diag::kIoError, list_error);
+        }
+        if (entries.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "file list '" + list_path + "' names no source files");
+        }
+        // Fail fast, before Yosys is touched: every entry must
+        // read, and the failure names the list and the entry
+        // as written, not just the resolved path.
+        std::vector<std::string> files;
+        for (const FilelistEntry& entry : entries) {
+          if (auto bad = CheckReadable(entry.resolved)) {
+            return CommandResult::Fail(
+                Diag::kIoError,
+                "file list '" + list_path + "' entry '" +
+                    entry.as_written + "' cannot be read: " +
+                    entry.resolved);
+          }
+          files.push_back(entry.resolved);
+        }
+        synth::YosysEngine engine;
+        const foundation::Result<synth::YosysDesignSummary> parsed =
+            engine.ParseVerilogFiles(files, include_dirs, defines);
+        if (!parsed.ok()) {
+          // Every failure that reaches this point touched the
+          // engine (bad flags were rejected above, before any
+          // engine ran): a failed parse replaces the live
+          // design or leaves it partial, so the session no
+          // longer holds the design it claims: clear it, the
+          // same rationale as a failed elaboration.
+          ctx.synth = CommandContext::SynthSession();
+          return FromStatus(parsed.status());
+        }
+        std::string modules;
+        bool found = false;
+        for (const synth::YosysModuleSummary& module :
+             parsed.value().modules) {
+          if (!modules.empty()) modules += ",";
+          modules += module.name;
+          if (module.name == top) found = true;
+        }
+        if (!found) {
+          // The parse replaced the live design, so the old
+          // session's claim is stale even though the parse
+          // itself succeeded: clear it and record nothing.
+          ctx.synth = CommandContext::SynthSession();
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "top module '" + top + "' not found in file list " +
+                  list_path + " (modules: " + modules + ")");
+        }
+        ctx.synth = CommandContext::SynthSession();
+        ctx.synth.parsed = true;
+        ctx.synth.top_cell = top;
+        ctx.synth.filelist_path = list_path;
+        ctx.synth.filelist_files = files;
+        std::string entries_text;
+        for (const FilelistEntry& entry : entries) {
+          if (!entries_text.empty()) entries_text += ",";
+          entries_text += entry.as_written;
+        }
+        std::string includes_text;
+        for (const std::string& dir : include_dirs) {
+          if (!includes_text.empty()) includes_text += ",";
+          includes_text += dir;
+        }
+        std::string defines_text;
+        for (const std::string& define : defines) {
+          if (!defines_text.empty()) defines_text += ",";
+          defines_text += define;
+        }
+        return CommandResult::Ok("filelist=" + list_path +
+                                 " files=" +
+                                 std::to_string(entries.size()) +
+                                 " entries=" + entries_text +
+                                 " top=" + top +
+                                 " modules=" + modules +
+                                 " includes=" + includes_text +
+                                 " defines=" + defines_text);
       });
 
   add("read_verilog", "read_verilog <path> <top>",
