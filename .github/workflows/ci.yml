@@ -18,6 +18,8 @@ jobs:
         run: pip install pyyaml pytest
       - name: Layer and structure check
         run: python3 tools/check_layers.py
+      - name: Dependency graph check
+        run: python3 tools/dep_graph.py check
       - name: Shell script syntax check
         run: bash -n scripts/setup-macos.sh
       - name: Checker unit tests
@@ -28,11 +30,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the pull-request selection step can diff
+          # against the base commit. Push runs (including merge
+          # commits) always run the full suite, so they do not use it.
+          fetch-depth: 0
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y tcl-dev bison flex libfl-dev swig libeigen3-dev libboost-dev zlib1g-dev libspdlog-dev libfmt-dev
       - name: Configure
         run: cmake -S . -B build -DEOS_BUILD_TESTS=ON
       - name: Build
         run: cmake --build build
+      - name: Select affected tests
+        id: select
+        if: github.event_name == 'pull_request'
+        run: |
+          set +e
+          git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD > /tmp/eos-changed.txt 2>/tmp/eos-diff.err
+          if [ $? -ne 0 ]; then echo "regex=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          REGEX=$(python3 tools/dep_graph.py select --files-from /tmp/eos-changed.txt --ctest-regex 2>/tmp/eos-select.err)
+          if [ $? -ne 0 ]; then echo "regex=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "regex=$REGEX" >> "$GITHUB_OUTPUT"
       - name: Test
-        run: ctest --test-dir build --no-tests=ignore --output-on-failure
+        run: |
+          if [ -n "${{ steps.select.outputs.regex }}" ]; then
+            ctest --test-dir build --no-tests=ignore --output-on-failure -R "${{ steps.select.outputs.regex }}"
+          else
+            ctest --test-dir build --no-tests=ignore --output-on-failure
+          fi

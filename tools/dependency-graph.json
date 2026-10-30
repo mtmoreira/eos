@@ -1,0 +1,917 @@
+{
+  "generator": "tools/dep_graph.py",
+  "modules": {
+    "abc": {
+      "depends_on": [
+        "errors"
+      ],
+      "layer": "L4",
+      "path": "src/synth/abc",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "antenna": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/pv/antenna",
+      "via": {}
+    },
+    "checkpoint": {
+      "depends_on": [
+        "constraints",
+        "design",
+        "errors",
+        "ids",
+        "scenarios"
+      ],
+      "layer": "L2",
+      "path": "src/db/checkpoint",
+      "via": {
+        "constraints": [
+          "cmake-link",
+          "include"
+        ],
+        "design": [
+          "cmake-link",
+          "include"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "ids": [
+          "cmake-link"
+        ],
+        "scenarios": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "constraints": {
+      "depends_on": [
+        "design",
+        "errors",
+        "ids"
+      ],
+      "layer": "L2",
+      "path": "src/db/constraints",
+      "via": {
+        "design": [
+          "cmake-link",
+          "include"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "ids": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "containers": {
+      "depends_on": [],
+      "layer": "L0",
+      "path": "src/foundation/containers",
+      "via": {}
+    },
+    "cost": {
+      "depends_on": [],
+      "layer": "L5",
+      "path": "src/session/cost",
+      "via": {}
+    },
+    "cts": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/pd/cts",
+      "via": {}
+    },
+    "def": {
+      "depends_on": [],
+      "layer": "L1",
+      "path": "src/io/def",
+      "via": {}
+    },
+    "design": {
+      "depends_on": [
+        "errors",
+        "ids"
+      ],
+      "layer": "L2",
+      "path": "src/db/design",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "ids": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "drc": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/pv/drc",
+      "via": {}
+    },
+    "errors": {
+      "depends_on": [],
+      "layer": "L0",
+      "path": "src/foundation/errors",
+      "via": {}
+    },
+    "extract": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/pv/extract",
+      "via": {}
+    },
+    "finish": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/pd/finish",
+      "via": {}
+    },
+    "floorplan": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/pd/floorplan",
+      "via": {}
+    },
+    "flow": {
+      "depends_on": [
+        "errors",
+        "ledger",
+        "odb",
+        "reports",
+        "session",
+        "timing",
+        "timing-eco",
+        "transactions"
+      ],
+      "layer": "L5",
+      "path": "src/session/flow",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "ledger": [
+          "cmake-link"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "reports": [
+          "cmake-link",
+          "include"
+        ],
+        "session": [
+          "cmake-link",
+          "include"
+        ],
+        "timing": [
+          "cmake-link",
+          "include"
+        ],
+        "timing-eco": [
+          "cmake-link",
+          "include"
+        ],
+        "transactions": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "frontend": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/synth/frontend",
+      "via": {}
+    },
+    "functional-eco": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/eco/functional-eco",
+      "via": {}
+    },
+    "gds": {
+      "depends_on": [],
+      "layer": "L1",
+      "path": "src/io/gds",
+      "via": {}
+    },
+    "geom": {
+      "depends_on": [],
+      "layer": "L0",
+      "path": "src/foundation/geom",
+      "via": {}
+    },
+    "geomq": {
+      "depends_on": [],
+      "layer": "L3",
+      "path": "src/analysis/geomq",
+      "via": {}
+    },
+    "gui": {
+      "depends_on": [],
+      "layer": "L6",
+      "path": "src/ui/gui",
+      "via": {}
+    },
+    "ids": {
+      "depends_on": [
+        "errors"
+      ],
+      "layer": "L0",
+      "path": "src/foundation/ids",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "jobs": {
+      "depends_on": [],
+      "layer": "L0",
+      "path": "src/foundation/jobs",
+      "via": {}
+    },
+    "ledger": {
+      "depends_on": [
+        "errors",
+        "ids"
+      ],
+      "layer": "L5",
+      "path": "src/session/ledger",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "ids": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "lef": {
+      "depends_on": [],
+      "layer": "L1",
+      "path": "src/io/lef",
+      "via": {}
+    },
+    "liberty": {
+      "depends_on": [],
+      "layer": "L1",
+      "path": "src/io/liberty",
+      "via": {}
+    },
+    "log": {
+      "depends_on": [],
+      "layer": "L0",
+      "path": "src/foundation/log",
+      "via": {}
+    },
+    "lvs": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/pv/lvs",
+      "via": {}
+    },
+    "mem": {
+      "depends_on": [],
+      "layer": "L0",
+      "path": "src/foundation/mem",
+      "via": {}
+    },
+    "metrics": {
+      "depends_on": [
+        "errors",
+        "ledger"
+      ],
+      "layer": "L5",
+      "path": "src/session/metrics",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "ledger": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "odb": {
+      "depends_on": [
+        "errors"
+      ],
+      "layer": "L2",
+      "path": "src/db/odb",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "openroad-syn": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/synth/openroad-syn",
+      "via": {}
+    },
+    "optimizers": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/synth/optimizers",
+      "via": {}
+    },
+    "package": {
+      "depends_on": [],
+      "layer": "L2",
+      "path": "src/tech/package",
+      "via": {}
+    },
+    "parasitics": {
+      "depends_on": [],
+      "layer": "L3",
+      "path": "src/analysis/parasitics",
+      "via": {}
+    },
+    "place": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/pd/place",
+      "via": {}
+    },
+    "power": {
+      "depends_on": [],
+      "layer": "L3",
+      "path": "src/analysis/power",
+      "via": {}
+    },
+    "python": {
+      "depends_on": [],
+      "layer": "L6",
+      "path": "src/ui/python",
+      "via": {}
+    },
+    "registry": {
+      "depends_on": [
+        "abc",
+        "checkpoint",
+        "constraints",
+        "design",
+        "errors",
+        "flow",
+        "ids",
+        "ledger",
+        "odb",
+        "reports",
+        "scenarios",
+        "session",
+        "sta",
+        "timing",
+        "yosys"
+      ],
+      "layer": "L6",
+      "path": "src/ui/registry",
+      "via": {
+        "abc": [
+          "cmake-link",
+          "include"
+        ],
+        "checkpoint": [
+          "cmake-link"
+        ],
+        "constraints": [
+          "cmake-link",
+          "include"
+        ],
+        "design": [
+          "cmake-link",
+          "include"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "flow": [
+          "cmake-link",
+          "include"
+        ],
+        "ids": [
+          "cmake-link",
+          "include"
+        ],
+        "ledger": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "reports": [
+          "cmake-link",
+          "include"
+        ],
+        "scenarios": [
+          "cmake-link",
+          "include"
+        ],
+        "session": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "include"
+        ],
+        "timing": [
+          "cmake-link",
+          "include"
+        ],
+        "yosys": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "reports": {
+      "depends_on": [
+        "constraints",
+        "errors",
+        "ledger",
+        "scenarios",
+        "session"
+      ],
+      "layer": "L5",
+      "path": "src/session/reports",
+      "via": {
+        "constraints": [
+          "cmake-link"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "ledger": [
+          "cmake-link",
+          "include"
+        ],
+        "scenarios": [
+          "cmake-link",
+          "include"
+        ],
+        "session": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "route": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/pd/route",
+      "via": {}
+    },
+    "scenarios": {
+      "depends_on": [
+        "errors"
+      ],
+      "layer": "L2",
+      "path": "src/db/scenarios",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "sdc": {
+      "depends_on": [],
+      "layer": "L1",
+      "path": "src/io/sdc",
+      "via": {}
+    },
+    "session": {
+      "depends_on": [
+        "checkpoint",
+        "constraints",
+        "design",
+        "errors",
+        "ids",
+        "ledger",
+        "scenarios"
+      ],
+      "layer": "L5",
+      "path": "src/session/session",
+      "via": {
+        "checkpoint": [
+          "cmake-link",
+          "include"
+        ],
+        "constraints": [
+          "cmake-link",
+          "include"
+        ],
+        "design": [
+          "cmake-link",
+          "include"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "ids": [
+          "cmake-link"
+        ],
+        "ledger": [
+          "cmake-link",
+          "include"
+        ],
+        "scenarios": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "sourcemap": {
+      "depends_on": [],
+      "layer": "L2",
+      "path": "src/db/sourcemap",
+      "via": {}
+    },
+    "spef": {
+      "depends_on": [],
+      "layer": "L1",
+      "path": "src/io/spef",
+      "via": {}
+    },
+    "spice": {
+      "depends_on": [],
+      "layer": "L1",
+      "path": "src/io/spice",
+      "via": {}
+    },
+    "sta": {
+      "depends_on": [
+        "errors"
+      ],
+      "layer": "L3",
+      "path": "src/analysis/timing/sta",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "strings": {
+      "depends_on": [],
+      "layer": "L0",
+      "path": "src/foundation/strings",
+      "via": {}
+    },
+    "tcl": {
+      "depends_on": [
+        "errors",
+        "registry"
+      ],
+      "layer": "L6",
+      "path": "src/ui/tcl",
+      "via": {
+        "errors": [
+          "include"
+        ],
+        "registry": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "timing": {
+      "depends_on": [
+        "errors",
+        "odb",
+        "scenarios",
+        "sta"
+      ],
+      "layer": "L3",
+      "path": "src/analysis/timing",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "scenarios": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "timing-eco": {
+      "depends_on": [
+        "abc",
+        "errors",
+        "odb"
+      ],
+      "layer": "L4",
+      "path": "src/eco/timing-eco",
+      "via": {
+        "abc": [
+          "cmake-link",
+          "include"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "transactions": {
+      "depends_on": [
+        "errors",
+        "odb",
+        "timing"
+      ],
+      "layer": "L4",
+      "path": "src/eco/transactions",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "timing": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
+    "types": {
+      "depends_on": [],
+      "layer": "L0",
+      "path": "src/foundation/types",
+      "via": {}
+    },
+    "verilog": {
+      "depends_on": [],
+      "layer": "L1",
+      "path": "src/io/verilog",
+      "via": {}
+    },
+    "yosys": {
+      "depends_on": [
+        "errors"
+      ],
+      "layer": "L4",
+      "path": "src/synth/yosys",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    }
+  },
+  "tests": {
+    "analysis.sta": {
+      "modules": [
+        "sta"
+      ],
+      "sources": [
+        "tests/unit/analysis/sta/sta_test.cc"
+      ]
+    },
+    "analysis.timing": {
+      "modules": [
+        "timing"
+      ],
+      "sources": [
+        "tests/unit/analysis/timing/timing_service_test.cc"
+      ]
+    },
+    "db.checkpoint": {
+      "modules": [
+        "checkpoint"
+      ],
+      "sources": [
+        "tests/unit/db/checkpoint/checkpoint_test.cc"
+      ]
+    },
+    "db.constraints": {
+      "modules": [
+        "constraints"
+      ],
+      "sources": [
+        "tests/unit/db/constraints/constraints_test.cc"
+      ]
+    },
+    "db.design": {
+      "modules": [
+        "design"
+      ],
+      "sources": [
+        "tests/unit/db/design/design_test.cc"
+      ]
+    },
+    "db.odb": {
+      "modules": [
+        "odb"
+      ],
+      "sources": [
+        "tests/unit/db/odb/odb_test.cc"
+      ]
+    },
+    "db.scenarios": {
+      "modules": [
+        "scenarios"
+      ],
+      "sources": [
+        "tests/unit/db/scenarios/scenarios_test.cc"
+      ]
+    },
+    "eco.timing_eco": {
+      "modules": [
+        "timing",
+        "timing-eco"
+      ],
+      "sources": [
+        "tests/unit/eco/timing-eco/timing_eco_test.cc"
+      ]
+    },
+    "eco.transactions": {
+      "modules": [
+        "ledger",
+        "timing-eco",
+        "transactions"
+      ],
+      "sources": [
+        "tests/unit/eco/transactions/transactions_test.cc"
+      ]
+    },
+    "foundation.errors": {
+      "modules": [
+        "errors"
+      ],
+      "sources": [
+        "tests/unit/foundation/errors/errors_test.cc"
+      ]
+    },
+    "foundation.ids": {
+      "modules": [
+        "ids"
+      ],
+      "sources": [
+        "tests/unit/foundation/ids/ids_test.cc"
+      ]
+    },
+    "qualification.phase1_exit": {
+      "modules": [
+        "registry",
+        "reports",
+        "session"
+      ],
+      "sources": [
+        "tests/qualification/phase1_exit_test.cc"
+      ]
+    },
+    "qualification.phase2_exit": {
+      "modules": [
+        "flow",
+        "reports",
+        "timing-eco"
+      ],
+      "sources": [
+        "tests/qualification/phase2_exit_test.cc"
+      ]
+    },
+    "session.flow": {
+      "modules": [
+        "flow"
+      ],
+      "sources": [
+        "tests/unit/session/flow/flow_test.cc"
+      ]
+    },
+    "session.ledger": {
+      "modules": [
+        "ledger"
+      ],
+      "sources": [
+        "tests/unit/session/ledger/ledger_test.cc"
+      ]
+    },
+    "session.ledger.snapshot": {
+      "modules": [
+        "ledger"
+      ],
+      "sources": [
+        "tests/unit/session/ledger/ledger_snapshot_test.cc"
+      ]
+    },
+    "session.ledger.text": {
+      "modules": [
+        "ledger"
+      ],
+      "sources": [
+        "tests/unit/session/ledger/ledger_text_test.cc"
+      ]
+    },
+    "session.metrics": {
+      "modules": [
+        "metrics"
+      ],
+      "sources": [
+        "tests/unit/session/metrics/metrics_test.cc"
+      ]
+    },
+    "session.project": {
+      "modules": [
+        "session"
+      ],
+      "sources": [
+        "tests/unit/session/session/project_test.cc"
+      ]
+    },
+    "session.reports": {
+      "modules": [
+        "reports"
+      ],
+      "sources": [
+        "tests/unit/session/reports/reports_test.cc"
+      ]
+    },
+    "synth.abc": {
+      "modules": [
+        "abc"
+      ],
+      "sources": [
+        "tests/unit/synth/abc/abc_test.cc"
+      ]
+    },
+    "synth.yosys": {
+      "modules": [
+        "yosys"
+      ],
+      "sources": [
+        "tests/unit/synth/yosys/yosys_test.cc"
+      ]
+    },
+    "tech.package": {
+      "modules": [
+        "package"
+      ],
+      "sources": [
+        "tests/unit/tech/package/package_test.cc"
+      ]
+    },
+    "ui.registry": {
+      "modules": [
+        "checkpoint",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.tcl": {
+      "modules": [
+        "tcl"
+      ],
+      "sources": [
+        "tests/unit/ui/tcl/tcl_shell_test.cc"
+      ]
+    }
+  }
+}
