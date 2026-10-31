@@ -60,6 +60,32 @@ if(APPLE)
       if(NOT TCL_INCLUDE_PATH AND EXISTS "${_prefix}/include/tcl-tk/tcl.h")
         set(TCL_INCLUDE_PATH "${_prefix}/include/tcl-tk")
       endif()
+      # Same story for the library: CMake's FindTCL otherwise resolves
+      # TCL_LIBRARY to the Xcode SDK's Tcl.framework (system 8.5),
+      # whose stub lacks _Tcl_GetBoolFromObj, while the headers above
+      # come from Homebrew's tcl-tk 9.x. That header/library mismatch
+      # is exactly the STA test link failure seen 2026-10-31. Point
+      # FindTCL at Homebrew's versioned libtcl as a normal variable,
+      # so the cache-clearing below does not wipe it, and a
+      # user-supplied TCL_LIBRARY still wins. The versioned name is
+      # matched explicitly so libtclstub and libtcl9tk never qualify.
+      if(NOT TCL_LIBRARY)
+        file(GLOB _tcl_libs "${_prefix}/lib/libtcl*.dylib")
+        foreach(_tcl_lib IN LISTS _tcl_libs)
+          if(_tcl_lib MATCHES "libtcl[0-9]+\\.[0-9]+\\.dylib$")
+            list(APPEND _eos_tcl_libs "${_tcl_lib}")
+          endif()
+        endforeach()
+        if(_eos_tcl_libs)
+          list(SORT _eos_tcl_libs)
+          list(GET _eos_tcl_libs -1 _eos_tcl_lib)
+          set(TCL_LIBRARY "${_eos_tcl_lib}")
+        endif()
+        unset(_tcl_libs)
+        unset(_tcl_lib)
+        unset(_eos_tcl_libs)
+        unset(_eos_tcl_lib)
+      endif()
     endforeach()
   endif()
 endif()
