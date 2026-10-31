@@ -1,0 +1,103 @@
+library (eos_opt_fixture) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+  cell (AND2) {
+    area : 2.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (B) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A*B";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.6"); }
+        cell_fall (scalar) { values ("0.6"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.6"); }
+        cell_fall (scalar) { values ("0.6"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (AND2_FAST) {
+    area : 4.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (B) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A*B";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (INV) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      timing () {
+        related_pin : "A";
+        timing_sense : negative_unate;
+        cell_rise (scalar) { values ("0.5"); }
+        cell_fall (scalar) { values ("0.5"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (BUF) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.4"); }
+        cell_fall (scalar) { values ("0.4"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
