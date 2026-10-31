@@ -551,12 +551,20 @@ add_library(eda_synth_yosys STATIC
 target_include_directories(eda_synth_yosys
   PUBLIC include
   PRIVATE src ${_eos_yosys_gen_dir} src/libs/flex src/libs)
-# macOS: defining _XOPEN_SOURCE without _DARWIN_C_SOURCE makes Apple's
-# headers hide Darwin extensions, including vasprintf, which upstream
-# io.h uses. _DARWIN_C_SOURCE restores them on Apple only; it expands to
-# nothing on every other platform, so Linux CI is unaffected.
+# macOS portability, all Apple-only, all in EOS-owned glue:
+# - Defining _XOPEN_SOURCE without _DARWIN_C_SOURCE makes Apple's
+#   headers hide Darwin extensions, including vasprintf, which upstream
+#   io.h uses. _DARWIN_C_SOURCE restores them on Apple only.
+# - _DEFAULT_SOURCE is a glibc macro; on Apple it is ignored by system
+#   headers but it still flips Yosys's own #ifdefs, and the only one in
+#   this tree is minisat's Vec.h, which then takes the ::reallocarray
+#   branch. macOS has no reallocarray, so _DEFAULT_SOURCE is defined
+#   on non-Apple platforms only and Vec.h falls back to ::realloc.
+# Both generator expressions expand to nothing on the other platforms,
+# so Linux CI is unaffected.
 target_compile_definitions(eda_synth_yosys PRIVATE
-  _YOSYS_ _DEFAULT_SOURCE _XOPEN_SOURCE=600
+  _YOSYS_ _XOPEN_SOURCE=600
+  $<$<NOT:$<PLATFORM_ID:Darwin>>:_DEFAULT_SOURCE>
   $<$<PLATFORM_ID:Darwin>:_DARWIN_C_SOURCE>
   EOS_YOSYS_SHARE_DIR=\"${CMAKE_CURRENT_BINARY_DIR}/share/\")
 if(ZLIB_FOUND)
@@ -567,6 +575,15 @@ if(TCL_FOUND)
   # as upstream; here only the headers and library are added.
   target_include_directories(eda_synth_yosys PRIVATE ${TCL_INCLUDE_PATH})
   target_link_libraries(eda_synth_yosys PRIVATE ${TCL_LIBRARY})
+  # Yosys's tclapi.cc includes <tclTomMath.h> directly, which needs
+  # libtommath's tommath.h. That header lives outside the tcl-tk header
+  # dir on Homebrew (and in the default search path on Linux), so locate
+  # it and add it for this target only. If it is not found, nothing
+  # changes and the compile fails as before, with a clear error.
+  find_path(EOS_TOMMATH_INCLUDE_DIR NAMES tommath.h)
+  if(EOS_TOMMATH_INCLUDE_DIR)
+    target_include_directories(eda_synth_yosys PRIVATE ${EOS_TOMMATH_INCLUDE_DIR})
+  endif()
 endif()
 target_link_libraries(eda_synth_yosys
   PUBLIC eda_foundation_errors
