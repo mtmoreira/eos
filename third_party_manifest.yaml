@@ -50,6 +50,13 @@ components:
     module: src/pd and src/pv (per-pass provenance at import time)
     patches: 0
     note: "Stays at v2.0 while opendb moves to ead3236 (fix track unit REPIN, 2026-10-28): its only imported-as-planned consumer, src/synth/openroad-syn, is a planned adoption not yet imported, so the split costs a note, not code."
+  - name: openroad-pd-pv
+    upstream: https://github.com/The-OpenROAD-Project/OpenROAD
+    version: commit ead3236e56d57
+    licence: BSD-3-Clause
+    module: src/pd and src/pv (per-stage provenance at import time)
+    patches: 0
+    note: "Evaluated 2026-10-31 by place-and-route unit P0 (docs/pd-p0-inventory.md): the nine engine directories ifp, gpl, dpl, cts, grt, drt, rcx, pdn, fin at this commit, the same commit that supplies the in-tree OpenDB. No engine code is imported by P0 itself; imports land per stage unit P1 to P7, each with its own PROVENANCE.md inventory. The support closure P0 measured (dbSta, stt, ant, dst, upf, rsz, gui stub, ord shim) rides with the first stage unit that needs it."
   - name: klayout
     upstream: https://github.com/KLayout/klayout
     version: v0.30.12
