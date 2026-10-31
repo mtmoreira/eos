@@ -551,8 +551,13 @@ add_library(eda_synth_yosys STATIC
 target_include_directories(eda_synth_yosys
   PUBLIC include
   PRIVATE src ${_eos_yosys_gen_dir} src/libs/flex src/libs)
+# macOS: defining _XOPEN_SOURCE without _DARWIN_C_SOURCE makes Apple's
+# headers hide Darwin extensions, including vasprintf, which upstream
+# io.h uses. _DARWIN_C_SOURCE restores them on Apple only; it expands to
+# nothing on every other platform, so Linux CI is unaffected.
 target_compile_definitions(eda_synth_yosys PRIVATE
   _YOSYS_ _DEFAULT_SOURCE _XOPEN_SOURCE=600
+  $<$<PLATFORM_ID:Darwin>:_DARWIN_C_SOURCE>
   EOS_YOSYS_SHARE_DIR=\"${CMAKE_CURRENT_BINARY_DIR}/share/\")
 if(ZLIB_FOUND)
   target_link_libraries(eda_synth_yosys PRIVATE ZLIB::ZLIB)
