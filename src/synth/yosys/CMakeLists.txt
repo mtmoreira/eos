@@ -110,7 +110,16 @@ set(YOSYS_ENABLE_PLUGINS 1)
 if(ZLIB_FOUND)
   set(YOSYS_ENABLE_ZLIB 1)
 endif()
-if(TCL_FOUND)
+# Yosys's embedded Tcl interpreter is not built on Apple. Yosys 0.70's
+# tclapi.cc uses libtommath through <tclTomMath.h>, whose headers rename
+# every mp_* call to a TclBN_* symbol but, against Homebrew Tcl 9, provide
+# no plain TclBN_* declarations: those exist only behind the stubs
+# interface, which Yosys does not use (it links libtcl directly and never
+# calls Tcl_InitStubs or Tcl_TomMath_InitStubs), so the stubs route cannot
+# rescue it either. EOS drives Yosys through its C++ API and provides its
+# own Tcl shell, so nothing EOS exposes is lost by dropping Yosys's
+# internal Tcl interpreter on macOS builds only.
+if(TCL_FOUND AND NOT APPLE)
   set(YOSYS_ENABLE_TCL 1)
 endif()
 set(YOSYS_PROGRAM_PREFIX "")
@@ -570,7 +579,7 @@ target_compile_definitions(eda_synth_yosys PRIVATE
 if(ZLIB_FOUND)
   target_link_libraries(eda_synth_yosys PRIVATE ZLIB::ZLIB)
 endif()
-if(TCL_FOUND)
+if(TCL_FOUND AND NOT APPLE)
   # YOSYS_ENABLE_TCL itself comes from the generated yosys_config.h,
   # as upstream; here only the headers and library are added.
   target_include_directories(eda_synth_yosys PRIVATE ${TCL_INCLUDE_PATH})
