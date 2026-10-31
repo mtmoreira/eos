@@ -110,7 +110,16 @@ set(YOSYS_ENABLE_PLUGINS 1)
 if(ZLIB_FOUND)
   set(YOSYS_ENABLE_ZLIB 1)
 endif()
-if(TCL_FOUND)
+# Yosys's embedded Tcl interpreter is not built on Apple. Yosys 0.70's
+# tclapi.cc uses libtommath through <tclTomMath.h>, whose headers rename
+# every mp_* call to a TclBN_* symbol but, against Homebrew Tcl 9, provide
+# no plain TclBN_* declarations: those exist only behind the stubs
+# interface, which Yosys does not use (it links libtcl directly and never
+# calls Tcl_InitStubs or Tcl_TomMath_InitStubs), so the stubs route cannot
+# rescue it either. EOS drives Yosys through its C++ API and provides its
+# own Tcl shell, so nothing EOS exposes is lost by dropping Yosys's
+# internal Tcl interpreter on macOS builds only.
+if(TCL_FOUND AND NOT APPLE)
   set(YOSYS_ENABLE_TCL 1)
 endif()
 set(YOSYS_PROGRAM_PREFIX "")
@@ -551,17 +560,39 @@ add_library(eda_synth_yosys STATIC
 target_include_directories(eda_synth_yosys
   PUBLIC include
   PRIVATE src ${_eos_yosys_gen_dir} src/libs/flex src/libs)
+# macOS portability, all Apple-only, all in EOS-owned glue:
+# - Defining _XOPEN_SOURCE without _DARWIN_C_SOURCE makes Apple's
+#   headers hide Darwin extensions, including vasprintf, which upstream
+#   io.h uses. _DARWIN_C_SOURCE restores them on Apple only.
+# - _DEFAULT_SOURCE is a glibc macro; on Apple it is ignored by system
+#   headers but it still flips Yosys's own #ifdefs, and the only one in
+#   this tree is minisat's Vec.h, which then takes the ::reallocarray
+#   branch. macOS has no reallocarray, so _DEFAULT_SOURCE is defined
+#   on non-Apple platforms only and Vec.h falls back to ::realloc.
+# Both generator expressions expand to nothing on the other platforms,
+# so Linux CI is unaffected.
 target_compile_definitions(eda_synth_yosys PRIVATE
-  _YOSYS_ _DEFAULT_SOURCE _XOPEN_SOURCE=600
+  _YOSYS_ _XOPEN_SOURCE=600
+  $<$<NOT:$<PLATFORM_ID:Darwin>>:_DEFAULT_SOURCE>
+  $<$<PLATFORM_ID:Darwin>:_DARWIN_C_SOURCE>
   EOS_YOSYS_SHARE_DIR=\"${CMAKE_CURRENT_BINARY_DIR}/share/\")
 if(ZLIB_FOUND)
   target_link_libraries(eda_synth_yosys PRIVATE ZLIB::ZLIB)
 endif()
-if(TCL_FOUND)
+if(TCL_FOUND AND NOT APPLE)
   # YOSYS_ENABLE_TCL itself comes from the generated yosys_config.h,
   # as upstream; here only the headers and library are added.
   target_include_directories(eda_synth_yosys PRIVATE ${TCL_INCLUDE_PATH})
   target_link_libraries(eda_synth_yosys PRIVATE ${TCL_LIBRARY})
+  # Yosys's tclapi.cc includes <tclTomMath.h> directly, which needs
+  # libtommath's tommath.h. That header lives outside the tcl-tk header
+  # dir on Homebrew (and in the default search path on Linux), so locate
+  # it and add it for this target only. If it is not found, nothing
+  # changes and the compile fails as before, with a clear error.
+  find_path(EOS_TOMMATH_INCLUDE_DIR NAMES tommath.h)
+  if(EOS_TOMMATH_INCLUDE_DIR)
+    target_include_directories(eda_synth_yosys PRIVATE ${EOS_TOMMATH_INCLUDE_DIR})
+  endif()
 endif()
 target_link_libraries(eda_synth_yosys
   PUBLIC eda_foundation_errors
