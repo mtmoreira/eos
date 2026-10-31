@@ -28,21 +28,22 @@ dependency prefix). Then, from this directory, launch the shell:
 ../../build/apps/eos/eos
 ```
 
-Paste these commands at the `eos>` prompt, in order:
+Paste these commands at the `eos>` prompt, in order. Commands live
+in the `eos::` namespace, so the prefix is required:
 
 ```
-create_scenario func_tt func tt estimate
-read_liberty tt cells.lib
-read_verilog optloop.v optloop
-read_sdc top.sdc
-elaborate
-synth_generic
-synth_map -target area
-write_verilog mapped.v
-synth_opt -strategies classic
-write_verilog out.v
-check_equivalence mapped.v out.v
-synth_report
+eos::create_scenario func_tt func tt estimate
+eos::read_liberty tt cells.lib
+eos::read_verilog optloop.v optloop
+eos::read_sdc top.sdc
+eos::elaborate
+eos::synth_generic
+eos::synth_map -target area
+eos::write_verilog mapped.v
+eos::synth_opt -strategies classic
+eos::write_verilog out.v
+eos::check_equivalence mapped.v out.v
+eos::synth_report
 ```
 
 ## Expected outputs
