@@ -3,13 +3,17 @@
   "modules": {
     "abc": {
       "depends_on": [
-        "errors"
+        "errors",
+        "pdr"
       ],
       "layer": "L4",
       "path": "src/synth/abc",
       "via": {
         "errors": [
           "cmake-link",
+          "include"
+        ],
+        "pdr": [
           "include"
         ]
       }
@@ -398,6 +402,19 @@
       "layer": "L3",
       "path": "src/analysis/parasitics",
       "via": {}
+    },
+    "pdr": {
+      "depends_on": [
+        "odb"
+      ],
+      "layer": "L4",
+      "path": "src/pd/pdr",
+      "via": {
+        "odb": [
+          "cmake-link",
+          "include"
+        ]
+      }
     },
     "place": {
       "depends_on": [],
@@ -864,6 +881,15 @@
       ],
       "sources": [
         "tests/unit/pd/floorplan/floorplan_test.cc"
+      ]
+    },
+    "pd.pdr": {
+      "modules": [
+        "odb",
+        "pdr"
+      ],
+      "sources": [
+        "tests/unit/pd/pdr/pdr_test.cc"
       ]
     },
     "qualification.phase1_exit": {

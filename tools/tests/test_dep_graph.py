@@ -281,9 +281,9 @@ def test_real_repo_check_passes_and_rules_hold():
     assert result.returncode == 0, result.stdout + result.stderr
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     all_tests = sorted(graph["tests"])
-    # R1 step 2 adds pd.dbsta and U1 adds ui.gui, the 27th and
-    # 28th ctest entries.
-    assert len(all_tests) == 28
+    # R1 step 2 adds pd.dbsta and pd.pdr, and U1 adds ui.gui, the
+    # 27th, 28th, and 29th ctest entries.
+    assert len(all_tests) == 29
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),
