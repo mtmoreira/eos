@@ -139,6 +139,11 @@ target_link_libraries(eda_pd_pdr_unit_test
   PRIVATE eda_pd_pdr eda_db_odb GTest::gtest GTest::gtest_main)
 add_test(NAME pd.pdr COMMAND eda_pd_pdr_unit_test)
 
+add_executable(eda_pd_rsz_unit_test pd/rsz/rsz_test.cc)
+target_link_libraries(eda_pd_rsz_unit_test
+  PRIVATE eda_pd_rsz GTest::gtest GTest::gtest_main)
+add_test(NAME pd.rsz COMMAND eda_pd_rsz_unit_test)
+
 add_executable(eda_ui_registry_unit_test ui/registry/registry_test.cc)
 target_link_libraries(eda_ui_registry_unit_test
   PRIVATE eda_ui_registry eda_db_checkpoint GTest::gtest GTest::gtest_main)

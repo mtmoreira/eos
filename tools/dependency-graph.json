@@ -558,6 +558,34 @@
       "path": "src/pd/route",
       "via": {}
     },
+    "rsz": {
+      "depends_on": [
+        "dbsta",
+        "odb",
+        "pdr",
+        "sta"
+      ],
+      "layer": "L4",
+      "path": "src/pd/rsz",
+      "via": {
+        "dbsta": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "pdr": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
     "scenarios": {
       "depends_on": [
         "errors"
@@ -890,6 +918,14 @@
       ],
       "sources": [
         "tests/unit/pd/pdr/pdr_test.cc"
+      ]
+    },
+    "pd.rsz": {
+      "modules": [
+        "rsz"
+      ],
+      "sources": [
+        "tests/unit/pd/rsz/rsz_test.cc"
       ]
     },
     "qualification.phase1_exit": {
