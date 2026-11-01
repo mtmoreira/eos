@@ -21,6 +21,14 @@
 
 #include "eos/foundation/errors.h"
 
+// Forward declaration for the raw-database accessor below: the
+// facade itself never exposes upstream types in its API, except
+// this one accessor, which exists so L4 engine modules can operate
+// on the live database the session owns.
+namespace odb {
+class dbDatabase;
+}  // namespace odb
+
 namespace eos::db {
 
 using foundation::Result;
@@ -117,6 +125,12 @@ class OdbDatabase {
   Status WriteVerilog(const std::string& path) const;
 
   bool has_top_block() const;
+  // Raw access to the live upstream database, for L4 engine
+  // modules that must mutate it in place (place-and-route unit
+  // P1's floorplan runner is the first). All other consumers use
+  // the facade methods; a raw pointer must never outlive this
+  // object, and engines must not hold it past their run.
+  odb::dbDatabase* RawDatabase() const;
   std::string TopBlockName() const;
   std::size_t InstanceCount() const;
   std::size_t NetCount() const;

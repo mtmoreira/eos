@@ -68,10 +68,13 @@ add_library(eda_db_odb STATIC
   $<TARGET_OBJECTS:eos_odb_def_parser>
   $<TARGET_OBJECTS:eos_odb_lef_parser>
 )
+# P1 (place-and-route unit P1) promotes include/odb to PUBLIC:
+# engine consumers include bare odb headers (db.h, dbUtil.h,
+# lefin.h, defin.h) that live only there. This is EOS-owned
+# CMake, not an upstream patch.
 target_include_directories(eda_db_odb
-  PUBLIC include
+  PUBLIC include include/odb
   PRIVATE
-    include/odb
     src/cdl
     src/db
     src/def/def
