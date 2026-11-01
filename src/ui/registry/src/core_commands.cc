@@ -410,6 +410,44 @@ std::string HierarchyText(const synth::YosysEngine::HierarchyNode& root) {
   return out;
 }
 
+// Renders one block diagram in the same key=value line style as
+// HierarchyText, so the GUI model parses it with the same rules:
+// names are plain Verilog identifiers, so comma lists are
+// unambiguous, and an empty list renders as an empty value,
+// never omitted.
+std::string BlockDiagramText(
+    const synth::YosysEngine::BlockDiagramData& diagram) {
+  std::string out = "module=" + diagram.module + "\n";
+  for (const auto& port : diagram.parent_ports) {
+    out += "parent port=" + port.name + " direction=" + port.direction +
+           "\n";
+  }
+  for (const auto& block : diagram.blocks) {
+    std::string ports;
+    for (const auto& port : block.ports) {
+      if (!ports.empty()) ports += ",";
+      ports += port.name + ":" + port.direction;
+    }
+    out += "block instance=" + block.instance + " module=" + block.module +
+           " ports=" + ports + "\n";
+  }
+  for (const auto& net : diagram.nets) {
+    std::string blocks;
+    for (const auto& endpoint : net.endpoints) {
+      if (!blocks.empty()) blocks += ",";
+      blocks += endpoint.block + ":" + endpoint.port;
+    }
+    std::string terminals;
+    for (const auto& terminal : net.terminals) {
+      if (!terminals.empty()) terminals += ",";
+      terminals += terminal;
+    }
+    out += "net name=" + net.name + " blocks=" + blocks +
+           " terminals=" + terminals + "\n";
+  }
+  return out;
+}
+
 // Metric values print at full useful precision: enough significant
 // digits that a picosecond-scale slack survives the payload.
 std::string FormatNumber(double value) {
@@ -1901,6 +1939,33 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return FromStatus(hierarchy.status());
         }
         return CommandResult::Ok(HierarchyText(hierarchy.value()));
+      });
+
+  // Reports one module's block diagram for the live elaborated
+  // design, as the block diagram widget (GUI unit U3) consumes
+  // it. Read-only like synth_hierarchy: it runs no pass and
+  // changes no session state. It fails fast when no elaborated
+  // design exists, when the argument count is wrong, or when
+  // the module is not a plain identifier or not in the live
+  // design.
+  add("synth_blocks", "synth_blocks <module>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 1, "synth_blocks <module>")) {
+          return *bad;
+        }
+        if (!ctx.synth.elaborated) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no elaborated design: eos::elaborate first");
+        }
+        synth::YosysEngine engine;
+        const foundation::Result<synth::YosysEngine::BlockDiagramData>
+            diagram = engine.BlockDiagram(args[0]);
+        if (!diagram.ok()) {
+          return FromStatus(diagram.status());
+        }
+        return CommandResult::Ok(BlockDiagramText(diagram.value()));
       });
 
   add("synth_generic", "synth_generic [-script <name>]",

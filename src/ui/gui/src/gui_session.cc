@@ -57,4 +57,26 @@ void SessionView::RefreshHierarchy() {
   }
 }
 
+void SessionView::RefreshDiagram() {
+  if (!context_.synth.elaborated || hierarchy_.Empty()) {
+    diagram_.Clear();
+    diagram_level_.clear();
+    return;
+  }
+  if (diagram_level_.empty() ||
+      hierarchy_.Find(diagram_level_) == nullptr) {
+    diagram_level_ = hierarchy_.Root()->path;
+  }
+  const HierarchyNode* node = hierarchy_.Find(diagram_level_);
+  if (node == nullptr) {
+    diagram_.Clear();
+    return;
+  }
+  const CommandResult result =
+      registry_.Dispatch(context_, "synth_blocks", {node->module});
+  if (!result.ok || !diagram_.LoadPayload(result.payload)) {
+    diagram_.Clear();
+  }
+}
+
 }  // namespace eos::ui

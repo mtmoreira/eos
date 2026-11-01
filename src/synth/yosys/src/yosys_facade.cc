@@ -305,6 +305,48 @@ void BuildHierarchyNode(Yosys::RTLIL::Module* module, const std::string& path,
             });
 }
 
+// Direction of a port wire from its RTLIL flags. A wire flagged
+// both input and output, or neither, reads as "inout".
+std::string PortDirection(Yosys::RTLIL::Wire* wire) {
+  if (wire->port_input && !wire->port_output) return "in";
+  if (wire->port_output && !wire->port_input) return "out";
+  return "inout";
+}
+
+// Ports of a module in declaration order, with directions from
+// the port wires. A port with no wire reads as "inout".
+std::vector<YosysEngine::BlockPort> ModulePorts(
+    Yosys::RTLIL::Module* module) {
+  std::vector<YosysEngine::BlockPort> ports;
+  if (module == nullptr) return ports;
+  for (const auto& port : module->ports) {
+    Yosys::RTLIL::Wire* wire = module->wire(port);
+    YosysEngine::BlockPort block_port;
+    block_port.name = port.unescape();
+    block_port.direction = wire == nullptr ? "inout" : PortDirection(wire);
+    ports.push_back(std::move(block_port));
+  }
+  return ports;
+}
+
+// Whether a cell is a submodule instance: its type names a module
+// of the live design and is not an upstream primitive. Mirrors
+// the Hierarchy walk's rule.
+bool IsBlockCell(Yosys::RTLIL::Cell* cell) {
+  const std::string type = cell->type.unescape();
+  if (type.empty() || type[0] == '$') return false;
+  return FindModule(type) != nullptr;
+}
+
+// Whether any bit of a connection touches a wire.
+bool SigTouchesWire(const Yosys::RTLIL::SigSpec& sig,
+                    Yosys::RTLIL::Wire* wire) {
+  for (const auto& bit : sig.bits()) {
+    if (bit.wire == wire) return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 YosysEngine::YosysEngine() {
@@ -517,6 +559,73 @@ Result<YosysEngine::HierarchyNode> YosysEngine::Hierarchy(
   std::vector<std::string> stack;
   BuildHierarchyNode(module, top, stack, root, kMaxHierarchyDepth);
   return root;
+}
+
+Result<YosysEngine::BlockDiagramData> YosysEngine::BlockDiagram(
+    const std::string& module_name) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  if (!IsPlainIdentifier(module_name)) {
+    return InvalidArgument("module name is not a plain identifier: " +
+                           module_name);
+  }
+  Yosys::RTLIL::Module* module = FindModule(module_name);
+  if (module == nullptr) {
+    return InvalidArgument("module not found in the live design: " +
+                           module_name);
+  }
+  YosysEngine::BlockDiagramData diagram;
+  diagram.module = module->name.unescape();
+  diagram.parent_ports = ModulePorts(module);
+  // Blocks: one per submodule-instance cell, sorted by instance.
+  std::vector<Yosys::RTLIL::Cell*> block_cells;
+  for (const auto& entry : module->cells_) {
+    Yosys::RTLIL::Cell* cell = entry.second;
+    if (!IsBlockCell(cell)) continue;
+    block_cells.push_back(cell);
+    YosysEngine::BlockInstance block;
+    block.instance = cell->name.unescape();
+    block.module = cell->type.unescape();
+    block.ports = ModulePorts(FindModule(block.module));
+    diagram.blocks.push_back(std::move(block));
+  }
+  std::sort(diagram.blocks.begin(), diagram.blocks.end(),
+            [](const YosysEngine::BlockInstance& a,
+               const YosysEngine::BlockInstance& b) {
+              return a.instance < b.instance;
+            });
+  // Nets: one per wire that touches a block or a parent port.
+  // Wires between primitives only are internal glue and are not
+  // reported.
+  for (const auto& entry : module->wires_) {
+    Yosys::RTLIL::Wire* wire = entry.second;
+    YosysEngine::BlockNet net;
+    net.name = wire->name.unescape();
+    if (wire->port_id != 0) net.terminals.push_back(net.name);
+    for (Yosys::RTLIL::Cell* cell : block_cells) {
+      for (const auto& connection : cell->connections()) {
+        if (!SigTouchesWire(connection.second, wire)) continue;
+        YosysEngine::BlockNetEndpoint endpoint;
+        endpoint.block = cell->name.unescape();
+        endpoint.port = connection.first.unescape();
+        net.endpoints.push_back(std::move(endpoint));
+      }
+    }
+    if (net.endpoints.empty() && net.terminals.empty()) continue;
+    std::sort(net.endpoints.begin(), net.endpoints.end(),
+              [](const YosysEngine::BlockNetEndpoint& a,
+                 const YosysEngine::BlockNetEndpoint& b) {
+                if (a.block != b.block) return a.block < b.block;
+                return a.port < b.port;
+              });
+    diagram.nets.push_back(std::move(net));
+  }
+  std::sort(diagram.nets.begin(), diagram.nets.end(),
+            [](const YosysEngine::BlockNet& a, const YosysEngine::BlockNet& b) {
+              return a.name < b.name;
+            });
+  return diagram;
 }
 
 Status YosysEngine::AigMap() {

@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "eos/ui/gui.h"
+#include "eos/ui/diagram.h"
 #include "eos/ui/hierarchy.h"
 #include "eos/ui/registry.h"
 #include "gtest/gtest.h"
@@ -12,6 +13,10 @@ namespace {
 using eos::ui::CommandContext;
 using eos::ui::CommandRegistry;
 using eos::ui::CommandResult;
+using eos::ui::BreadcrumbPaths;
+using eos::ui::DiagramBlock;
+using eos::ui::DiagramModel;
+using eos::ui::DiagramNet;
 using eos::ui::HierarchyModel;
 using eos::ui::HierarchyNode;
 using eos::ui::SessionView;
@@ -250,6 +255,327 @@ TEST(GuiSessionView, RefreshHierarchyClearsOnMalformedPayload) {
   SessionView view(registry, context);
   view.RefreshHierarchy();
   EXPECT_TRUE(view.Hierarchy().Empty());
+}
+
+const char kDiagramTopPayload[] =
+    "module=top\n"
+    "parent port=a direction=in\n"
+    "parent port=b direction=in\n"
+    "parent port=sel direction=in\n"
+    "parent port=y direction=out\n"
+    "block instance=u_ctrl module=ctrl ports=sel:in,op:out\n"
+    "block instance=u_mid module=mid ports=a:in,b:in,y:out\n"
+    "net name=a blocks=u_mid:a terminals=a\n"
+    "net name=b blocks=u_mid:b terminals=b\n"
+    "net name=m blocks=u_mid:y terminals=\n"
+    "net name=op blocks=u_ctrl:op terminals=\n"
+    "net name=sel blocks=u_ctrl:sel terminals=sel\n"
+    "net name=y blocks= terminals=y\n";
+
+const char kDiagramMidPayload[] =
+    "module=mid\n"
+    "parent port=a direction=in\n"
+    "parent port=b direction=in\n"
+    "parent port=y direction=out\n"
+    "block instance=u_add module=adder ports=a:in,b:in,y:out\n"
+    "net name=a blocks=u_add:a terminals=a\n"
+    "net name=b blocks=u_add:b terminals=b\n"
+    "net name=y blocks=u_add:y terminals=y\n";
+
+const char kDiagramLeafPayload[] =
+    "module=adder\n"
+    "parent port=a direction=in\n"
+    "parent port=b direction=in\n"
+    "parent port=y direction=out\n"
+    "net name=a blocks= terminals=a\n"
+    "net name=b blocks= terminals=b\n"
+    "net name=y blocks= terminals=y\n";
+
+const char kDiagramFlatPayload[] =
+    "module=optloop\n"
+    "parent port=a direction=in\n"
+    "parent port=b direction=in\n"
+    "parent port=c direction=in\n"
+    "parent port=d direction=in\n"
+    "parent port=y1 direction=out\n"
+    "parent port=y2 direction=out\n"
+    "net name=a blocks= terminals=a\n"
+    "net name=b blocks= terminals=b\n"
+    "net name=c blocks= terminals=c\n"
+    "net name=d blocks= terminals=d\n"
+    "net name=y1 blocks= terminals=y1\n"
+    "net name=y2 blocks= terminals=y2\n";
+
+TEST(DiagramModel, ParsesTopPayload) {
+  DiagramModel model;
+  ASSERT_TRUE(model.LoadPayload(kDiagramTopPayload));
+  EXPECT_FALSE(model.Empty());
+  EXPECT_EQ(model.Module(), "top");
+  ASSERT_EQ(model.ParentPorts().size(), 4u);
+  EXPECT_EQ(model.ParentPorts()[0].name, "a");
+  EXPECT_EQ(model.ParentPorts()[0].direction, "in");
+  EXPECT_EQ(model.ParentPorts()[3].name, "y");
+  EXPECT_EQ(model.ParentPorts()[3].direction, "out");
+  ASSERT_EQ(model.Blocks().size(), 2u);
+  EXPECT_EQ(model.Blocks()[0].instance, "u_ctrl");
+  EXPECT_EQ(model.Blocks()[0].module, "ctrl");
+  ASSERT_EQ(model.Blocks()[0].ports.size(), 2u);
+  EXPECT_EQ(model.Blocks()[0].ports[0].name, "sel");
+  EXPECT_EQ(model.Blocks()[0].ports[1].direction, "out");
+  EXPECT_EQ(model.Blocks()[1].instance, "u_mid");
+  const DiagramBlock* mid = model.FindBlock("u_mid");
+  ASSERT_NE(mid, nullptr);
+  EXPECT_EQ(mid->module, "mid");
+  EXPECT_EQ(model.FindBlock("u_nope"), nullptr);
+  ASSERT_EQ(model.Nets().size(), 6u);
+  const DiagramNet& m = model.Nets()[2];
+  EXPECT_EQ(m.name, "m");
+  ASSERT_EQ(m.endpoints.size(), 1u);
+  EXPECT_EQ(m.endpoints[0].block, "u_mid");
+  EXPECT_EQ(m.endpoints[0].port, "y");
+  EXPECT_TRUE(m.terminals.empty());
+  const DiagramNet& y = model.Nets()[5];
+  EXPECT_EQ(y.name, "y");
+  EXPECT_TRUE(y.endpoints.empty());
+  ASSERT_EQ(y.terminals.size(), 1u);
+  EXPECT_EQ(y.terminals[0], "y");
+}
+
+TEST(DiagramModel, ParsesLeafAndFlatPayloads) {
+  DiagramModel leaf;
+  ASSERT_TRUE(leaf.LoadPayload(kDiagramLeafPayload));
+  EXPECT_EQ(leaf.Module(), "adder");
+  EXPECT_TRUE(leaf.Blocks().empty());
+  ASSERT_EQ(leaf.Nets().size(), 3u);
+  EXPECT_TRUE(leaf.Nets()[0].endpoints.empty());
+  DiagramModel flat;
+  ASSERT_TRUE(flat.LoadPayload(kDiagramFlatPayload));
+  EXPECT_EQ(flat.Module(), "optloop");
+  EXPECT_TRUE(flat.Blocks().empty());
+  ASSERT_EQ(flat.ParentPorts().size(), 6u);
+  ASSERT_EQ(flat.Nets().size(), 6u);
+}
+
+TEST(DiagramModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      // No module line.
+      "parent port=a direction=in\n",
+      // Empty module.
+      "module=\n",
+      // Unknown key.
+      "module=top\nblock instance=x module=m ports=a:in extra=1\n",
+      // Duplicate block.
+      "module=top\nblock instance=x module=m ports=a:in\n"
+      "block instance=x module=m ports=a:in\n",
+      // Duplicate net.
+      "module=top\nparent port=a direction=in\n"
+      "net name=n blocks= terminals=a\n"
+      "net name=n blocks= terminals=a\n",
+      // Endpoint on an unknown block.
+      "module=top\nparent port=a direction=in\n"
+      "net name=n blocks=nope:a terminals=\n",
+      // Endpoint on an unknown port.
+      "module=top\nblock instance=x module=m ports=a:in\n"
+      "net name=n blocks=x:nope terminals=\n",
+      // Terminal on an unknown parent port.
+      "module=top\nnet name=n blocks= terminals=nope\n",
+      // Unknown direction.
+      "module=top\nparent port=a direction=sideways\n",
+      // Port without a direction.
+      "module=top\nblock instance=x module=m ports=a\n",
+      // Net with neither endpoints nor terminals.
+      "module=top\nnet name=n blocks= terminals=\n",
+      // Empty net name.
+      "module=top\nnet name= blocks= terminals=a\n",
+  };
+  for (const char* payload : bad) {
+    DiagramModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_TRUE(model.Empty());
+  }
+}
+
+TEST(DiagramModel, RejectsMalformedKeepsPreviousDiagram) {
+  DiagramModel model;
+  ASSERT_TRUE(model.LoadPayload(kDiagramTopPayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.Module(), "top");
+  EXPECT_EQ(model.Blocks().size(), 2u);
+}
+
+TEST(DiagramModel, ReloadReplacesPreviousDiagram) {
+  DiagramModel model;
+  ASSERT_TRUE(model.LoadPayload(kDiagramTopPayload));
+  ASSERT_TRUE(model.LoadPayload(kDiagramLeafPayload));
+  EXPECT_EQ(model.Module(), "adder");
+  EXPECT_TRUE(model.Blocks().empty());
+}
+
+TEST(BreadcrumbPaths, BuildsPrefixes) {
+  EXPECT_EQ(BreadcrumbPaths("top/u_mid/u_add"),
+            std::vector<std::string>(
+                {"top", "top/u_mid", "top/u_mid/u_add"}));
+  EXPECT_EQ(BreadcrumbPaths("top"), std::vector<std::string>({"top"}));
+  EXPECT_TRUE(BreadcrumbPaths("").empty());
+  EXPECT_TRUE(BreadcrumbPaths("top//x").empty());
+  EXPECT_TRUE(BreadcrumbPaths("/top").empty());
+  // A trailing slash yields no empty component under the
+  // getline split, so it is ignored: "top/" crumbs to "top".
+  EXPECT_EQ(BreadcrumbPaths("top/"), std::vector<std::string>({"top"}));
+}
+
+void RegisterBlocksCommand(CommandRegistry& registry,
+                           std::vector<std::string>* seen_module) {
+  auto status = registry.Register(
+      "synth_blocks", "synth_blocks <module>",
+      [seen_module](CommandContext&,
+                    const std::vector<std::string>& args) {
+        if (args.size() != 1) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "need a module");
+        }
+        if (seen_module != nullptr) *seen_module = args;
+        if (args[0] == "mid") return CommandResult::Ok(kDiagramMidPayload);
+        if (args[0] == "top") return CommandResult::Ok(kDiagramTopPayload);
+        if (args[0] == "optloop") {
+          return CommandResult::Ok(kDiagramFlatPayload);
+        }
+        return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                   "unknown module");
+      });
+  EXPECT_TRUE(status.ok());
+}
+
+void RegisterMutableHierarchyCommand(CommandRegistry& registry,
+                                     std::string& payload) {
+  auto status = registry.Register(
+      "synth_hierarchy", "synth_hierarchy",
+      [&payload](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
+TEST(GuiSessionView, RefreshDiagramPopulatesModelWithoutEcho) {
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kNestedPayload, true);
+  std::vector<std::string> seen_module;
+  RegisterBlocksCommand(registry, &seen_module);
+  CommandContext context;
+  context.synth.elaborated = true;
+  context.synth.top_cell = "top";
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  ASSERT_TRUE(view.SetDiagramLevel("top/u_mid"));
+  view.RefreshDiagram();
+  EXPECT_EQ(view.DiagramLevel(), "top/u_mid");
+  EXPECT_EQ(view.Diagram().Module(), "mid");
+  ASSERT_EQ(seen_module.size(), 1u);
+  EXPECT_EQ(seen_module[0], "mid");
+  EXPECT_TRUE(view.EchoLog().empty());
+}
+
+TEST(GuiSessionView, RefreshDiagramFallsBackToRootWhenLevelDrops) {
+  CommandRegistry registry;
+  std::string hierarchy_payload = kNestedPayload;
+  RegisterMutableHierarchyCommand(registry, hierarchy_payload);
+  RegisterBlocksCommand(registry, nullptr);
+  CommandContext context;
+  context.synth.elaborated = true;
+  context.synth.top_cell = "top";
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  ASSERT_TRUE(view.SetDiagramLevel("top/u_mid"));
+  view.RefreshDiagram();
+  EXPECT_EQ(view.Diagram().Module(), "mid");
+  hierarchy_payload = kFlatPayload;
+  view.RefreshHierarchy();
+  EXPECT_FALSE(view.Hierarchy().HasSelection());
+  view.RefreshDiagram();
+  EXPECT_EQ(view.DiagramLevel(), "optloop");
+  EXPECT_EQ(view.Diagram().Module(), "optloop");
+}
+
+TEST(GuiSessionView, RefreshDiagramClearsWhenNotElaborated) {
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kNestedPayload, true);
+  RegisterBlocksCommand(registry, nullptr);
+  CommandContext context;
+  context.synth.elaborated = true;
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  ASSERT_TRUE(view.SetDiagramLevel("top/u_mid"));
+  view.RefreshDiagram();
+  ASSERT_FALSE(view.Diagram().Empty());
+  context.synth.elaborated = false;
+  view.RefreshDiagram();
+  EXPECT_TRUE(view.Diagram().Empty());
+  EXPECT_TRUE(view.DiagramLevel().empty());
+}
+
+TEST(GuiSessionView, RefreshDiagramClearsOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kNestedPayload, true);
+  RegisterBlocksCommand(registry, nullptr);
+  CommandContext context;
+  context.synth.elaborated = true;
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  ASSERT_TRUE(view.SetDiagramLevel("top/u_mid"));
+  view.RefreshDiagram();
+  ASSERT_FALSE(view.Diagram().Empty());
+  CommandRegistry failing;
+  RegisterHierarchyCommand(failing, kNestedPayload, true);
+  auto status = failing.Register(
+      "synth_blocks", "synth_blocks <module>",
+      [](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                   "no elaborated design");
+      });
+  EXPECT_TRUE(status.ok());
+  CommandContext failing_ctx;
+  failing_ctx.synth.elaborated = true;
+  SessionView failing_view(failing, failing_ctx);
+  failing_view.RefreshHierarchy();
+  ASSERT_TRUE(failing_view.SetDiagramLevel("top/u_mid"));
+  failing_view.RefreshDiagram();
+  EXPECT_TRUE(failing_view.Diagram().Empty());
+  EXPECT_EQ(failing_view.DiagramLevel(), "top/u_mid");
+}
+
+TEST(GuiSessionView, RefreshDiagramClearsOnMalformedPayload) {
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kNestedPayload, true);
+  auto status = registry.Register(
+      "synth_blocks", "synth_blocks <module>",
+      [](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Ok("garbage\n");
+      });
+  EXPECT_TRUE(status.ok());
+  CommandContext context;
+  context.synth.elaborated = true;
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  ASSERT_TRUE(view.SetDiagramLevel("top/u_mid"));
+  view.RefreshDiagram();
+  EXPECT_TRUE(view.Diagram().Empty());
+}
+
+TEST(GuiSessionView, SetDiagramLevelValidatesAgainstTheTree) {
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kNestedPayload, true);
+  CommandContext context;
+  context.synth.elaborated = true;
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  EXPECT_TRUE(view.DiagramLevel().empty());
+  EXPECT_FALSE(view.SetDiagramLevel("top/nope"));
+  EXPECT_TRUE(view.DiagramLevel().empty());
+  EXPECT_FALSE(view.SetDiagramLevel(""));
+  ASSERT_TRUE(view.SetDiagramLevel("top/u_mid/u_add"));
+  EXPECT_EQ(view.DiagramLevel(), "top/u_mid/u_add");
+  EXPECT_FALSE(view.SetDiagramLevel("top/nope"));
+  EXPECT_EQ(view.DiagramLevel(), "top/u_mid/u_add");
 }
 
 }  // namespace

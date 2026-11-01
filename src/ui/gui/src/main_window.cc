@@ -12,6 +12,7 @@
 #include <string>
 
 #include "eos/ui/gui.h"
+#include "block_diagram.h"
 #include "hierarchy_browser.h"
 
 namespace eos::ui {
@@ -49,30 +50,35 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   stages_layout->addStretch();
   layout->addWidget(stages);
 
-  // Stepper: clicking a step shows that step's outputs in the center.
+  // Stepper: status from the session record. Clicking a step
+  // refreshes the window; the center is the block diagram (U3),
+  // and step outputs move to the right panels in U5.
   auto* stepper = new QWidget(root);
   auto* stepper_layout = new QHBoxLayout(stepper);
   for (int i = 0; i < 3; ++i) {
     step_buttons_[i] = new QPushButton(kStepNames[i], stepper);
     stepper_layout->addWidget(step_buttons_[i]);
-    connect(step_buttons_[i], &QPushButton::clicked, [this, i]() {
-      selected_step_ = i;
-      RefreshCenter();
+    connect(step_buttons_[i], &QPushButton::clicked, [this]() {
+      Refresh();
     });
   }
   stepper_layout->addStretch();
   layout->addWidget(stepper);
 
-  // Center row: hierarchy browser left, step outputs right. The
-  // browser is U2; the block diagram and schematic (U3, U4)
-  // replace the step-output label later, and the selection the
-  // browser records is what they will consume.
+  // Center row: hierarchy browser left, block diagram right.
+  // The browser is U2; the diagram is U3 and consumes the
+  // browser's selection, and the schematic (U4) replaces the
+  // diagram at leaf levels.
   auto* middle = new QSplitter(root);
   browser_ = new HierarchyBrowser(view_, middle);
+  browser_->SetSelectionCallback([this]() {
+    view_.SetDiagramLevel(view_.SelectedHierarchyPath());
+    Refresh();
+  });
   middle->addWidget(browser_);
-  center_ = new QLabel(middle);
-  center_->setWordWrap(true);
-  middle->addWidget(center_);
+  diagram_ = new BlockDiagram(view_, middle);
+  diagram_->SetActionCallback([this]() { Refresh(); });
+  middle->addWidget(diagram_);
   layout->addWidget(middle, 1);
 
   // Console echo: GUI-issued commands, read only in U1. Command
@@ -88,9 +94,10 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
 
 void MainWindow::Refresh() {
   view_.RefreshHierarchy();
+  view_.RefreshDiagram();
   browser_->Refresh();
+  diagram_->Refresh();
   RefreshSteps();
-  RefreshCenter();
   RefreshConsole();
 }
 
@@ -101,44 +108,6 @@ void MainWindow::RefreshSteps() {
     step_buttons_[i]->setText(
         QString::fromStdString(StepText(kStepNames[i], states[i])));
   }
-}
-
-std::string MainWindow::CenterText() const {
-  const CommandContext& ctx = view_.context();
-  if (selected_step_ == 0) {
-    if (!ctx.synth.parsed) return "No design loaded.";
-    if (!ctx.synth.filelist_path.empty()) {
-      return "File list: " + ctx.synth.filelist_path +
-             "\nTop: " + ctx.synth.top_cell;
-    }
-    return "File: " + ctx.synth.verilog_path +
-           "\nTop: " + ctx.synth.top_cell;
-  }
-  if (selected_step_ == 1) {
-    if (!ctx.synth.elaborated) {
-      return ctx.synth.parsed ? "Parsed, not elaborated."
-                              : "No design loaded.";
-    }
-    return "Cells: " + std::to_string(ctx.synth.elaborated_cells) +
-           "\nWires: " + std::to_string(ctx.synth.elaborated_wires) +
-           "\nDepth: " + std::to_string(ctx.synth.elaborated_depth);
-  }
-  if (!ctx.synth.generic_optimized) {
-    return ctx.synth.elaborated ? "Elaborated, generic synthesis not run."
-                                : "No design loaded.";
-  }
-  return "Script: " + ctx.synth.generic_script +
-         "\nBefore: " + std::to_string(ctx.synth.generic_before_and) +
-         " AND, " + std::to_string(ctx.synth.generic_before_levels) +
-         " levels\nAfter: " + std::to_string(ctx.synth.generic_after_and) +
-         " AND, " + std::to_string(ctx.synth.generic_after_levels) +
-         " levels\nCells: " + std::to_string(ctx.synth.elaborated_cells) +
-         "\nWires: " + std::to_string(ctx.synth.elaborated_wires) +
-         "\nDepth: " + std::to_string(ctx.synth.elaborated_depth);
-}
-
-void MainWindow::RefreshCenter() {
-  center_->setText(QString::fromStdString(CenterText()));
 }
 
 void MainWindow::RefreshConsole() {
