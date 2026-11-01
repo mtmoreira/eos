@@ -265,10 +265,17 @@
       "via": {}
     },
     "gui": {
-      "depends_on": [],
+      "depends_on": [
+        "registry"
+      ],
       "layer": "L6",
       "path": "src/ui/gui",
-      "via": {}
+      "via": {
+        "registry": [
+          "cmake-link",
+          "include"
+        ]
+      }
     },
     "ids": {
       "depends_on": [
@@ -957,6 +964,14 @@
       ],
       "sources": [
         "tests/unit/tech/package/package_test.cc"
+      ]
+    },
+    "ui.gui": {
+      "modules": [
+        "gui"
+      ],
+      "sources": [
+        "tests/unit/ui/gui/gui_test.cc"
       ]
     },
     "ui.registry": {

@@ -36,7 +36,7 @@ jobs:
           # commits) always run the full suite, so they do not use it.
           fetch-depth: 0
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y tcl-dev bison flex libfl-dev swig libeigen3-dev libboost-dev zlib1g-dev libspdlog-dev libfmt-dev
+        run: sudo apt-get update && sudo apt-get install -y tcl-dev bison flex libfl-dev swig libeigen3-dev libboost-dev zlib1g-dev libspdlog-dev libfmt-dev qt6-base-dev qt6-base-dev-tools
       - name: Configure
         run: cmake -S . -B build -DEOS_BUILD_TESTS=ON
       - name: Build

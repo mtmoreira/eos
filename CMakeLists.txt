@@ -82,3 +82,9 @@ if(EOS_BUILD_TESTS)
 endif()
 
 add_subdirectory(apps/eos)
+
+# The GUI binary exists only in a Qt build; without Qt the gui
+# module builds its logic and tests, and this target is skipped.
+if(EOS_HAVE_QT6)
+  add_subdirectory(apps/eos-gui)
+endif()

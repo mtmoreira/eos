@@ -322,4 +322,4 @@ modules:
     layer: L6
     path: src/ui/gui
     target: eda_ui_gui
-    adopted: false
+    adopted: true
