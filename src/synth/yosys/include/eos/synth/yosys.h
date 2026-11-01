@@ -279,6 +279,69 @@ class YosysEngine {
   // whatever design is live.
   Result<BlockDiagramData> BlockDiagram(const std::string& module);
 
+  // One port of a schematic gate, with its direction: "in" for
+  // every port the cell does not report as an output, "out"
+  // for an output port. Primitive cells have input and output
+  // ports only, so no "inout" arises here.
+  struct SchematicPort {
+    std::string name;
+    std::string direction;
+  };
+
+  // One gate of a module's schematic: a primitive cell (a cell
+  // that is not a submodule instance under the BlockDiagram
+  // rule), with its ports sorted by name, so the order never
+  // depends on Yosys's cell map order.
+  struct SchematicGate {
+    std::string instance;
+    std::string type;
+    std::vector<SchematicPort> ports;
+  };
+
+  // One endpoint of a schematic net on a gate: the instance and
+  // the port it touches.
+  struct SchematicNetEndpoint {
+    std::string gate;
+    std::string port;
+  };
+
+  // One net of a module's schematic: a wire, its endpoints on
+  // gates, and the parent ports it touches. A wire with no gate
+  // endpoint and no parent port (a wire that only touches
+  // submodule instances, in a module that is not a leaf) is not
+  // reported, mirroring the block diagram's rule. Nets are per
+  // wire vector, never per bit: a multi-bit connection
+  // contributes one endpoint.
+  struct SchematicNet {
+    std::string name;
+    std::vector<SchematicNetEndpoint> endpoints;
+    std::vector<std::string> terminals;
+  };
+
+  // A module's gate-level schematic: its parent ports in
+  // declaration order, its primitive cells sorted by instance
+  // name, and its nets sorted by wire name. Structural only: no
+  // delay, slew, capacitance, or slack is carried, because no
+  // Liberty timing exists at this stage.
+  struct SchematicData {
+    std::string module;
+    std::vector<BlockPort> parent_ports;
+    std::vector<SchematicGate> gates;
+    std::vector<SchematicNet> nets;
+  };
+
+  // Reads one module's gate-level schematic from the live
+  // design, without running any pass (like Hierarchy and
+  // BlockDiagram). Fails with kInvalidArgument when the module
+  // is not in the live design, and with kInvalidState when the
+  // engine does not own the session. Callers gate on
+  // elaboration; the walk itself reads whatever design is live,
+  // so it reports the elaborated design's primitives, not a
+  // later optimized netlist: after synth_generic replaces the
+  // live design, submodule boundaries are gone and a nested
+  // leaf module no longer exists to query.
+  Result<SchematicData> Schematic(const std::string& module);
+
   // Maps the live design onto the AIG form ABC reads: techmap
   // first, which converts sequential cells to their simple
   // forms ($dff to $_DFF_P_, so the BLIF backend writes them

@@ -14,6 +14,7 @@
 #include "eos/ui/gui.h"
 #include "block_diagram.h"
 #include "hierarchy_browser.h"
+#include "schematic_diagram.h"
 
 namespace eos::ui {
 
@@ -65,10 +66,11 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   stepper_layout->addStretch();
   layout->addWidget(stepper);
 
-  // Center row: hierarchy browser left, block diagram right.
-  // The browser is U2; the diagram is U3 and consumes the
-  // browser's selection, and the schematic (U4) replaces the
-  // diagram at leaf levels.
+  // Center row: hierarchy browser left, block diagram or
+  // schematic right. The browser is U2; the diagram is U3 and
+  // consumes the browser's selection, and the schematic (U4)
+  // replaces the diagram at leaf levels, as the bottom of the
+  // same navigation stack.
   auto* middle = new QSplitter(root);
   browser_ = new HierarchyBrowser(view_, middle);
   browser_->SetSelectionCallback([this]() {
@@ -79,6 +81,9 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   diagram_ = new BlockDiagram(view_, middle);
   diagram_->SetActionCallback([this]() { Refresh(); });
   middle->addWidget(diagram_);
+  schematic_ = new SchematicDiagram(view_, middle);
+  schematic_->SetActionCallback([this]() { Refresh(); });
+  middle->addWidget(schematic_);
   layout->addWidget(middle, 1);
 
   // Console echo: GUI-issued commands, read only in U1. Command
@@ -95,8 +100,17 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
 void MainWindow::Refresh() {
   view_.RefreshHierarchy();
   view_.RefreshDiagram();
+  view_.RefreshSchematic();
   browser_->Refresh();
   diagram_->Refresh();
+  schematic_->Refresh();
+  // The center shows exactly one of the diagram and the
+  // schematic: the schematic at a leaf level, the diagram
+  // elsewhere. The hidden widget keeps no state, so switching
+  // levels never shows a stale view.
+  const bool leaf = view_.DiagramLevelIsLeaf();
+  diagram_->setVisible(!leaf);
+  schematic_->setVisible(leaf);
   RefreshSteps();
   RefreshConsole();
 }
