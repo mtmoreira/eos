@@ -14,6 +14,7 @@
 #include "eos/ui/gui.h"
 #include "block_diagram.h"
 #include "hierarchy_browser.h"
+#include "panels_view.h"
 #include "schematic_diagram.h"
 
 namespace eos::ui {
@@ -52,14 +53,19 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   layout->addWidget(stages);
 
   // Stepper: status from the session record. Clicking a step
-  // refreshes the window; the center is the block diagram (U3),
-  // and step outputs move to the right panels in U5.
+  // shows that step's outputs in the right panels (Read shows
+  // Sources, Elaborate shows Results, Generic synth shows the
+  // Opt log) and refreshes the window; the center is the block
+  // diagram (U3) or the schematic at a leaf (U4).
   auto* stepper = new QWidget(root);
   auto* stepper_layout = new QHBoxLayout(stepper);
   for (int i = 0; i < 3; ++i) {
     step_buttons_[i] = new QPushButton(kStepNames[i], stepper);
     stepper_layout->addWidget(step_buttons_[i]);
-    connect(step_buttons_[i], &QPushButton::clicked, [this]() {
+    connect(step_buttons_[i], &QPushButton::clicked, [this, i]() {
+      // PanelsView is created below; clicks only happen after
+      // construction, so it is set by then.
+      panels_->ShowTab(i);
       Refresh();
     });
   }
@@ -84,6 +90,10 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   schematic_ = new SchematicDiagram(view_, middle);
   schematic_->SetActionCallback([this]() { Refresh(); });
   middle->addWidget(schematic_);
+  // Right panels (U5): sources, results, optimization log,
+  // and messages, rendered from the live session.
+  panels_ = new PanelsView(view_, middle);
+  middle->addWidget(panels_);
   layout->addWidget(middle, 1);
 
   // Console echo: GUI-issued commands, read only in U1. Command
@@ -101,9 +111,11 @@ void MainWindow::Refresh() {
   view_.RefreshHierarchy();
   view_.RefreshDiagram();
   view_.RefreshSchematic();
+  view_.RefreshPanels();
   browser_->Refresh();
   diagram_->Refresh();
   schematic_->Refresh();
+  panels_->Refresh();
   // The center shows exactly one of the diagram and the
   // schematic: the schematic at a leaf level, the diagram
   // elsewhere. The hidden widget keeps no state, so switching

@@ -5,6 +5,7 @@
 #include "eos/ui/gui.h"
 #include "eos/ui/diagram.h"
 #include "eos/ui/hierarchy.h"
+#include "eos/ui/panels.h"
 #include "eos/ui/registry.h"
 #include "eos/ui/schematic.h"
 #include "gtest/gtest.h"
@@ -20,6 +21,8 @@ using eos::ui::DiagramModel;
 using eos::ui::DiagramNet;
 using eos::ui::HierarchyModel;
 using eos::ui::HierarchyNode;
+using eos::ui::LiveStatsModel;
+using eos::ui::PanelsModel;
 using eos::ui::SchematicGate;
 using eos::ui::SchematicModel;
 using eos::ui::SchematicNet;
@@ -939,6 +942,270 @@ TEST(GuiSessionView, SetDiagramLevelValidatesAgainstTheTree) {
   EXPECT_EQ(view.DiagramLevel(), "top/u_mid/u_add");
   EXPECT_FALSE(view.SetDiagramLevel("top/nope"));
   EXPECT_EQ(view.DiagramLevel(), "top/u_mid/u_add");
+}
+
+const char kStatsPayload[] =
+    "module=optloop\n"
+    "cells=6 wires=10 depth=3 sequential=0\n"
+    "type $and 6\n";
+
+const char kStatsEmptyPayload[] =
+    "module=empty\n"
+    "cells=0 wires=0 depth=0 sequential=0\n";
+
+TEST(LiveStatsModel, ParsesPayload) {
+  LiveStatsModel model;
+  ASSERT_TRUE(model.LoadPayload(kStatsPayload));
+  EXPECT_FALSE(model.Empty());
+  EXPECT_EQ(model.Module(), "optloop");
+  EXPECT_EQ(model.Cells(), 6);
+  EXPECT_EQ(model.Wires(), 10);
+  EXPECT_EQ(model.Depth(), 3);
+  EXPECT_EQ(model.Sequential(), 0);
+  ASSERT_EQ(model.Types().size(), 1u);
+  EXPECT_EQ(model.Types()[0].type, "$and");
+  EXPECT_EQ(model.Types()[0].count, 6);
+}
+
+TEST(LiveStatsModel, ParsesEmptyDesign) {
+  LiveStatsModel model;
+  ASSERT_TRUE(model.LoadPayload(kStatsEmptyPayload));
+  EXPECT_EQ(model.Module(), "empty");
+  EXPECT_EQ(model.Cells(), 0);
+  EXPECT_TRUE(model.Types().empty());
+}
+
+TEST(LiveStatsModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      "",
+      "module=optloop\n",
+      "cells=6 wires=10 depth=3 sequential=0\n",
+      "module=optloop\ncells=6 wires=10 depth=3\ntype $and 6\n",
+      "module=optloop\ncells=6 wires=10 depth=3 sequential=x\n",
+      "module=optloop\ncells=6 wires=10 depth=-3 sequential=0\n",
+      "module=optloop\ncells=6 wires=10 depth=3 sequential=0\n"
+      "type $and\n",
+      "module=optloop\ncells=6 wires=10 depth=3 sequential=0\n"
+      "type $and 6 extra\n",
+      "module=optloop\ncells=6 wires=10 depth=3 sequential=0\n"
+      "type $and 6\ntype $and 1\n",
+      "module=optloop\ncells=6 wires=10 depth=3 sequential=0\n"
+      "type $dff 2\ntype $and 6\n",
+      "module=optloop\ncells=6 wires=10 depth=3 sequential=0\n"
+      "gate $and 6\n",
+      "module=optloop\ncells=6 wires=10 depth=3 sequential=0\n\n"
+      "type $and 6\n",
+  };
+  for (const char* payload : bad) {
+    LiveStatsModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_TRUE(model.Empty());
+  }
+}
+
+TEST(LiveStatsModel, RejectsMalformedKeepsPrevious) {
+  LiveStatsModel model;
+  ASSERT_TRUE(model.LoadPayload(kStatsPayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.Module(), "optloop");
+  EXPECT_EQ(model.Cells(), 6);
+  ASSERT_EQ(model.Types().size(), 1u);
+  EXPECT_EQ(model.Types()[0].type, "$and");
+}
+
+TEST(LiveStatsModel, ReloadReplacesPrevious) {
+  LiveStatsModel model;
+  ASSERT_TRUE(model.LoadPayload(kStatsPayload));
+  ASSERT_TRUE(model.LoadPayload(kStatsEmptyPayload));
+  EXPECT_EQ(model.Module(), "empty");
+  EXPECT_EQ(model.Cells(), 0);
+  EXPECT_TRUE(model.Types().empty());
+}
+
+void RegisterStatsCommand(CommandRegistry& registry,
+                          const std::string& payload, bool ok) {
+  auto status = registry.Register(
+      "synth_stats", "synth_stats",
+      [payload, ok](CommandContext&, const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no elaborated design");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
+void FillPanelsContext(CommandContext& context) {
+  context.synth.parsed = true;
+  context.synth.top_cell = "optloop";
+  context.synth.verilog_path = "demo/synth/optloop.v";
+  context.synth.elaborated = true;
+  context.synth.elaborated_cells = 6;
+  context.synth.elaborated_wires = 10;
+  context.synth.elaborated_depth = 3;
+  context.synth.generic_optimized = true;
+  context.synth.generic_script = "default";
+  context.synth.generic_before_and = 6;
+  context.synth.generic_before_levels = 3;
+  context.synth.generic_after_and = 3;
+  context.synth.generic_after_levels = 2;
+  context.synth.generic_verilog = "demo/synth/optloop_generic.v";
+}
+
+TEST(GuiSessionView, RefreshPanelsPopulatesFromRecordAndStatsWithoutEcho) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, kStatsPayload, true);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  const PanelsModel& panels = view.Panels();
+  EXPECT_TRUE(panels.parsed);
+  EXPECT_EQ(panels.top, "optloop");
+  EXPECT_EQ(panels.verilog_path, "demo/synth/optloop.v");
+  EXPECT_TRUE(panels.filelist_path.empty());
+  EXPECT_TRUE(panels.filelist_files.empty());
+  EXPECT_TRUE(panels.elaborated);
+  EXPECT_EQ(panels.elaborated_cells, 6);
+  EXPECT_EQ(panels.elaborated_wires, 10);
+  EXPECT_EQ(panels.elaborated_depth, 3);
+  EXPECT_TRUE(panels.generic_run);
+  EXPECT_EQ(panels.generic_script, "default");
+  EXPECT_EQ(panels.generic_before_and, 6);
+  EXPECT_EQ(panels.generic_before_levels, 3);
+  EXPECT_EQ(panels.generic_after_and, 3);
+  EXPECT_EQ(panels.generic_after_levels, 2);
+  EXPECT_EQ(panels.SavedAnd(), 3);
+  EXPECT_EQ(panels.SavedLevels(), 1);
+  EXPECT_EQ(panels.generic_verilog, "demo/synth/optloop_generic.v");
+  EXPECT_FALSE(panels.live_stats.Empty());
+  EXPECT_EQ(panels.live_stats.Module(), "optloop");
+  EXPECT_EQ(panels.live_stats.Cells(), 6);
+  EXPECT_EQ(panels.live_stats.Wires(), 10);
+  EXPECT_EQ(panels.live_stats.Depth(), 3);
+  ASSERT_EQ(panels.live_stats.Types().size(), 1u);
+  EXPECT_EQ(panels.live_stats.Types()[0].type, "$and");
+  EXPECT_EQ(panels.live_stats.Types()[0].count, 6);
+  EXPECT_TRUE(view.EchoLog().empty());
+  EXPECT_TRUE(view.Messages().empty());
+}
+
+TEST(GuiSessionView, RefreshPanelsFilelistShape) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, kStatsPayload, true);
+  CommandContext context;
+  context.synth.parsed = true;
+  context.synth.top_cell = "top";
+  context.synth.filelist_path = "demo/synth/design.f";
+  context.synth.filelist_files = {"a.v", "b.v"};
+  context.synth.elaborated = true;
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  const PanelsModel& panels = view.Panels();
+  EXPECT_TRUE(panels.parsed);
+  EXPECT_EQ(panels.top, "top");
+  EXPECT_TRUE(panels.verilog_path.empty());
+  EXPECT_EQ(panels.filelist_path, "demo/synth/design.f");
+  ASSERT_EQ(panels.filelist_files.size(), 2u);
+  EXPECT_EQ(panels.filelist_files[0], "a.v");
+  EXPECT_EQ(panels.filelist_files[1], "b.v");
+}
+
+TEST(GuiSessionView, RefreshPanelsClearsWhenNotParsed) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, kStatsPayload, true);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  ASSERT_TRUE(view.Panels().parsed);
+  context.synth.parsed = false;
+  view.RefreshPanels();
+  EXPECT_FALSE(view.Panels().parsed);
+  EXPECT_FALSE(view.Panels().elaborated);
+  EXPECT_FALSE(view.Panels().generic_run);
+  EXPECT_TRUE(view.Panels().live_stats.Empty());
+}
+
+TEST(GuiSessionView, RefreshPanelsClearsLiveStatsWhenNotElaborated) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, kStatsPayload, true);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  ASSERT_FALSE(view.Panels().live_stats.Empty());
+  context.synth.elaborated = false;
+  view.RefreshPanels();
+  EXPECT_TRUE(view.Panels().parsed);
+  EXPECT_FALSE(view.Panels().elaborated);
+  EXPECT_FALSE(view.Panels().generic_run);
+  EXPECT_TRUE(view.Panels().live_stats.Empty());
+}
+
+TEST(GuiSessionView, RefreshPanelsKeepsRecordClearsLiveStatsOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, "", false);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  EXPECT_TRUE(view.Panels().parsed);
+  EXPECT_TRUE(view.Panels().elaborated);
+  EXPECT_EQ(view.Panels().elaborated_cells, 6);
+  EXPECT_TRUE(view.Panels().generic_run);
+  EXPECT_TRUE(view.Panels().live_stats.Empty());
+}
+
+TEST(GuiSessionView, RefreshPanelsKeepsRecordClearsLiveStatsOnMalformedPayload) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, "garbage\n", true);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  EXPECT_TRUE(view.Panels().parsed);
+  EXPECT_TRUE(view.Panels().elaborated);
+  EXPECT_TRUE(view.Panels().generic_run);
+  EXPECT_TRUE(view.Panels().live_stats.Empty());
+}
+
+TEST(GuiSessionView, DispatchRecordsMessageOnFailure) {
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  const CommandResult result = view.Dispatch("nope", {});
+  EXPECT_FALSE(result.ok);
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0],
+            "eos::nope: EOS invalid_command: unknown command: eos::nope");
+  ASSERT_EQ(view.EchoLog().size(), 1u);
+  EXPECT_EQ(view.EchoLog()[0], "eos::nope");
+}
+
+TEST(GuiSessionView, DispatchRecordsNoMessageOnSuccess) {
+  CommandRegistry registry;
+  RegisterPing(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  const CommandResult result = view.Dispatch("ping", {});
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(view.Messages().empty());
+}
+
+TEST(GuiSessionView, MessagesSurviveRefreshPanels) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, kStatsPayload, true);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  ASSERT_FALSE(view.Dispatch("nope", {}).ok);
+  ASSERT_EQ(view.Messages().size(), 1u);
+  view.RefreshPanels();
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0],
+            "eos::nope: EOS invalid_command: unknown command: eos::nope");
 }
 
 }  // namespace

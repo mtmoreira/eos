@@ -59,9 +59,11 @@ TEST(Registry, CoreSetIsComplete) {
   // S1 adds elaborate and synth_generic; S2 adds synth_map; S3
   // adds synth_opt; S4 adds read_filelist; S7 adds
   // write_verilog, check_equivalence, and synth_report; P1 adds
-  // floorplan; U3 adds synth_blocks; U4 adds synth_schematic.
-  EXPECT_EQ(shell.registry.Names().size(), 50u);
+  // floorplan; U3 adds synth_blocks; U4 adds synth_schematic;
+  // U5 adds synth_stats.
+  EXPECT_EQ(shell.registry.Names().size(), 51u);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
+  EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
   EXPECT_NE(shell.registry.Find("write_verilog"), nullptr);
   EXPECT_NE(shell.registry.Find("check_equivalence"), nullptr);
@@ -2918,6 +2920,79 @@ TEST(CommandContext, HasDesignTracksCreateDesign) {
   EXPECT_FALSE(shell.ctx.HasDesign());
   ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
   EXPECT_TRUE(shell.ctx.HasDesign());
+}
+
+TEST(CoreCommands, SynthStatsFailsFastWhenNotElaborated) {
+  Shell shell;
+  const CommandResult fresh = shell.Run("synth_stats");
+  EXPECT_FALSE(fresh.ok);
+  EXPECT_EQ(fresh.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(fresh.message.find("no elaborated design: eos::elaborate first"),
+            std::string::npos);
+  TimingTempDir dir;
+  Shell parsed;
+  ASSERT_TRUE(parsed
+                  .Run("read_verilog",
+                       {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                  .ok);
+  const CommandResult unelaborated = parsed.Run("synth_stats");
+  EXPECT_FALSE(unelaborated.ok);
+  EXPECT_EQ(unelaborated.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, SynthStatsRejectsBadArguments) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult extra = shell.Run("synth_stats", {"optloop"});
+  EXPECT_FALSE(extra.ok);
+  EXPECT_EQ(extra.diag, Diag::kInvalidConfiguration);
+}
+
+// The stats for the flat optloop, from the live elaborated
+// design: six $and gates in two unshared chains of three, no
+// sequential cells. The wires count is the live engine's own
+// number, pinned from a run of this test, not derived by hand:
+// the elaborated design's wire set includes the internal chain
+// wires plus the ports.
+TEST(CoreCommands, SynthStatsFlatReportsExactPayload) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("optloop.v", kSynthOptLoopDemo), "optloop"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult stats = shell.Run("synth_stats");
+  ASSERT_TRUE(stats.ok) << stats.message;
+  EXPECT_EQ(stats.payload,
+            "module=optloop\n"
+            "cells=6 wires=10 depth=3 sequential=0\n"
+            "type $and 6\n");
+}
+
+// After synth_generic the live design is the generic netlist,
+// so synth_stats reports the generic result: three $and gates
+// at depth 2, the shared product folded away.
+TEST(CoreCommands, SynthStatsAfterGenericReportsGenericNetlist) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("optloop.v", kSynthOptLoopDemo), "optloop"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  const CommandResult stats = shell.Run("synth_stats");
+  ASSERT_TRUE(stats.ok) << stats.message;
+  EXPECT_NE(stats.payload.find("module=optloop"), std::string::npos);
+  EXPECT_NE(stats.payload.find("cells=3"), std::string::npos);
+  EXPECT_NE(stats.payload.find("depth=2"), std::string::npos);
+  EXPECT_NE(stats.payload.find("type $and 3"), std::string::npos);
 }
 
 }  // namespace

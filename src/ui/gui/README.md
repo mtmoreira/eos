@@ -4,7 +4,7 @@ The GUI adapter over the command registry, thin by design: every GUI
 action issues a registry command and renders its machine-readable
 result, so the CLI and the GUI cannot drift.
 
-Status: units U1, U2, U3, and U4 of the minimal Elaboration slice
+Status: units U1, U2, U3, U4, and U5 of the minimal Elaboration slice
 (owner approval 2026-10-31, Qt decided 2026-10-31). U1 delivers
 the skeleton: the window, the stage bar (Elaboration active,
 later stages greyed), the Read/Elaborate/Generic synth stepper
@@ -26,9 +26,17 @@ leaf test, and the schematic widget (gates with labeled nets,
 breadcrumb to ascend) in the center, replacing the block diagram
 exactly at leaf levels, as the bottom of the same navigation
 stack. The schematic is structural only: no delay, slew,
-capacitance, or slack annotation. Right panels (U5), console
-command entry (U6), and packaging (U7) are later units, not
-this one.
+capacitance, or slack annotation. U5 delivers the right panels:
+the synth_stats registry query over the live design, the
+PanelsModel, and the panels widget (Sources, Results, Opt log,
+Messages tabs) in the middle splitter. Clicking a stepper step
+shows that step's outputs in the panels (Read shows Sources,
+Elaborate shows Results, Generic synth shows the Opt log); the
+stepper keeps only its per-step state, and the detailed outputs
+live in the panels. Messages are diagnostics only: a rejected
+dispatch records one line, a successful dispatch records none.
+Console command entry (U6) and packaging (U7) are later units,
+not this one.
 
 ## Build
 

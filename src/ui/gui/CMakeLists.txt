@@ -10,6 +10,7 @@ add_library(eda_ui_gui STATIC
   src/gui_session.cc
   src/diagram.cc
   src/hierarchy.cc
+  src/panels.cc
   src/schematic.cc)
 target_include_directories(eda_ui_gui PUBLIC include)
 target_link_libraries(eda_ui_gui PUBLIC eda_ui_registry)
@@ -21,6 +22,7 @@ if(Qt6_FOUND)
     src/hierarchy_browser.cc
     src/block_diagram.cc
     src/schematic_diagram.cc
+    src/panels_view.cc
     src/gui_app.cc)
   target_include_directories(eda_ui_gui PRIVATE internal)
   target_link_libraries(eda_ui_gui PUBLIC Qt6::Widgets)
