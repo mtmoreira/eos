@@ -219,6 +219,12 @@ modules:
     target: eda_pd_pdr
     adopted: true
     upstream: "OpenROAD pdr and stt (FLUTE) at a5a56584 (v2.0)"
+  - name: rsz
+    layer: L4
+    path: src/pd/rsz
+    target: eda_pd_rsz
+    adopted: true
+    upstream: "OpenROAD rsz at a5a56584 (v2.0)"
   - name: floorplan
     layer: L4
     path: src/pd/floorplan
