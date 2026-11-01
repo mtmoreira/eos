@@ -124,6 +124,11 @@ target_link_libraries(eda_tech_package_unit_test
   PRIVATE eda_tech_package GTest::gtest GTest::gtest_main)
 add_test(NAME tech.package COMMAND eda_tech_package_unit_test)
 
+add_executable(eda_pd_floorplan_unit_test pd/floorplan/floorplan_test.cc)
+target_link_libraries(eda_pd_floorplan_unit_test
+  PRIVATE eda_pd_floorplan eda_db_odb GTest::gtest GTest::gtest_main)
+add_test(NAME pd.floorplan COMMAND eda_pd_floorplan_unit_test)
+
 add_executable(eda_ui_registry_unit_test ui/registry/registry_test.cc)
 target_link_libraries(eda_ui_registry_unit_test
   PRIVATE eda_ui_registry eda_db_checkpoint GTest::gtest GTest::gtest_main)

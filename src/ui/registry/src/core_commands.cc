@@ -7,11 +7,14 @@
 #include "eos/ui/registry.h"
 
 #include "eos/analysis/sta.h"
+#include "eos/pd/floorplan.h"
+#include "odb/db.h"
 #include "eos/session/flow.h"
 #include "eos/synth/abc.h"
 #include "eos/synth/yosys.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -85,6 +88,16 @@ std::optional<CommandResult> CheckReadable(const std::string& path) {
 }
 
 bool ParseU64(const std::string& token, std::uint64_t& out) {
+  const char* first = token.data();
+  const char* last = first + token.size();
+  const auto result = std::from_chars(first, last, out);
+  return result.ec == std::errc() && result.ptr == last;
+}
+
+// Database-unit coordinates may be negative (a die area need not
+// start at the origin), so floorplan areas parse as signed ints,
+// unlike the unsigned counts ParseU64 serves elsewhere.
+bool ParseCoord(const std::string& token, int& out) {
   const char* first = token.data();
   const char* last = first + token.size();
   const auto result = std::from_chars(first, last, out);
@@ -1486,6 +1499,108 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             " masters=" + std::to_string(database.MasterCount()));
         ctx.timing.odb = std::move(database);
         return result;
+      });
+
+  add("floorplan",
+      "floorplan [-die_area <lx> <ly> <ux> <uy>] "
+      "[-core_area <lx> <ly> <ux> <uy>] [-site <name>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        pd::FloorplanOptions options;
+        bool die_seen = false;
+        bool core_seen = false;
+        bool site_seen = false;
+        for (std::size_t i = 0; i < args.size();) {
+          const std::string& flag = args[i];
+          bool is_area = false;
+          std::array<int, 4>* area = nullptr;
+          bool* seen = nullptr;
+          if (flag == "-die_area") {
+            is_area = true;
+            area = &options.die_area;
+            seen = &die_seen;
+          } else if (flag == "-core_area") {
+            is_area = true;
+            area = &options.core_area;
+            seen = &core_seen;
+          }
+          if (is_area) {
+            if (*seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option " + flag + " given twice");
+            }
+            if (i + 4 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option " + flag + " needs four coordinates");
+            }
+            for (int k = 0; k < 4; ++k) {
+              if (!ParseCoord(args[i + 1 + k], (*area)[k])) {
+                return CommandResult::Fail(
+                    Diag::kInvalidConfiguration,
+                    "option " + flag + " coordinate is not an integer: " +
+                        args[i + 1 + k]);
+              }
+            }
+            *seen = true;
+            if (flag == "-die_area") {
+              options.has_die_area = true;
+            } else {
+              options.has_core_area = true;
+            }
+            i += 5;
+            continue;
+          }
+          if (flag == "-site") {
+            if (site_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -site given twice");
+            }
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -site needs a value");
+            }
+            site_seen = true;
+            options.site = args[i + 1];
+            i += 2;
+            continue;
+          }
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "unknown floorplan option: " + flag);
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (!ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no mapped design: the imported database holds no top "
+              "block");
+        }
+        pd::FloorplanReport report;
+        const foundation::Status status = pd::RunFloorplan(
+            ctx.timing.odb->RawDatabase(), options, &report);
+        if (!status.ok()) return FromStatus(status);
+        auto area_text = [](const std::array<int, 4>& area) {
+          return std::to_string(area[0]) + "," + std::to_string(area[1]) +
+                 "," + std::to_string(area[2]) + "," +
+                 std::to_string(area[3]);
+        };
+        return CommandResult::Ok(
+            "die_area=" + area_text(report.die_area) +
+            " core_area=" + area_text(report.core_area) +
+            " rows=" + std::to_string(report.row_count) +
+            " track_grids=" + std::to_string(report.track_grid_count) +
+            " io_placed=" + std::to_string(report.io_placed_count) +
+            " io_total=" + std::to_string(report.io_total_count));
       });
 
   add("read_liberty", "read_liberty <corner> <path>",

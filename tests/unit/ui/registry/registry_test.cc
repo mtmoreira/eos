@@ -58,8 +58,10 @@ TEST(Registry, CoreSetIsComplete) {
   // The count is a contract: adding a command means updating it.
   // S1 adds elaborate and synth_generic; S2 adds synth_map; S3
   // adds synth_opt; S4 adds read_filelist; S7 adds
-  // write_verilog, check_equivalence, and synth_report.
-  EXPECT_EQ(shell.registry.Names().size(), 46u);
+  // write_verilog, check_equivalence, and synth_report; P1 adds
+  // floorplan.
+  EXPECT_EQ(shell.registry.Names().size(), 47u);
+  EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
   EXPECT_NE(shell.registry.Find("write_verilog"), nullptr);
   EXPECT_NE(shell.registry.Find("check_equivalence"), nullptr);
@@ -2407,6 +2409,116 @@ TEST(CoreCommands, CloseTimingDiagnostics) {
   const CommandResult no_design = shell.Run("close_timing", {"3"});
   ASSERT_FALSE(no_design.ok);
   EXPECT_EQ(no_design.diag, Diag::kUnclosedDesign);
+}
+
+// P1: eos::floorplan runs on the imported design, reports rows,
+// tracks and placed IO, and fails fast on bad options and on
+// missing session state. The DEF pins carry PORT rectangles:
+// odb creates a placed BPin only from port geometry, so the
+// shared kTimingDef pins (placement without a PORT) would report
+// io_placed=0. This local DEF is kTimingDef with ports added;
+// nothing else in the shared fixture is changed.
+const char kFloorplanDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 2 ;
+- u1 BUFX2 + PLACED ( 1000 1000 ) N ;
+- u2 BUFX2 + PLACED ( 2000 1000 ) N ;
+END COMPONENTS
+PINS 2 ;
+- in1 + NET n_in + DIRECTION INPUT + USE SIGNAL
+  + PORT
+  + LAYER metal1 ( -50 -50 ) ( 50 50 )
+  + PLACED ( 0 5000 ) N ;
+- out1 + NET n_out + DIRECTION OUTPUT + USE SIGNAL
+  + PORT
+  + LAYER metal1 ( -50 -50 ) ( 50 50 )
+  + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 3 ;
+- n_in ( PIN in1 ) ( u1 A ) ;
+- n_mid ( u1 Y ) ( u2 A ) ;
+- n_out ( u2 Y ) ( PIN out1 ) ;
+END NETS
+END DESIGN
+)DEF";
+
+TEST(CoreCommands, FloorplanRunsOnImportedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  const CommandResult result = shell.Run(
+      "floorplan",
+      {"-die_area", "0", "0", "10000", "10000", "-core_area", "0", "0",
+       "10000", "10000", "-site", "core"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("die_area=0,0,10000,10000"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("core_area=0,0,10000,10000"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("io_placed=2"), std::string::npos);
+  EXPECT_NE(result.payload.find("io_total=2"), std::string::npos);
+  // Rows exist and the default run (no areas, no site) works too.
+  EXPECT_NE(result.payload.find("rows="), std::string::npos);
+  const CommandResult again = shell.Run("floorplan", {});
+  ASSERT_TRUE(again.ok) << again.message;
+}
+
+TEST(CoreCommands, FloorplanFailsFastWithoutTechnology) {
+  Shell shell;
+  const CommandResult result = shell.Run("floorplan", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no technology data"), std::string::npos);
+}
+
+TEST(CoreCommands, FloorplanFailsFastWithoutMappedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  Shell shell;
+  shell.ctx.timing.odb = std::move(database);
+  const CommandResult result = shell.Run("floorplan", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kUnclosedDesign);
+  EXPECT_NE(result.message.find("no mapped design"), std::string::npos);
+}
+
+TEST(CoreCommands, FloorplanRejectsBadOptions) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kTimingDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+
+  const CommandResult unknown = shell.Run("floorplan", {"-bogus"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  const CommandResult duplicate =
+      shell.Run("floorplan", {"-site", "core", "-site", "core"});
+  ASSERT_FALSE(duplicate.ok);
+  const CommandResult missing =
+      shell.Run("floorplan", {"-die_area", "0", "0"});
+  ASSERT_FALSE(missing.ok);
+  const CommandResult not_a_number = shell.Run(
+      "floorplan", {"-die_area", "0", "0", "wide", "10000"});
+  ASSERT_FALSE(not_a_number.ok);
+  const CommandResult unknown_site =
+      shell.Run("floorplan", {"-site", "no_such_site"});
+  ASSERT_FALSE(unknown_site.ok);
+  EXPECT_NE(unknown_site.message.find("unknown site"), std::string::npos);
 }
 
 // S6 backfill: HasDesign mirrors the project's design state.

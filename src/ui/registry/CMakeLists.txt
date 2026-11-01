@@ -11,5 +11,6 @@ target_link_libraries(eda_ui_registry
          eda_db_design eda_db_scenarios eda_db_constraints
          eda_db_checkpoint eda_db_odb eda_analysis_timing
          eda_foundation_ids eda_foundation_errors
+         eda_pd_floorplan
          eda_synth_abc
          "$<LINK_LIBRARY:WHOLE_ARCHIVE,eda_synth_yosys>")

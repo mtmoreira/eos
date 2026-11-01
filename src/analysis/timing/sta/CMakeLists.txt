@@ -462,8 +462,12 @@ add_library(eda_analysis_sta STATIC
   ${BISON_eos_sta_saif_parse_OUTPUTS}
   $<TARGET_OBJECTS:eos_sta_cudd>
 )
+# P1 (place-and-route unit P1) promotes the generated
+# include/sta dir to PUBLIC: public sta headers (Delay.hh)
+# include StaConfig.hh, which lives only there. This is
+# EOS-owned CMake, not an upstream patch.
 target_include_directories(eda_analysis_sta
-  PUBLIC include
+  PUBLIC include ${CMAKE_CURRENT_BINARY_DIR}/include/sta
   PRIVATE
     include/sta
     src
@@ -471,7 +475,6 @@ target_include_directories(eda_analysis_sta
     src/cudd/mtr
     ${CMAKE_CURRENT_BINARY_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}/include
-    ${CMAKE_CURRENT_BINARY_DIR}/include/sta
     ${FLEX_INCLUDE_DIRS}
 )
 if(TCL_FOUND)

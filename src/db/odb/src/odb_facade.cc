@@ -461,6 +461,8 @@ Status OdbDatabase::WriteVerilog(const std::string& path) const {
 
 bool OdbDatabase::has_top_block() const { return impl_->TopBlock() != nullptr; }
 
+odb::dbDatabase* OdbDatabase::RawDatabase() const { return impl_->db; }
+
 std::string OdbDatabase::TopBlockName() const {
   odb::dbBlock* block = impl_->TopBlock();
   return block == nullptr ? std::string() : block->getName();

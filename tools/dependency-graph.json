@@ -93,6 +93,24 @@
       "path": "src/pd/cts",
       "via": {}
     },
+    "dbsta": {
+      "depends_on": [
+        "odb",
+        "sta"
+      ],
+      "layer": "L4",
+      "path": "src/pd/dbsta",
+      "via": {
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
     "def": {
       "depends_on": [],
       "layer": "L1",
@@ -142,10 +160,32 @@
       "via": {}
     },
     "floorplan": {
-      "depends_on": [],
+      "depends_on": [
+        "dbsta",
+        "errors",
+        "odb",
+        "sta"
+      ],
       "layer": "L4",
       "path": "src/pd/floorplan",
-      "via": {}
+      "via": {
+        "dbsta": [
+          "cmake-link",
+          "include"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link",
+          "include"
+        ]
+      }
     },
     "flow": {
       "depends_on": [
@@ -377,6 +417,7 @@
         "constraints",
         "design",
         "errors",
+        "floorplan",
         "flow",
         "ids",
         "ledger",
@@ -407,6 +448,10 @@
           "include"
         ],
         "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "floorplan": [
           "cmake-link",
           "include"
         ],
@@ -794,6 +839,15 @@
       ],
       "sources": [
         "tests/unit/foundation/ids/ids_test.cc"
+      ]
+    },
+    "pd.floorplan": {
+      "modules": [
+        "floorplan",
+        "odb"
+      ],
+      "sources": [
+        "tests/unit/pd/floorplan/floorplan_test.cc"
       ]
     },
     "qualification.phase1_exit": {

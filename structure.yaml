@@ -207,11 +207,17 @@ modules:
     path: src/synth/optimizers
     target: eda_synth_optimizers
     adopted: false
+  - name: dbsta
+    layer: L4
+    path: src/pd/dbsta
+    target: eda_pd_dbsta
+    adopted: true
+    upstream: OpenROAD dbSta network bridge (src/dbSta) at ead3236
   - name: floorplan
     layer: L4
     path: src/pd/floorplan
     target: eda_pd_floorplan
-    adopted: false
+    adopted: true
   - name: place
     layer: L4
     path: src/pd/place

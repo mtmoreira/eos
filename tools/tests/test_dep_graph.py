@@ -281,7 +281,8 @@ def test_real_repo_check_passes_and_rules_hold():
     assert result.returncode == 0, result.stdout + result.stderr
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     all_tests = sorted(graph["tests"])
-    assert len(all_tests) == 25
+    # P1 adds pd.floorplan, the 26th ctest entry.
+    assert len(all_tests) == 26
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),
