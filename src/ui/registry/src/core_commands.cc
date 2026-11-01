@@ -385,6 +385,31 @@ std::string SynthStatsText(const synth::YosysNetlistStats& stats) {
          " types=" + types;
 }
 
+// Renders one hierarchy node per line, pre-order, so a consumer
+// rebuilds the tree from paths alone: a node's parent is its path
+// up to the last "/". Port names cannot contain commas or spaces
+// (plain Verilog identifiers), so the comma list is unambiguous,
+// and an empty list renders as an empty value, never omitted.
+void HierarchyTextLines(const synth::YosysEngine::HierarchyNode& node,
+                        std::string& out) {
+  std::string ports;
+  for (const std::string& port : node.ports) {
+    if (!ports.empty()) ports += ",";
+    ports += port;
+  }
+  out += "node path=" + node.path + " module=" + node.module +
+         " ports=" + ports + "\n";
+  for (const synth::YosysEngine::HierarchyNode& child : node.children) {
+    HierarchyTextLines(child, out);
+  }
+}
+
+std::string HierarchyText(const synth::YosysEngine::HierarchyNode& root) {
+  std::string out = "top=" + root.module + "\n";
+  HierarchyTextLines(root, out);
+  return out;
+}
+
 // Metric values print at full useful precision: enough significant
 // digits that a picosecond-scale slack survives the payload.
 std::string FormatNumber(double value) {
@@ -1850,6 +1875,32 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.synth.generic_script.clear();
         ctx.synth.generic_verilog.clear();
         return CommandResult::Ok(SynthStatsText(stats.value()));
+      });
+
+  // Reports the live elaborated design's hierarchy for the session
+  // top, as the hierarchy browser (GUI unit U2) consumes it. The
+  // command is read-only: it runs no pass and changes no session
+  // state, so it is safe to call on every browser refresh. It
+  // fails fast when no elaborated design exists, mirroring
+  // elaborate's own precondition style.
+  add("synth_hierarchy", "synth_hierarchy",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "synth_hierarchy")) {
+          return *bad;
+        }
+        if (!ctx.synth.elaborated) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no elaborated design: eos::elaborate first");
+        }
+        synth::YosysEngine engine;
+        const foundation::Result<synth::YosysEngine::HierarchyNode>
+            hierarchy = engine.Hierarchy(ctx.synth.top_cell);
+        if (!hierarchy.ok()) {
+          return FromStatus(hierarchy.status());
+        }
+        return CommandResult::Ok(HierarchyText(hierarchy.value()));
       });
 
   add("synth_generic", "synth_generic [-script <name>]",

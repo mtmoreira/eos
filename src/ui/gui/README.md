@@ -4,14 +4,19 @@ The GUI adapter over the command registry, thin by design: every GUI
 action issues a registry command and renders its machine-readable
 result, so the CLI and the GUI cannot drift.
 
-Status: unit U1 of the minimal Elaboration slice (owner approval
-2026-10-31, Qt decided 2026-10-31). U1 delivers the skeleton: the
-window, the stage bar (Elaboration active, later stages greyed),
-the Read/Elaborate/Generic synth stepper with per-step outputs from
-the session record, the console echo log, and the registry wiring
-(SessionView). Hierarchy browser (U2), block diagram and navigation
-(U3), leaf schematic (U4), right panels (U5), console command entry
-(U6), and packaging (U7) are later units, not this one.
+Status: units U1 and U2 of the minimal Elaboration slice (owner
+approval 2026-10-31, Qt decided 2026-10-31). U1 delivers the
+skeleton: the window, the stage bar (Elaboration active, later
+stages greyed), the Read/Elaborate/Generic synth stepper with
+per-step outputs from the session record, the console echo log,
+and the registry wiring (SessionView). U2 delivers the hierarchy
+browser plus data model: the synth_hierarchy registry query over
+the live elaborated design, the HierarchyModel with its selection
+contract for U3, and the browser widget (tree, expand and
+collapse, click to select) beside the step outputs. Block diagram
+and navigation (U3), leaf schematic (U4), right panels (U5),
+console command entry (U6), and packaging (U7) are later units,
+not this one.
 
 ## Build
 

@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "eos/ui/hierarchy.h"
 #include "eos/ui/registry.h"
 
 namespace eos::ui {
@@ -23,11 +24,12 @@ enum class StepStatus {
 };
 
 // The Elaboration stage as the GUI sees it: the registry and the
-// shared command context, plus the console echo log. Dispatching a
-// command runs it on the shared context (so widgets reading the
-// context see the effect) and records the echo line, including for
-// commands the registry rejects: the console shows what was
-// attempted, not only what succeeded.
+// shared command context, plus the console echo log and the
+// hierarchy model. Dispatching a command runs it on the shared
+// context (so widgets reading the context see the effect) and
+// records the echo line, including for commands the registry
+// rejects: the console shows what was attempted, not only what
+// succeeded.
 class SessionView {
  public:
   SessionView(CommandRegistry& registry, CommandContext& context)
@@ -39,6 +41,28 @@ class SessionView {
   const std::vector<std::string>& EchoLog() const { return echo_; }
   CommandContext& context() { return context_; }
   const CommandContext& context() const { return context_; }
+
+  // Hierarchy model, refreshed from the live session (see
+  // RefreshHierarchy). The block diagram (U3) consumes the
+  // selection, so U2 exposes it here rather than in the widget:
+  // the widget only displays the model and reports clicks.
+  const HierarchyModel& Hierarchy() const { return hierarchy_; }
+
+  // Re-reads the hierarchy from the live session: dispatches
+  // synth_hierarchy WITHOUT an echo line (a model refresh is not
+  // a user action) and rebuilds the model when elaborated;
+  // clears it otherwise, or when the query or its payload
+  // fails, so a stale tree never lingers.
+  void RefreshHierarchy();
+
+  // Selection the block diagram (U3) consumes. Only a path in
+  // the model can be selected; Select returns false otherwise.
+  bool SelectHierarchyPath(const std::string& path) {
+    return hierarchy_.Select(path);
+  }
+  const std::string& SelectedHierarchyPath() const {
+    return hierarchy_.SelectedPath();
+  }
 
   // Stepper state, read straight from the synthesis session record:
   // Read is done once a design is parsed, Elaborate once it is
@@ -64,6 +88,7 @@ class SessionView {
   CommandRegistry& registry_;
   CommandContext& context_;
   std::vector<std::string> echo_;
+  HierarchyModel hierarchy_;
 };
 
 // Runs the Qt GUI application on the given registry and context.

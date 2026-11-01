@@ -45,4 +45,16 @@ CommandResult SessionView::Dispatch(const std::string& name,
   return registry_.Dispatch(context_, name, args);
 }
 
+void SessionView::RefreshHierarchy() {
+  if (!context_.synth.elaborated) {
+    hierarchy_.Clear();
+    return;
+  }
+  const CommandResult result =
+      registry_.Dispatch(context_, "synth_hierarchy", {});
+  if (!result.ok || !hierarchy_.LoadPayload(result.payload)) {
+    hierarchy_.Clear();
+  }
+}
+
 }  // namespace eos::ui

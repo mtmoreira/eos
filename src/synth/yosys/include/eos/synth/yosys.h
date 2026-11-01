@@ -195,6 +195,34 @@ class YosysEngine {
   // own the Yosys session.
   Result<YosysNetlistStats> Stats(const std::string& top);
 
+  // One node of a design's hierarchy: an instance path, the
+  // module it instantiates, its ports in declaration order, and
+  // its submodule instances. The root's path is the top module
+  // name; a child's path is its parent's path plus "/" plus the
+  // instance cell name. A node with no children is a leaf: a
+  // module with no submodule instances, or a truncated branch
+  // (see Hierarchy's cycle guard).
+  struct HierarchyNode {
+    std::string path;
+    std::string module;
+    std::vector<std::string> ports;
+    std::vector<HierarchyNode> children;
+  };
+
+  // Walks the live design's hierarchy from the named top module,
+  // without running any pass (like Stats). A cell whose type
+  // names a module of the live design is a submodule instance;
+  // every other cell is a primitive and contributes no children.
+  // Fails with kInvalidArgument when the top module is not in
+  // the live design, and with kInvalidState when the engine does
+  // not own the session. Recursion is guarded: a module already
+  // on the current path (impossible in legal Verilog, where the
+  // hierarchy pass rejects recursion) contributes the node but
+  // no deeper children, and depth is capped, so a pathological
+  // design cannot recurse without bound. Callers gate on
+  // elaboration; the walk itself reads whatever design is live.
+  Result<HierarchyNode> Hierarchy(const std::string& top);
+
   // Maps the live design onto the AIG form ABC reads: techmap
   // first, which converts sequential cells to their simple
   // forms ($dff to $_DFF_P_, so the BLIF backend writes them

@@ -5,12 +5,14 @@
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSplitter>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include <string>
 
 #include "eos/ui/gui.h"
+#include "hierarchy_browser.h"
 
 namespace eos::ui {
 
@@ -61,10 +63,17 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   stepper_layout->addStretch();
   layout->addWidget(stepper);
 
-  // Center: step outputs in U1; hierarchy views arrive in U2-U4.
-  center_ = new QLabel(root);
+  // Center row: hierarchy browser left, step outputs right. The
+  // browser is U2; the block diagram and schematic (U3, U4)
+  // replace the step-output label later, and the selection the
+  // browser records is what they will consume.
+  auto* middle = new QSplitter(root);
+  browser_ = new HierarchyBrowser(view_, middle);
+  middle->addWidget(browser_);
+  center_ = new QLabel(middle);
   center_->setWordWrap(true);
-  layout->addWidget(center_, 1);
+  middle->addWidget(center_);
+  layout->addWidget(middle, 1);
 
   // Console echo: GUI-issued commands, read only in U1. Command
   // entry arrives in U6.
@@ -78,6 +87,8 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
 }
 
 void MainWindow::Refresh() {
+  view_.RefreshHierarchy();
+  browser_->Refresh();
   RefreshSteps();
   RefreshCenter();
   RefreshConsole();
