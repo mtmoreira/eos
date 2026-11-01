@@ -213,6 +213,12 @@ modules:
     target: eda_pd_dbsta
     adopted: true
     upstream: OpenROAD dbSta network bridge (src/dbSta) at ead3236, merged with OpenROAD v2.0 dbSta (a5a56584)
+  - name: pdr
+    layer: L4
+    path: src/pd/pdr
+    target: eda_pd_pdr
+    adopted: true
+    upstream: "OpenROAD pdr and stt (FLUTE) at a5a56584 (v2.0)"
   - name: floorplan
     layer: L4
     path: src/pd/floorplan
