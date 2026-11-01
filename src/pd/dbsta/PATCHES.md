@@ -98,3 +98,113 @@ adapts to).
   openroad->tclInterp() in initGui) and the in-tree utl Logger.
   gui.h, heatMap.h and MakeGui.h are copied unmodified. The
   stub path needs no Qt, as P0 records.
+
+## Merged (R1 step 2): P1 ead3236 side plus v2.0 side
+
+The merge keeps the P1 file as the base (it is the ead3236-era
+port, already proven by the P1 floorplan tests and the ifp
+probe) and adopts the R1 items below. D-1 through D-9, O-1 and
+G-1 stand unchanged. R1 items already covered by P1 entries
+(D-2 covers P-26 string_view virtuals, D-6 covers P-25 nullptr
+filenames, D-1 covers the name/tmpStringCopy changes, D-4
+covers the container changes, D-5 covers the dead iterator)
+are not duplicated here.
+
+- M-1 (S, adopted from R1 P-27): Pin and Instance id()
+  bodies replaced with the R1 versions. P1's Pin id offset
+  iterm ids by the bterm count, which can still collide at
+  the boundary (iterm id 0 maps onto bterm id N), and P1's
+  top-instance id was 0, indistinguishable from the STA null
+  id; P1's Pin id also dereferenced bterm unconditionally
+  when the pin was neither iterm nor bterm. The R1 versions
+  are null-safe (null handle is 0), tag bterm ids with the
+  high bit (0x80000000U, collision-free against raw iterm
+  ids), and give the top instance the 0xFFFFFFFFU sentinel.
+  The LoadPinIndexMap collapse the R1 version fixes (four
+  distinct clock loads collapsing to one entry under the
+  inherited ConcreteNetwork::id) is the reason this entry
+  exists: the resizer's delay calc indexes by Pin id, and
+  only an injective id keeps it sound. Net and Term id()
+  keep the P1 bodies (staToDb(net)->getId() and
+  staToDb(term)->getId()), which are already odb-backed and
+  strictly better than the R1 side's inherited versions.
+  Net/Term id() are therefore closed by this merge, not
+  carried as an open item.
+- M-2 (A, adopted from the R1 port): setBlock binds db_
+  from the block (db_ = block->getDataBase()) before
+  readDbNetlistAfter. P1's setBlock left db_ untouched, so
+  a network bound by setBlock alone (the cellWireDelay
+  scratch path, which never calls init) had a null database
+  for dbuToMeters and the tech queries. When init was
+  already called this assigns the same database again.
+- M-3 (A, EOS-owned adaptation of dbSta.cc): the SWIG init
+  call (Dbsta_Init) and the encoded dbSta Tcl eval
+  (evalTclInit with dbSta_tcl_inits) are dropped: dbSta.tcl
+  is not imported, EOS drives via the C++ API plus its own
+  registry, and the EOS session performs in-tree STA Tcl
+  init itself where a Tcl session is needed. makeComponents
+  binds the network through dbNetwork::init (the merged
+  module's single db+logger binding) when db_ and logger_
+  are set; on the scratch path both are null and the
+  network binds later via setBlock (M-2). The dbSta
+  constructor nulls logger_, db_network_ and db_report_
+  (the port left logger_ uninitialized, which the
+  makeComponents guard would otherwise read). dbSta.cc
+  drops its <tcl.h> include: Sta.hh forward-declares
+  Tcl_Interp and this file calls no Tcl C function after
+  the adaptation. Tcl headers are still required transitively
+  (sta/ReportTcl.hh includes <tcl.h>), so the target keeps
+  P1's TCL conditional include/link block; the change only
+  removes dbSta.cc's direct dependency. The setLogger open item is closed
+  for the main path (init binds logger_ through
+  makeComponents); the scratch path intentionally carries
+  no dbNetwork logger, matching the validated step-1 run.
+- M-4 (A, dbSdcNetwork re-derivation): the v2.0
+  dbSdcNetwork methods are dropped, not ported. They take
+  const char* paths and pointer out-params, which override
+  no 2026 base virtual (the 2026 SdcNetwork uses
+  string_view paths and return-by-value sequences), so they
+  were unreachable through the base pointer Sta holds, and
+  the step-1 repair run validated with the base methods
+  doing the work. The 2026 base already implements the
+  divider/bracket escape fallbacks the v2.0 methods
+  carried (SdcNetwork::findInstance and
+  findInstanceRelative). The class stays as the concrete
+  type dbSta::makeSdcNetwork returns, constructor only.
+- M-5 (M): dbReadVerilog carried as ported (P-0 include
+  prefix, P-11 explicit VerilogReader lifecycle already
+  applied in the port copy). No further adaptation: it
+  uses only base Network methods (report, debug,
+  findAnyCell) that the P1 dbNetwork inherits.
+
+## R1 patch disposition (complete set, merged module)
+
+- P-25 (nullptr filename): covered by D-6, unchanged.
+- P-26 (string_view virtuals): covered by D-2, unchanged.
+- P-27 (Pin/Instance id): adopted, see M-1.
+- P-28 (graph refresh in repairSetup): lives in the rsz
+  module, not here (see the rsz PATCHES.md).
+- P-29 (InstanceSet/PinSet comparator binding): lives in
+  the rsz module and dbSta init members where they occur.
+- P-30 (scratch-sta own interp): rule for consumers of
+  this module (see the module README); no code here.
+- P-31 (unique scratch block names): lives in the rsz
+  module (cellWireDelay path).
+- P-32 (dbSta::setReportLogger): carried in dbSta.hh/cc;
+  every scratch-sta construction site must call it.
+- P-33 (driver-only wire RC): becomes the Q6 policy, not
+  a code patch; see the rsz module and the session layer.
+- P-12 (groupBusPorts predicate returning false): SUPERSEDED
+  by D-3 (P1's treatment preserves upstream intent: makeCell
+  assumes msb first, makeTopCell keeps portMsbFirst). The
+  R1 predicate is unvalidated and inert for gcd (no buses).
+  Bus-ordering validation against liberty ordering is a
+  phase-2 work item before any unit relies on the predicate.
+- D-8 (findPgPort drop): re-check status at merge time:
+  the P1 tests cover only the no-liberty direction. A
+  liberty-loaded run must re-check the warning path before
+  any unit relies on it; that re-check rides with the rsz
+  Tcl suite (repair runs load liberty).
+- P-3/P-22 (ord/gui strips): stand; no PathRenderer, no
+  highlightSteiner reintroduction in the adapter. GUI
+  re-wire is a later EOS GUI decision.

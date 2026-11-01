@@ -841,6 +841,15 @@
         "tests/unit/foundation/ids/ids_test.cc"
       ]
     },
+    "pd.dbsta": {
+      "modules": [
+        "dbsta",
+        "odb"
+      ],
+      "sources": [
+        "tests/unit/pd/dbsta/dbsta_test.cc"
+      ]
+    },
     "pd.floorplan": {
       "modules": [
         "floorplan",
