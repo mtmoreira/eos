@@ -84,6 +84,10 @@ if(NOT HAVE_CXX_STD_FORMAT AND NOT MSVC)
   # C++ translation unit in this module instead of patching the
   # imported header. The generator expression keeps the flag off
   # the C sources (CUDD), which must not see a C++ header.
+  # Directory scope cannot reach consumers outside this module
+  # (dbsta failed exactly this way on Homebrew fmt 11); the
+  # PUBLIC companion on eda_analysis_sta below carries the same
+  # flag to every target linking the STA library.
   add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-include;fmt/format.h>")
 endif()
 configure_file(src/util/StaConfig.hh.cmake
@@ -491,6 +495,18 @@ endif()
 if(NOT HAVE_CXX_STD_FORMAT)
   target_include_directories(eda_analysis_sta PUBLIC "${_eos_sta_fmt_dir}")
   target_link_libraries(eda_analysis_sta PRIVATE spdlog::spdlog)
+endif()
+if(NOT HAVE_CXX_STD_FORMAT AND NOT MSVC)
+  # Carry the fmt 11 force-include on the STA library's link
+  # interface so every STA-header consumer outside this directory
+  # (dbsta, floorplan, the timing service, tests, and anything
+  # linking them) inherits it with the fmt include dir above.
+  # PUBLIC so the flag travels the same link chains; the
+  # COMPILE_LANGUAGE genex keeps it off C sources, and the guard
+  # keeps it off MSVC and off std::format builds, where fmt may
+  # not be installed at all and the forced include would fail.
+  target_compile_options(eda_analysis_sta
+    PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:-include;fmt/format.h>")
 endif()
 set_target_properties(eda_analysis_sta PROPERTIES
   POSITION_INDEPENDENT_CODE ON CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
