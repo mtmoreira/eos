@@ -223,6 +223,62 @@ class YosysEngine {
   // elaboration; the walk itself reads whatever design is live.
   Result<HierarchyNode> Hierarchy(const std::string& top);
 
+  // One port of a block diagram, with its direction: "in",
+  // "out", or "inout" (a port flagged both input and output,
+  // or neither, reads as "inout").
+  struct BlockPort {
+    std::string name;
+    std::string direction;
+  };
+
+  // One block of a module's block diagram: a submodule instance
+  // (a cell whose type names a module of the live design), with
+  // its ports in declaration order. A primitive cell is never a
+  // block; it contributes no diagram content, and its wires
+  // surface only where they touch a block.
+  struct BlockInstance {
+    std::string instance;
+    std::string module;
+    std::vector<BlockPort> ports;
+  };
+
+  // One endpoint of a diagram net on a block: the instance and
+  // the port it touches.
+  struct BlockNetEndpoint {
+    std::string block;
+    std::string port;
+  };
+
+  // One net of a module's block diagram: a wire, its endpoints
+  // on blocks, and the parent ports it touches. A wire with no
+  // block endpoint and no parent port is internal glue between
+  // primitives and is not reported.
+  struct BlockNet {
+    std::string name;
+    std::vector<BlockNetEndpoint> endpoints;
+    std::vector<std::string> terminals;
+  };
+
+  // A module's block diagram: its parent ports in declaration
+  // order, its submodule instances sorted by instance name, and
+  // its nets sorted by wire name. Blocks and nets are per wire
+  // vector, never per bit: a multi-bit connection contributes
+  // one endpoint.
+  struct BlockDiagramData {
+    std::string module;
+    std::vector<BlockPort> parent_ports;
+    std::vector<BlockInstance> blocks;
+    std::vector<BlockNet> nets;
+  };
+
+  // Reads one module's block diagram from the live design,
+  // without running any pass (like Hierarchy). Fails with
+  // kInvalidArgument when the module is not in the live design,
+  // and with kInvalidState when the engine does not own the
+  // session. Callers gate on elaboration; the walk itself reads
+  // whatever design is live.
+  Result<BlockDiagramData> BlockDiagram(const std::string& module);
+
   // Maps the live design onto the AIG form ABC reads: techmap
   // first, which converts sequential cells to their simple
   // forms ($dff to $_DFF_P_, so the BLIF backend writes them

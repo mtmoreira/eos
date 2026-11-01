@@ -10,13 +10,13 @@
 
 #include <string>
 
-class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QSplitter;
 
 namespace eos::ui {
 
+class BlockDiagram;
 class HierarchyBrowser;
 class SessionView;
 
@@ -24,22 +24,18 @@ class MainWindow : public QMainWindow {
  public:
   explicit MainWindow(SessionView& view, QWidget* parent = nullptr);
 
-  // Re-reads step state, hierarchy, center text, and the echo log
+  // Re-reads step state, hierarchy, diagram, and the echo log
   // into the widgets. Called after any session change.
   void Refresh();
 
  private:
   void RefreshSteps();
-  void RefreshCenter();
   void RefreshConsole();
-  std::string CenterText() const;
 
   SessionView& view_;
-  // 0: Read, 1: Elaborate, 2: Generic synth.
-  int selected_step_ = 0;
   QPushButton* step_buttons_[3];
   HierarchyBrowser* browser_ = nullptr;
-  QLabel* center_ = nullptr;
+  BlockDiagram* diagram_ = nullptr;
   QPlainTextEdit* console_ = nullptr;
 };
 

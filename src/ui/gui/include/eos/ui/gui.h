@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "eos/ui/diagram.h"
 #include "eos/ui/hierarchy.h"
 #include "eos/ui/registry.h"
 
@@ -24,8 +25,8 @@ enum class StepStatus {
 };
 
 // The Elaboration stage as the GUI sees it: the registry and the
-// shared command context, plus the console echo log and the
-// hierarchy model. Dispatching a command runs it on the shared
+// shared command context, plus the console echo log, the
+// hierarchy model, and the diagram model with its level. Dispatching a command runs it on the shared
 // context (so widgets reading the context see the effect) and
 // records the echo line, including for commands the registry
 // rejects: the console shows what was attempted, not only what
@@ -64,6 +65,33 @@ class SessionView {
     return hierarchy_.SelectedPath();
   }
 
+  // Block diagram model, refreshed from the live session (see
+  // RefreshDiagram). The diagram shows one hierarchy level: the
+  // diagram level, which is a path in the model, not the
+  // selection. Tree clicks, double-clicks, and breadcrumb
+  // clicks move both the selection and the level together; a
+  // single block click moves only the selection, so the diagram
+  // keeps its level and highlights the block.
+  const DiagramModel& Diagram() const { return diagram_; }
+  const std::string& DiagramLevel() const { return diagram_level_; }
+
+  // Sets the diagram level. Only a path in the model can become
+  // the level; SetDiagramLevel returns false otherwise.
+  bool SetDiagramLevel(const std::string& path) {
+    if (hierarchy_.Find(path) == nullptr) return false;
+    diagram_level_ = path;
+    return true;
+  }
+
+  // Re-reads the block diagram from the live session: dispatches
+  // synth_blocks WITHOUT an echo line (a model refresh is not a
+  // user action) for the level node's module, and rebuilds the
+  // model; clears it when not elaborated, when the level is
+  // absent, or when the query or its payload fails. A level
+  // that is empty or no longer in the tree falls back to the
+  // root, so the diagram never shows a stale level.
+  void RefreshDiagram();
+
   // Stepper state, read straight from the synthesis session record:
   // Read is done once a design is parsed, Elaborate once it is
   // elaborated, Generic synth once generic optimization ran. A
@@ -89,6 +117,8 @@ class SessionView {
   CommandContext& context_;
   std::vector<std::string> echo_;
   HierarchyModel hierarchy_;
+  DiagramModel diagram_;
+  std::string diagram_level_;
 };
 
 // Runs the Qt GUI application on the given registry and context.

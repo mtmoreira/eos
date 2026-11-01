@@ -59,8 +59,8 @@ TEST(Registry, CoreSetIsComplete) {
   // S1 adds elaborate and synth_generic; S2 adds synth_map; S3
   // adds synth_opt; S4 adds read_filelist; S7 adds
   // write_verilog, check_equivalence, and synth_report; P1 adds
-  // floorplan.
-  EXPECT_EQ(shell.registry.Names().size(), 48u);
+  // floorplan; U3 adds synth_blocks.
+  EXPECT_EQ(shell.registry.Names().size(), 49u);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
   EXPECT_NE(shell.registry.Find("write_verilog"), nullptr);
@@ -968,6 +968,82 @@ TEST(CoreCommands, SynthHierarchyMultiModuleReportsNestedTree) {
             "node path=top/u_mid/u_add module=adder ports=a,b,y\n");
 }
 
+TEST(CoreCommands, SynthBlocksFailsFastWhenNotElaborated) {
+  Shell shell;
+  const CommandResult fresh = shell.Run("synth_blocks", {"top"});
+  EXPECT_FALSE(fresh.ok);
+  EXPECT_EQ(fresh.diag, Diag::kInvalidConfiguration);
+  TimingTempDir dir;
+  Shell parsed;
+  ASSERT_TRUE(parsed
+                  .Run("read_verilog",
+                       {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                  .ok);
+  const CommandResult unelaborated = parsed.Run("synth_blocks", {"optdemo"});
+  EXPECT_FALSE(unelaborated.ok);
+  EXPECT_EQ(unelaborated.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, SynthBlocksRejectsBadArguments) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("top.v", kHierarchyVerilog), "top"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  EXPECT_FALSE(shell.Run("synth_blocks").ok);
+  EXPECT_FALSE(shell.Run("synth_blocks", {"top", "extra"}).ok);
+  EXPECT_FALSE(shell.Run("synth_blocks", {"nope"}).ok);
+  EXPECT_FALSE(shell.Run("synth_blocks", {"bad name"}).ok);
+}
+
+TEST(CoreCommands, SynthBlocksTopReportsBlocksAndNets) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("top.v", kHierarchyVerilog), "top"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult blocks = shell.Run("synth_blocks", {"top"});
+  ASSERT_TRUE(blocks.ok) << blocks.message;
+  EXPECT_EQ(blocks.payload,
+            "module=top\n"
+            "parent port=a direction=in\n"
+            "parent port=b direction=in\n"
+            "parent port=sel direction=in\n"
+            "parent port=y direction=out\n"
+            "block instance=u_ctrl module=ctrl ports=sel:in,op:out\n"
+            "block instance=u_mid module=mid ports=a:in,b:in,y:out\n"
+            "net name=a blocks=u_mid:a terminals=a\n"
+            "net name=b blocks=u_mid:b terminals=b\n"
+            "net name=m blocks=u_mid:y terminals=\n"
+            "net name=op blocks=u_ctrl:op terminals=\n"
+            "net name=sel blocks=u_ctrl:sel terminals=sel\n"
+            "net name=y blocks= terminals=y\n");
+}
+
+TEST(CoreCommands, SynthBlocksLeafReportsParentsOnly) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("top.v", kHierarchyVerilog), "top"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult blocks = shell.Run("synth_blocks", {"adder"});
+  ASSERT_TRUE(blocks.ok) << blocks.message;
+  EXPECT_EQ(blocks.payload,
+            "module=adder\n"
+            "parent port=a direction=in\n"
+            "parent port=b direction=in\n"
+            "parent port=y direction=out\n"
+            "net name=a blocks= terminals=a\n"
+            "net name=b blocks= terminals=b\n"
+            "net name=y blocks= terminals=y\n");
+}
+
 TEST(CoreCommands, ReadVerilogUnknownTopRecordsNothing) {
   TimingTempDir dir;
   Shell shell;
@@ -1554,6 +1630,32 @@ const char kSynthOptLoopDemo[] = R"V(module optloop (a, b, c, d, y1, y2);
   assign y2 = ((a & c) & b) & d;
 endmodule
 )V";
+
+TEST(CoreCommands, SynthBlocksFlatReportsPortsOnly) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("optloop.v", kSynthOptLoopDemo), "optloop"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult blocks = shell.Run("synth_blocks", {"optloop"});
+  ASSERT_TRUE(blocks.ok) << blocks.message;
+  EXPECT_EQ(blocks.payload,
+            "module=optloop\n"
+            "parent port=a direction=in\n"
+            "parent port=b direction=in\n"
+            "parent port=c direction=in\n"
+            "parent port=d direction=in\n"
+            "parent port=y1 direction=out\n"
+            "parent port=y2 direction=out\n"
+            "net name=a blocks= terminals=a\n"
+            "net name=b blocks= terminals=b\n"
+            "net name=c blocks= terminals=c\n"
+            "net name=d blocks= terminals=d\n"
+            "net name=y1 blocks= terminals=y1\n"
+            "net name=y2 blocks= terminals=y2\n");
+}
 
 const char kSynthOptLiberty[] = R"LIB(library (eos_opt_fixture) {
   delay_model : "table_lookup";

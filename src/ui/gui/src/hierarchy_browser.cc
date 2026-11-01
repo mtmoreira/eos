@@ -39,8 +39,11 @@ HierarchyBrowser::HierarchyBrowser(SessionView& view, QWidget* parent)
   connect(tree_, &QTreeWidget::itemClicked,
           [this](QTreeWidgetItem* item, int) {
             if (item == nullptr) return;
-            view_.SelectHierarchyPath(
-                item->data(0, kPathRole).toString().toStdString());
+            if (view_.SelectHierarchyPath(
+                    item->data(0, kPathRole).toString().toStdString()) &&
+                on_select_) {
+              on_select_();
+            }
           });
 }
 

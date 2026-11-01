@@ -13,6 +13,7 @@
 
 #include <QWidget>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,13 @@ class HierarchyBrowser : public QWidget {
   // session change, via MainWindow::Refresh.
   void Refresh();
 
+  // Called after a tree click changes the selection, so the main
+  // window can move the diagram level and refresh. Unset by
+  // default: without it the browser only updates the model.
+  void SetSelectionCallback(std::function<void()> callback) {
+    on_select_ = std::move(callback);
+  }
+
  private:
   void PopulateItem(QTreeWidgetItem* parent, const HierarchyNode& node);
   void CollectExpanded(QTreeWidgetItem* item, std::vector<std::string>& out);
@@ -43,6 +51,7 @@ class HierarchyBrowser : public QWidget {
 
   SessionView& view_;
   QTreeWidget* tree_ = nullptr;
+  std::function<void()> on_select_;
 };
 
 }  // namespace eos::ui
