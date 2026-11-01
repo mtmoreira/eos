@@ -324,6 +324,12 @@ void dbNetwork::init(dbDatabase* db, Logger* logger)
 
 void dbNetwork::setBlock(dbBlock* block)
 {
+  // Merged from the R1 port: bind db_ from the block, so a network
+  // bound by setBlock alone (the cellWireDelay scratch path, which
+  // never calls init) still has a database for dbuToMeters and the
+  // tech queries. When init was already called this assigns the
+  // same database again.
+  db_ = block->getDataBase();
   block_ = block;
   readDbNetlistAfter();
 }
@@ -367,8 +373,14 @@ ObjectId dbNetwork::id(const Port* port) const
 
 ObjectId dbNetwork::id(const Instance* instance) const
 {
-  if (instance == top_instance_) {
+  // Merged from the R1 port (P-27): the top instance has no dbInst,
+  // so it gets a sentinel outside both id spaces (0 is the null id
+  // in STA, so P1's 0 was indistinguishable from null); null is 0.
+  if (instance == nullptr) {
     return 0;
+  }
+  if (instance == top_instance_) {
+    return 0xFFFFFFFFU;
   }
   return staToDb(instance)->getId();
 }
@@ -547,14 +559,22 @@ InstanceNetIterator* dbNetwork::netIterator(const Instance* instance) const
 
 ObjectId dbNetwork::id(const Pin* pin) const
 {
-  dbITerm* iterm;
-  dbBTerm* bterm;
-  staToDb(pin, iterm, bterm);
-
-  if (iterm) {
-    return iterm->getId() + iterm->getBlock()->getBTerms().size();
+  // Merged from the R1 port (P-27): the inherited ConcreteNetwork::id
+  // reinterpret-casts the handle and reads garbage (observed 0 for
+  // clock-load iterms), collapsing LoadPinIndexMap. iterm and bterm
+  // id spaces are separate in odb, so bterm ids carry the high bit.
+  if (pin == nullptr) {
+    return 0;
   }
-  return bterm->getId();
+  dbObject* obj = reinterpret_cast<dbObject*>(const_cast<Pin*>(pin));
+  dbObjectType type = obj->getObjectType();
+  if (type == dbITermObj) {
+    return static_cast<dbITerm*>(obj)->getId();
+  }
+  if (type == dbBTermObj) {
+    return static_cast<dbBTerm*>(obj)->getId() | 0x80000000U;
+  }
+  return 0;
 }
 
 Instance* dbNetwork::instance(const Pin* pin) const
