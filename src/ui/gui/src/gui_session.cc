@@ -1,0 +1,48 @@
+// gui: SessionView over the command registry (L6 interface).
+#include "eos/ui/gui.h"
+
+#include <string>
+#include <vector>
+
+namespace eos::ui {
+
+namespace {
+
+// Quotes one echo argument for display when it needs it: empty, or
+// containing whitespace, a double quote, or a backslash. This is
+// display quoting for the console log only; command entry parsing
+// (unit U6) owns real replay quoting.
+std::string QuoteArg(const std::string& arg) {
+  bool needs = arg.empty();
+  for (char c : arg) {
+    if (c == ' ' || c == '\t' || c == '"' || c == '\\') needs = true;
+  }
+  if (!needs) return arg;
+  std::string out = "\"";
+  for (char c : arg) {
+    if (c == '"' || c == '\\') out += '\\';
+    out += c;
+  }
+  out += '"';
+  return out;
+}
+
+}  // namespace
+
+std::string SessionView::EchoLine(const std::string& name,
+                                  const std::vector<std::string>& args) {
+  std::string line = "eos::" + name;
+  for (const std::string& arg : args) {
+    line += ' ';
+    line += QuoteArg(arg);
+  }
+  return line;
+}
+
+CommandResult SessionView::Dispatch(const std::string& name,
+                                    const std::vector<std::string>& args) {
+  echo_.push_back(EchoLine(name, args));
+  return registry_.Dispatch(context_, name, args);
+}
+
+}  // namespace eos::ui
