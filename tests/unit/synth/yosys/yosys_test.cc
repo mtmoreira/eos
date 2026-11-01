@@ -426,6 +426,127 @@ TEST(YosysFacade, HierarchyMultiModuleReportsNestedTree) {
   EXPECT_TRUE(mid.children[0].children.empty());
 }
 
+TEST(YosysFacade, SchematicFlatReportsNotGate) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("other.v", kOther)).ok());
+  ASSERT_TRUE(engine.Elaborate("other").ok());
+  const auto schematic = engine.Schematic("other");
+  ASSERT_TRUE(schematic.ok()) << schematic.status().message();
+  EXPECT_EQ(schematic.value().module, "other");
+  ASSERT_EQ(schematic.value().gates.size(), 1u);
+  const YosysEngine::SchematicGate& gate = schematic.value().gates[0];
+  EXPECT_EQ(gate.type, "$not");
+  ASSERT_EQ(gate.ports.size(), 2u);
+  EXPECT_EQ(gate.ports[0].name, "A");
+  EXPECT_EQ(gate.ports[0].direction, "in");
+  EXPECT_EQ(gate.ports[1].name, "Y");
+  EXPECT_EQ(gate.ports[1].direction, "out");
+  ASSERT_EQ(schematic.value().nets.size(), 2u);
+  EXPECT_EQ(schematic.value().nets[0].name, "x");
+  ASSERT_EQ(schematic.value().nets[0].endpoints.size(), 1u);
+  EXPECT_EQ(schematic.value().nets[0].endpoints[0].gate, gate.instance);
+  EXPECT_EQ(schematic.value().nets[0].endpoints[0].port, "A");
+  EXPECT_EQ(schematic.value().nets[1].name, "z");
+  ASSERT_EQ(schematic.value().nets[1].terminals.size(), 1u);
+  EXPECT_EQ(schematic.value().nets[1].terminals[0], "z");
+}
+
+TEST(YosysFacade, SchematicAdderReportsOneAddGate) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("top.v", kHierarchy)).ok());
+  ASSERT_TRUE(engine.Elaborate("top").ok());
+  const auto schematic = engine.Schematic("adder");
+  ASSERT_TRUE(schematic.ok()) << schematic.status().message();
+  ASSERT_EQ(schematic.value().gates.size(), 1u);
+  const YosysEngine::SchematicGate& gate = schematic.value().gates[0];
+  EXPECT_EQ(gate.type, "$add");
+  ASSERT_EQ(gate.ports.size(), 3u);
+  EXPECT_EQ(gate.ports[0].name, "A");
+  EXPECT_EQ(gate.ports[1].name, "B");
+  EXPECT_EQ(gate.ports[2].name, "Y");
+  EXPECT_EQ(gate.ports[2].direction, "out");
+  ASSERT_EQ(schematic.value().nets.size(), 3u);
+  EXPECT_EQ(schematic.value().nets[0].name, "a");
+  EXPECT_EQ(schematic.value().nets[1].name, "b");
+  EXPECT_EQ(schematic.value().nets[2].name, "y");
+  EXPECT_EQ(schematic.value().nets[2].endpoints[0].gate, gate.instance);
+  EXPECT_EQ(schematic.value().nets[2].endpoints[0].port, "Y");
+}
+
+TEST(YosysFacade, SchematicMidReportsParentsOnly) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("top.v", kHierarchy)).ok());
+  ASSERT_TRUE(engine.Elaborate("top").ok());
+  const auto schematic = engine.Schematic("mid");
+  ASSERT_TRUE(schematic.ok()) << schematic.status().message();
+  EXPECT_TRUE(schematic.value().gates.empty());
+  // Only the parent ports survive as nets: the mid wires touch
+  // the adder submodule only, and submodule wires are not
+  // schematic nets.
+  ASSERT_EQ(schematic.value().nets.size(), 3u);
+  for (const auto& net : schematic.value().nets) {
+    EXPECT_TRUE(net.endpoints.empty());
+    ASSERT_EQ(net.terminals.size(), 1u);
+  }
+}
+
+TEST(YosysFacade, SchematicTopReportsMuxOnly) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("top.v", kHierarchy)).ok());
+  ASSERT_TRUE(engine.Elaborate("top").ok());
+  const auto schematic = engine.Schematic("top");
+  ASSERT_TRUE(schematic.ok()) << schematic.status().message();
+  ASSERT_EQ(schematic.value().gates.size(), 1u);
+  EXPECT_EQ(schematic.value().gates[0].type, "$mux");
+  // Nets touching the mux or a parent port: a, b, m, op, sel,
+  // y. Wires touching only submodule cells are not reported.
+  ASSERT_EQ(schematic.value().nets.size(), 6u);
+  const YosysEngine::SchematicData& data = schematic.value();
+  const auto* m = [&data]() {
+    for (const auto& net : data.nets) {
+      if (net.name == "m") return &net;
+    }
+    return static_cast<const YosysEngine::SchematicNet*>(nullptr);
+  }();
+  ASSERT_NE(m, nullptr);
+  ASSERT_EQ(m->endpoints.size(), 1u);
+  EXPECT_TRUE(m->terminals.empty());
+  const auto* b = [&data]() {
+    for (const auto& net : data.nets) {
+      if (net.name == "b") return &net;
+    }
+    return static_cast<const YosysEngine::SchematicNet*>(nullptr);
+  }();
+  ASSERT_NE(b, nullptr);
+  EXPECT_TRUE(b->endpoints.empty());
+  ASSERT_EQ(b->terminals.size(), 1u);
+}
+
+TEST(YosysFacade, SchematicUnknownModuleFails) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("top.v", kHierarchy)).ok());
+  ASSERT_TRUE(engine.Elaborate("top").ok());
+  const auto schematic = engine.Schematic("nope");
+  ASSERT_FALSE(schematic.ok());
+  EXPECT_EQ(schematic.status().code(),
+            foundation::ErrorCode::kInvalidArgument);
+}
+
+TEST(YosysFacade, SchematicRejectsNonIdentifierModule) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("top.v", kHierarchy)).ok());
+  const auto schematic = engine.Schematic("top; proc");
+  ASSERT_FALSE(schematic.ok());
+  EXPECT_EQ(schematic.status().code(),
+            foundation::ErrorCode::kInvalidArgument);
+}
+
 TEST(YosysFacade, HierarchyUnknownTopFails) {
   TempDir dir;
   YosysEngine engine;

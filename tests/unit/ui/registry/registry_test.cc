@@ -59,8 +59,8 @@ TEST(Registry, CoreSetIsComplete) {
   // S1 adds elaborate and synth_generic; S2 adds synth_map; S3
   // adds synth_opt; S4 adds read_filelist; S7 adds
   // write_verilog, check_equivalence, and synth_report; P1 adds
-  // floorplan; U3 adds synth_blocks.
-  EXPECT_EQ(shell.registry.Names().size(), 49u);
+  // floorplan; U3 adds synth_blocks; U4 adds synth_schematic.
+  EXPECT_EQ(shell.registry.Names().size(), 50u);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
   EXPECT_NE(shell.registry.Find("write_verilog"), nullptr);
@@ -1044,6 +1044,37 @@ TEST(CoreCommands, SynthBlocksLeafReportsParentsOnly) {
             "net name=y blocks= terminals=y\n");
 }
 
+TEST(CoreCommands, SynthSchematicFailsFastWhenNotElaborated) {
+  Shell shell;
+  const CommandResult fresh = shell.Run("synth_schematic", {"top"});
+  EXPECT_FALSE(fresh.ok);
+  EXPECT_EQ(fresh.diag, Diag::kInvalidConfiguration);
+  TimingTempDir dir;
+  Shell parsed;
+  ASSERT_TRUE(parsed
+                  .Run("read_verilog",
+                       {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                  .ok);
+  const CommandResult unelaborated =
+      parsed.Run("synth_schematic", {"optdemo"});
+  EXPECT_FALSE(unelaborated.ok);
+  EXPECT_EQ(unelaborated.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, SynthSchematicRejectsBadArguments) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("top.v", kHierarchyVerilog), "top"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  EXPECT_FALSE(shell.Run("synth_schematic").ok);
+  EXPECT_FALSE(shell.Run("synth_schematic", {"top", "extra"}).ok);
+  EXPECT_FALSE(shell.Run("synth_schematic", {"nope"}).ok);
+  EXPECT_FALSE(shell.Run("synth_schematic", {"bad name"}).ok);
+}
+
 TEST(CoreCommands, ReadVerilogUnknownTopRecordsNothing) {
   TimingTempDir dir;
   Shell shell;
@@ -1655,6 +1686,184 @@ TEST(CoreCommands, SynthBlocksFlatReportsPortsOnly) {
             "net name=d blocks= terminals=d\n"
             "net name=y1 blocks= terminals=y1\n"
             "net name=y2 blocks= terminals=y2\n");
+}
+
+// The schematic for the flat optloop, from the live elaborated
+// design: six $and gates in two unshared chains of three, with
+// Yosys auto-generated instance names (file:line form, so the
+// names contain colons) and internal wires named after their
+// driving gate. Yosys's auto-name counter is process-global, so
+// the numeric suffix depends on which designs this process
+// elaborated before; the test takes the gate names from the
+// payload itself and pins everything else exactly: the file
+// and line each chain comes from, the chain order, the types,
+// the ports, the net names, the endpoint topology, and the
+// terminals.
+TEST(CoreCommands, SynthSchematicFlatReportsGatesAndNets) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string path = dir.Write("optloop.v", kSynthOptLoopDemo);
+  ASSERT_TRUE(shell.Run("read_verilog", {path, "optloop"}).ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult schematic = shell.Run("synth_schematic", {"optloop"});
+  ASSERT_TRUE(schematic.ok) << schematic.message;
+  std::vector<std::string> gates;
+  {
+    std::istringstream in(schematic.payload);
+    std::string line;
+    const std::string prefix = "gate instance=";
+    while (std::getline(in, line)) {
+      if (line.rfind(prefix, 0) != 0) continue;
+      const std::size_t space = line.find(' ', prefix.size());
+      ASSERT_NE(space, std::string::npos);
+      gates.push_back(line.substr(prefix.size(), space - prefix.size()));
+    }
+  }
+  ASSERT_EQ(gates.size(), 6u);
+  for (std::size_t i = 0; i < 3; ++i) {
+    EXPECT_NE(gates[i].find("$and$" + path + ":4$"), std::string::npos)
+        << "y1 chain gate " << i << ": " << gates[i];
+    EXPECT_NE(gates[i + 3].find("$and$" + path + ":5$"),
+              std::string::npos)
+        << "y2 chain gate " << i << ": " << gates[i + 3];
+  }
+  const std::string& g1 = gates[0];
+  const std::string& g2 = gates[1];
+  const std::string& g3 = gates[2];
+  const std::string& g4 = gates[3];
+  const std::string& g5 = gates[4];
+  const std::string& g6 = gates[5];
+  EXPECT_EQ(schematic.payload,
+            "module=optloop\n"
+            "parent port=a direction=in\n"
+            "parent port=b direction=in\n"
+            "parent port=c direction=in\n"
+            "parent port=d direction=in\n"
+            "parent port=y1 direction=out\n"
+            "parent port=y2 direction=out\n"
+            "gate instance=" + g1 + " type=$and ports=A:in,B:in,Y:out\n" +
+            "gate instance=" + g2 + " type=$and ports=A:in,B:in,Y:out\n" +
+            "gate instance=" + g3 + " type=$and ports=A:in,B:in,Y:out\n" +
+            "gate instance=" + g4 + " type=$and ports=A:in,B:in,Y:out\n" +
+            "gate instance=" + g5 + " type=$and ports=A:in,B:in,Y:out\n" +
+            "gate instance=" + g6 + " type=$and ports=A:in,B:in,Y:out\n" +
+            "net name=" + g1 + "_Y gates=" + g1 + ":Y," + g2 + ":A terminals=\n" +
+            "net name=" + g2 + "_Y gates=" + g2 + ":Y," + g3 + ":A terminals=\n" +
+            "net name=" + g4 + "_Y gates=" + g4 + ":Y," + g5 + ":A terminals=\n" +
+            "net name=" + g5 + "_Y gates=" + g5 + ":Y," + g6 + ":A terminals=\n" +
+            "net name=a gates=" + g1 + ":A," + g4 + ":A terminals=a\n" +
+            "net name=b gates=" + g1 + ":B," + g5 + ":B terminals=b\n" +
+            "net name=c gates=" + g2 + ":B," + g4 + ":B terminals=c\n" +
+            "net name=d gates=" + g3 + ":B," + g6 + ":B terminals=d\n" +
+            "net name=y1 gates=" + g3 + ":Y terminals=y1\n" +
+            "net name=y2 gates=" + g6 + ":Y terminals=y2\n");
+}
+
+// The schematic for a nested leaf, from the live elaborated
+// design: the adder is a single $add gate. A non-leaf module
+// reports parents only: its only primitives are none, and its
+// submodule wires are not schematic nets.
+TEST(CoreCommands, SynthSchematicLeafReportsAdderGate) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string path = dir.Write("top.v", kHierarchyVerilog);
+  ASSERT_TRUE(shell.Run("read_verilog", {path, "top"}).ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult schematic = shell.Run("synth_schematic", {"adder"});
+  ASSERT_TRUE(schematic.ok) << schematic.message;
+  // The gate name carries Yosys's process-global auto-name
+  // counter, so only its file-and-line prefix is pinned; the
+  // rest of the payload is exact.
+  std::string gate;
+  {
+    std::istringstream in(schematic.payload);
+    std::string line;
+    const std::string prefix = "gate instance=";
+    while (std::getline(in, line)) {
+      if (line.rfind(prefix, 0) != 0) continue;
+      const std::size_t space = line.find(' ', prefix.size());
+      ASSERT_NE(space, std::string::npos);
+      gate = line.substr(prefix.size(), space - prefix.size());
+    }
+  }
+  EXPECT_NE(gate.find("$add$" + path + ":4$"), std::string::npos)
+      << "adder gate: " << gate;
+  EXPECT_EQ(schematic.payload,
+            "module=adder\n"
+            "parent port=a direction=in\n"
+            "parent port=b direction=in\n"
+            "parent port=y direction=out\n"
+            "gate instance=" + gate + " type=$add ports=A:in,B:in,Y:out\n" +
+            "net name=a gates=" + gate + ":A terminals=a\n" +
+            "net name=b gates=" + gate + ":B terminals=b\n" +
+            "net name=y gates=" + gate + ":Y terminals=y\n");
+  const CommandResult mid = shell.Run("synth_schematic", {"mid"});
+  ASSERT_TRUE(mid.ok) << mid.message;
+  EXPECT_EQ(mid.payload,
+            "module=mid\n"
+            "parent port=a direction=in\n"
+            "parent port=b direction=in\n"
+            "parent port=y direction=out\n"
+            "net name=a gates= terminals=a\n"
+            "net name=b gates= terminals=b\n"
+            "net name=y gates= terminals=y\n");
+}
+
+// Why U4 reads the elaborated design, not the post-generic
+// netlist: synth_generic replaces the live design with a
+// flattened optimized netlist, so the hierarchy collapses to
+// the root and a nested leaf module no longer exists to query.
+// The flat case keeps working after generic (three shared
+// $and gates, y2 driven from the shared tree), but the nested
+// leaf is gone, so the schematic must come from the design the
+// hierarchy itself reads.
+TEST(CoreCommands, SynthSchematicNestedLeafFailsAfterGeneric) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("top.v", kHierarchyVerilog), "top"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok) << "synth_generic failed";
+  const CommandResult hierarchy = shell.Run("synth_hierarchy");
+  ASSERT_TRUE(hierarchy.ok) << hierarchy.message;
+  // The hierarchy collapses to the root, and its ports are
+  // bit-blasted by the ABC netlist round trip.
+  EXPECT_EQ(hierarchy.payload,
+            "top=top\n"
+            "node path=top module=top "
+            "ports=a[0],a[1],a[2],a[3],b[0],b[1],b[2],b[3],sel,"
+            "y[0],y[1],y[2],y[3]\n");
+  EXPECT_FALSE(shell.Run("synth_schematic", {"adder"}).ok);
+}
+
+TEST(CoreCommands, SynthSchematicFlatAfterGenericReportsSharedTree) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("optloop.v", kSynthOptLoopDemo), "optloop"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok) << "synth_generic failed";
+  const CommandResult schematic = shell.Run("synth_schematic", {"optloop"});
+  ASSERT_TRUE(schematic.ok) << schematic.message;
+  // Three shared $and gates, not six: ABC hashes the two
+  // logically equal AND trees into one, and y2 is driven from
+  // the shared tree. The gate instance names embed a
+  // process-specific temp path, so only the count and the y2
+  // pass-through shape are asserted exactly.
+  std::size_t gates = 0;
+  std::size_t at = 0;
+  while ((at = schematic.payload.find("gate instance=", at)) !=
+         std::string::npos) {
+    ++gates;
+    ++at;
+  }
+  EXPECT_EQ(gates, 3u);
+  EXPECT_NE(schematic.payload.find("net name=y2 gates= terminals=y2"),
+            std::string::npos);
 }
 
 const char kSynthOptLiberty[] = R"LIB(library (eos_opt_fixture) {

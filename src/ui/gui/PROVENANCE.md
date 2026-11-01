@@ -13,8 +13,12 @@ EOS-authored.
 
 - include/eos/ui/gui.h and src/gui_session.cc: SessionView over
   the registry, plus the RunGui application entry declaration.
+- include/eos/ui/schematic.h and src/schematic.cc: the Qt-free
+  SchematicModel over the synth_schematic payload (U4).
 - internal/main_window.h, src/main_window.cc, src/gui_app.cc: Qt
   widgets and application entry, built only when Qt6 is found.
+- internal/schematic_diagram.h and src/schematic_diagram.cc:
+  the Qt schematic widget (U4), built only when Qt6 is found.
 - CMakeLists.txt: EOS-owned build for the module.
 
 ## Declared external dependency

@@ -410,6 +410,44 @@ std::string HierarchyText(const synth::YosysEngine::HierarchyNode& root) {
   return out;
 }
 
+// Renders one gate-level schematic in the same key=value line
+// style as BlockDiagramText, so the GUI model parses it with the
+// same rules: names are plain Verilog identifiers, so comma
+// lists are unambiguous, and an empty list renders as an empty
+// value, never omitted.
+std::string SchematicText(
+    const synth::YosysEngine::SchematicData& schematic) {
+  std::string out = "module=" + schematic.module + "\n";
+  for (const auto& port : schematic.parent_ports) {
+    out += "parent port=" + port.name + " direction=" + port.direction +
+           "\n";
+  }
+  for (const auto& gate : schematic.gates) {
+    std::string ports;
+    for (const auto& port : gate.ports) {
+      if (!ports.empty()) ports += ",";
+      ports += port.name + ":" + port.direction;
+    }
+    out += "gate instance=" + gate.instance + " type=" + gate.type +
+           " ports=" + ports + "\n";
+  }
+  for (const auto& net : schematic.nets) {
+    std::string gates;
+    for (const auto& endpoint : net.endpoints) {
+      if (!gates.empty()) gates += ",";
+      gates += endpoint.gate + ":" + endpoint.port;
+    }
+    std::string terminals;
+    for (const auto& terminal : net.terminals) {
+      if (!terminals.empty()) terminals += ",";
+      terminals += terminal;
+    }
+    out += "net name=" + net.name + " gates=" + gates +
+           " terminals=" + terminals + "\n";
+  }
+  return out;
+}
+
 // Renders one block diagram in the same key=value line style as
 // HierarchyText, so the GUI model parses it with the same rules:
 // names are plain Verilog identifiers, so comma lists are
@@ -1966,6 +2004,37 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return FromStatus(diagram.status());
         }
         return CommandResult::Ok(BlockDiagramText(diagram.value()));
+      });
+
+  // Reports one module's gate-level schematic for the live
+  // elaborated design, as the schematic widget (GUI unit U4)
+  // consumes it. Read-only like synth_hierarchy and
+  // synth_blocks: it runs no pass and changes no session state.
+  // It fails fast when no elaborated design exists, when the
+  // argument count is wrong, or when the module is not a plain
+  // identifier or not in the live design. The schematic reads
+  // the elaborated design, not the post-generic netlist:
+  // synth_generic replaces the live design with a flattened
+  // optimized netlist, so a nested leaf module no longer
+  // exists to query after it runs.
+  add("synth_schematic", "synth_schematic <module>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 1, "synth_schematic <module>")) {
+          return *bad;
+        }
+        if (!ctx.synth.elaborated) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no elaborated design: eos::elaborate first");
+        }
+        synth::YosysEngine engine;
+        const foundation::Result<synth::YosysEngine::SchematicData>
+            schematic = engine.Schematic(args[0]);
+        if (!schematic.ok()) {
+          return FromStatus(schematic.status());
+        }
+        return CommandResult::Ok(SchematicText(schematic.value()));
       });
 
   add("synth_generic", "synth_generic [-script <name>]",

@@ -337,10 +337,6 @@ void BlockDiagram::RebuildScene() {
     label->setPos(mid.x() + 4, mid.y() - 18);
   }
 
-  if (diagram.Blocks().empty()) {
-    scene_->addSimpleText(
-        "Leaf module: no sub-blocks (gate schematic arrives in U4).");
-  }
   scene_->setSceneRect(scene_->itemsBoundingRect().adjusted(-20, -20, 20, 20));
   FitView();
 }

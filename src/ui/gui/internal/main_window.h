@@ -18,14 +18,17 @@ namespace eos::ui {
 
 class BlockDiagram;
 class HierarchyBrowser;
+class SchematicDiagram;
 class SessionView;
 
 class MainWindow : public QMainWindow {
  public:
   explicit MainWindow(SessionView& view, QWidget* parent = nullptr);
 
-  // Re-reads step state, hierarchy, diagram, and the echo log
-  // into the widgets. Called after any session change.
+  // Re-reads step state, hierarchy, diagram, schematic, and
+  // the echo log into the widgets. Called after any session
+  // change. At a leaf level the schematic replaces the diagram
+  // in the center; otherwise the diagram shows.
   void Refresh();
 
  private:
@@ -36,6 +39,7 @@ class MainWindow : public QMainWindow {
   QPushButton* step_buttons_[3];
   HierarchyBrowser* browser_ = nullptr;
   BlockDiagram* diagram_ = nullptr;
+  SchematicDiagram* schematic_ = nullptr;
   QPlainTextEdit* console_ = nullptr;
 };
 

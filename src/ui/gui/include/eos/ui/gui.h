@@ -16,6 +16,7 @@
 #include "eos/ui/diagram.h"
 #include "eos/ui/hierarchy.h"
 #include "eos/ui/registry.h"
+#include "eos/ui/schematic.h"
 
 namespace eos::ui {
 
@@ -26,7 +27,8 @@ enum class StepStatus {
 
 // The Elaboration stage as the GUI sees it: the registry and the
 // shared command context, plus the console echo log, the
-// hierarchy model, and the diagram model with its level. Dispatching a command runs it on the shared
+// hierarchy model, and the diagram model with its level plus
+// the schematic model for a leaf level. Dispatching a command runs it on the shared
 // context (so widgets reading the context see the effect) and
 // records the echo line, including for commands the registry
 // rejects: the console shows what was attempted, not only what
@@ -92,6 +94,34 @@ class SessionView {
   // root, so the diagram never shows a stale level.
   void RefreshDiagram();
 
+  // Gate-level schematic model, refreshed from the live session
+  // (see RefreshSchematic). The schematic is the bottom of the
+  // navigation stack, not a separate lens: it shows exactly
+  // when the diagram level is a leaf, and the block diagram
+  // shows otherwise.
+  const SchematicModel& Schematic() const { return schematic_; }
+
+  // Whether the diagram level is a leaf: its hierarchy node
+  // exists and has no children. A level with no node, or no
+  // level at all, is not a leaf.
+  bool DiagramLevelIsLeaf() const {
+    const HierarchyNode* node =
+        diagram_level_.empty() ? nullptr : hierarchy_.Find(diagram_level_);
+    return node != nullptr && node->children.empty();
+  }
+
+  // Re-reads the gate-level schematic from the live session:
+  // dispatches synth_schematic WITHOUT an echo line (a model
+  // refresh is not a user action) for the level node's module,
+  // but only when the level is a leaf; clears the model when
+  // not elaborated, when the level is absent, when the level
+  // is not a leaf, or when the query or its payload fails, so
+  // a stale schematic never lingers beside a block diagram. A
+  // level that is empty or no longer in the tree falls back to
+  // the root, exactly as RefreshDiagram does, so a flat design
+  // whose root is a leaf shows its schematic.
+  void RefreshSchematic();
+
   // Stepper state, read straight from the synthesis session record:
   // Read is done once a design is parsed, Elaborate once it is
   // elaborated, Generic synth once generic optimization ran. A
@@ -118,6 +148,7 @@ class SessionView {
   std::vector<std::string> echo_;
   HierarchyModel hierarchy_;
   DiagramModel diagram_;
+  SchematicModel schematic_;
   std::string diagram_level_;
 };
 

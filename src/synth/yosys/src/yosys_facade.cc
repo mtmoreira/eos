@@ -628,6 +628,88 @@ Result<YosysEngine::BlockDiagramData> YosysEngine::BlockDiagram(
   return diagram;
 }
 
+Result<YosysEngine::SchematicData> YosysEngine::Schematic(
+    const std::string& module_name) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  if (!IsPlainIdentifier(module_name)) {
+    return InvalidArgument("module name is not a plain identifier: " +
+                           module_name);
+  }
+  Yosys::RTLIL::Module* module = FindModule(module_name);
+  if (module == nullptr) {
+    return InvalidArgument("module not found in the live design: " +
+                           module_name);
+  }
+  YosysEngine::SchematicData schematic;
+  schematic.module = module->name.unescape();
+  schematic.parent_ports = ModulePorts(module);
+  // Gates: one per primitive cell, sorted by instance. A cell
+  // connection with no wire bits (an unconnected or
+  // constant-only port) still lists as a port: the gate's
+  // interface is the cell's, and such a port simply touches no
+  // net.
+  std::vector<Yosys::RTLIL::Cell*> gate_cells;
+  for (const auto& entry : module->cells_) {
+    Yosys::RTLIL::Cell* cell = entry.second;
+    if (IsBlockCell(cell)) continue;
+    gate_cells.push_back(cell);
+    YosysEngine::SchematicGate gate;
+    gate.instance = cell->name.unescape();
+    gate.type = cell->type.unescape();
+    for (const auto& connection : cell->connections()) {
+      YosysEngine::SchematicPort port;
+      port.name = connection.first.unescape();
+      port.direction = cell->output(connection.first) ? "out" : "in";
+      gate.ports.push_back(std::move(port));
+    }
+    std::sort(gate.ports.begin(), gate.ports.end(),
+              [](const YosysEngine::SchematicPort& a,
+                 const YosysEngine::SchematicPort& b) {
+                return a.name < b.name;
+              });
+    schematic.gates.push_back(std::move(gate));
+  }
+  std::sort(schematic.gates.begin(), schematic.gates.end(),
+            [](const YosysEngine::SchematicGate& a,
+               const YosysEngine::SchematicGate& b) {
+              return a.instance < b.instance;
+            });
+  // Nets: one per wire that touches a gate or a parent port.
+  // A wire that only touches submodule instances is skipped,
+  // as in BlockDiagram.
+  for (const auto& entry : module->wires_) {
+    Yosys::RTLIL::Wire* wire = entry.second;
+    YosysEngine::SchematicNet net;
+    net.name = wire->name.unescape();
+    if (wire->port_id != 0) net.terminals.push_back(net.name);
+    for (Yosys::RTLIL::Cell* cell : gate_cells) {
+      for (const auto& connection : cell->connections()) {
+        if (!SigTouchesWire(connection.second, wire)) continue;
+        YosysEngine::SchematicNetEndpoint endpoint;
+        endpoint.gate = cell->name.unescape();
+        endpoint.port = connection.first.unescape();
+        net.endpoints.push_back(std::move(endpoint));
+      }
+    }
+    if (net.endpoints.empty() && net.terminals.empty()) continue;
+    std::sort(net.endpoints.begin(), net.endpoints.end(),
+              [](const YosysEngine::SchematicNetEndpoint& a,
+                 const YosysEngine::SchematicNetEndpoint& b) {
+                if (a.gate != b.gate) return a.gate < b.gate;
+                return a.port < b.port;
+              });
+    schematic.nets.push_back(std::move(net));
+  }
+  std::sort(schematic.nets.begin(), schematic.nets.end(),
+            [](const YosysEngine::SchematicNet& a,
+               const YosysEngine::SchematicNet& b) {
+              return a.name < b.name;
+            });
+  return schematic;
+}
+
 Status YosysEngine::AigMap() {
   if (!owns_) {
     return InvalidState("Yosys engine does not own the Yosys session");
