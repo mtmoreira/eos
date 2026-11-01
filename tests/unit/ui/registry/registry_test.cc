@@ -60,7 +60,7 @@ TEST(Registry, CoreSetIsComplete) {
   // adds synth_opt; S4 adds read_filelist; S7 adds
   // write_verilog, check_equivalence, and synth_report; P1 adds
   // floorplan.
-  EXPECT_EQ(shell.registry.Names().size(), 47u);
+  EXPECT_EQ(shell.registry.Names().size(), 48u);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
   EXPECT_NE(shell.registry.Find("write_verilog"), nullptr);
@@ -886,6 +886,86 @@ TEST(CoreCommands, ReadVerilogParsesAndElaborateReportsStats) {
   EXPECT_NE(elaborated.payload.find("depth=4"), std::string::npos);
   EXPECT_EQ(shell.ctx.synth.elaborated_cells, 5);
   EXPECT_EQ(shell.ctx.synth.elaborated_depth, 4);
+}
+
+// The hierarchy fixture for synth_hierarchy: three levels, top
+// instantiates mid and ctrl, mid instantiates adder. Expected
+// payload lines are fixture construction facts, in pre-order
+// with children sorted by path.
+const char kHierarchyVerilog[] = R"V(module adder (a, b, y);
+  input [3:0] a, b;
+  output [3:0] y;
+  assign y = a + b;
+endmodule
+module ctrl (sel, op);
+  input sel;
+  output op;
+  assign op = sel;
+endmodule
+module mid (a, b, y);
+  input [3:0] a, b;
+  output [3:0] y;
+  adder u_add (.a(a), .b(b), .y(y));
+endmodule
+module top (a, b, sel, y);
+  input [3:0] a, b;
+  input sel;
+  output [3:0] y;
+  wire [3:0] m;
+  wire op;
+  mid u_mid (.a(a), .b(b), .y(m));
+  ctrl u_ctrl (.sel(sel), .op(op));
+  assign y = op ? m : a;
+endmodule
+)V";
+
+TEST(CoreCommands, SynthHierarchyFailsFastWhenNotElaborated) {
+  Shell shell;
+  const CommandResult fresh = shell.Run("synth_hierarchy");
+  EXPECT_FALSE(fresh.ok);
+  EXPECT_EQ(fresh.diag, Diag::kInvalidConfiguration);
+  TimingTempDir dir;
+  Shell parsed;
+  ASSERT_TRUE(parsed
+                  .Run("read_verilog",
+                       {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                  .ok);
+  const CommandResult unelaborated = parsed.Run("synth_hierarchy");
+  EXPECT_FALSE(unelaborated.ok);
+  EXPECT_EQ(unelaborated.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, SynthHierarchyFlatReportsRootOnly) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult hierarchy = shell.Run("synth_hierarchy");
+  ASSERT_TRUE(hierarchy.ok) << hierarchy.message;
+  EXPECT_EQ(hierarchy.payload,
+            "top=optdemo\n"
+            "node path=optdemo module=optdemo ports=a,b,c,d,y\n");
+}
+
+TEST(CoreCommands, SynthHierarchyMultiModuleReportsNestedTree) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("top.v", kHierarchyVerilog), "top"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult hierarchy = shell.Run("synth_hierarchy");
+  ASSERT_TRUE(hierarchy.ok) << hierarchy.message;
+  EXPECT_EQ(hierarchy.payload,
+            "top=top\n"
+            "node path=top module=top ports=a,b,sel,y\n"
+            "node path=top/u_ctrl module=ctrl ports=sel,op\n"
+            "node path=top/u_mid module=mid ports=a,b,y\n"
+            "node path=top/u_mid/u_add module=adder ports=a,b,y\n");
 }
 
 TEST(CoreCommands, ReadVerilogUnknownTopRecordsNothing) {

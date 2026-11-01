@@ -260,6 +260,51 @@ YosysNetlistStats ComputeStats(Yosys::RTLIL::Module* module) {
   return stats;
 }
 
+// Maximum hierarchy depth the Hierarchy walk descends: real
+// designs nest a handful of levels, so 256 only bounds
+// pathological input, never a legal design.
+constexpr int kMaxHierarchyDepth = 256;
+
+// Fills one hierarchy node from a live module: its path, module
+// name, and ports, then one child per cell whose type names a
+// module of the live design. Cell types starting with '$' are
+// upstream primitives, never modules, so they are skipped before
+// the module lookup. A module already on the current path
+// contributes the node but no deeper children (the cycle guard);
+// depth runs out the same way. Children are sorted by path, so
+// the walk order never depends on Yosys's cell map order.
+void BuildHierarchyNode(Yosys::RTLIL::Module* module, const std::string& path,
+                        std::vector<std::string>& stack,
+                        YosysEngine::HierarchyNode& node, int depth) {
+  node.path = path;
+  node.module = module->name.unescape();
+  for (const auto& port : module->ports) {
+    node.ports.push_back(port.unescape());
+  }
+  if (depth <= 0) return;
+  if (std::find(stack.begin(), stack.end(), node.module) != stack.end()) {
+    return;
+  }
+  stack.push_back(node.module);
+  for (const auto& entry : module->cells_) {
+    const std::string type = entry.second->type.unescape();
+    if (type.empty() || type[0] == '$') continue;
+    Yosys::RTLIL::Module* child_module = FindModule(type);
+    if (child_module == nullptr) continue;
+    YosysEngine::HierarchyNode child;
+    BuildHierarchyNode(child_module,
+                       path + "/" + entry.second->name.unescape(), stack,
+                       child, depth - 1);
+    node.children.push_back(std::move(child));
+  }
+  stack.pop_back();
+  std::sort(node.children.begin(), node.children.end(),
+            [](const YosysEngine::HierarchyNode& a,
+               const YosysEngine::HierarchyNode& b) {
+              return a.path < b.path;
+            });
+}
+
 }  // namespace
 
 YosysEngine::YosysEngine() {
@@ -454,6 +499,24 @@ Result<YosysNetlistStats> YosysEngine::Stats(const std::string& top) {
     return InvalidArgument("module not found in the live design: " + top);
   }
   return ComputeStats(module);
+}
+
+Result<YosysEngine::HierarchyNode> YosysEngine::Hierarchy(
+    const std::string& top) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  if (!IsPlainIdentifier(top)) {
+    return InvalidArgument("top module name is not a plain identifier: " + top);
+  }
+  Yosys::RTLIL::Module* module = FindModule(top);
+  if (module == nullptr) {
+    return InvalidArgument("module not found in the live design: " + top);
+  }
+  YosysEngine::HierarchyNode root;
+  std::vector<std::string> stack;
+  BuildHierarchyNode(module, top, stack, root, kMaxHierarchyDepth);
+  return root;
 }
 
 Status YosysEngine::AigMap() {

@@ -53,6 +53,37 @@ const char kOther[] = R"V(module other (x, z);
 endmodule
 )V";
 
+// A three-level hierarchy for the Hierarchy walk: top instantiates
+// mid and ctrl, mid instantiates adder. Every expected value is a
+// fixture construction fact: instance names, module names, and
+// ports in declaration order.
+const char kHierarchy[] = R"V(module adder (a, b, y);
+  input [3:0] a, b;
+  output [3:0] y;
+  assign y = a + b;
+endmodule
+module ctrl (sel, op);
+  input sel;
+  output op;
+  assign op = sel;
+endmodule
+module mid (a, b, y);
+  input [3:0] a, b;
+  output [3:0] y;
+  adder u_add (.a(a), .b(b), .y(y));
+endmodule
+module top (a, b, sel, y);
+  input [3:0] a, b;
+  input sel;
+  output [3:0] y;
+  wire [3:0] m;
+  wire op;
+  mid u_mid (.a(a), .b(b), .y(m));
+  ctrl u_ctrl (.sel(sel), .op(op));
+  assign y = op ? m : a;
+endmodule
+)V";
+
 class TempDir {
  public:
   TempDir()
@@ -353,6 +384,75 @@ TEST(YosysFacade, ParseVerilogFilesRejectsBadArguments) {
   ASSERT_TRUE(engine.ParseVerilog(sub).ok());
   EXPECT_NE(FindModule(engine.ParseVerilog(sub).value(), "sub"),
             nullptr);
+}
+
+TEST(YosysFacade, HierarchyFlatReportsRootOnly) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("demo.v", kDemo)).ok());
+  ASSERT_TRUE(engine.Elaborate("demo").ok());
+  const auto hierarchy = engine.Hierarchy("demo");
+  ASSERT_TRUE(hierarchy.ok()) << hierarchy.status().message();
+  EXPECT_EQ(hierarchy.value().path, "demo");
+  EXPECT_EQ(hierarchy.value().module, "demo");
+  EXPECT_TRUE(hierarchy.value().children.empty());
+}
+
+TEST(YosysFacade, HierarchyMultiModuleReportsNestedTree) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("top.v", kHierarchy)).ok());
+  ASSERT_TRUE(engine.Elaborate("top").ok());
+  const auto hierarchy = engine.Hierarchy("top");
+  ASSERT_TRUE(hierarchy.ok()) << hierarchy.status().message();
+  const YosysEngine::HierarchyNode& root = hierarchy.value();
+  EXPECT_EQ(root.path, "top");
+  EXPECT_EQ(root.module, "top");
+  ASSERT_EQ(root.children.size(), 2u);
+  // Children are sorted by path, so ctrl precedes mid.
+  const YosysEngine::HierarchyNode& ctrl = root.children[0];
+  EXPECT_EQ(ctrl.path, "top/u_ctrl");
+  EXPECT_EQ(ctrl.module, "ctrl");
+  EXPECT_EQ(ctrl.ports, std::vector<std::string>({"sel", "op"}));
+  EXPECT_TRUE(ctrl.children.empty());
+  const YosysEngine::HierarchyNode& mid = root.children[1];
+  EXPECT_EQ(mid.path, "top/u_mid");
+  EXPECT_EQ(mid.module, "mid");
+  EXPECT_EQ(mid.ports, std::vector<std::string>({"a", "b", "y"}));
+  ASSERT_EQ(mid.children.size(), 1u);
+  EXPECT_EQ(mid.children[0].path, "top/u_mid/u_add");
+  EXPECT_EQ(mid.children[0].module, "adder");
+  EXPECT_EQ(mid.children[0].ports, std::vector<std::string>({"a", "b", "y"}));
+  EXPECT_TRUE(mid.children[0].children.empty());
+}
+
+TEST(YosysFacade, HierarchyUnknownTopFails) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("top.v", kHierarchy)).ok());
+  ASSERT_TRUE(engine.Elaborate("top").ok());
+  const auto hierarchy = engine.Hierarchy("nope");
+  ASSERT_FALSE(hierarchy.ok());
+  EXPECT_EQ(hierarchy.status().code(), foundation::ErrorCode::kInvalidArgument);
+}
+
+TEST(YosysFacade, HierarchyRejectsNonIdentifierTop) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("top.v", kHierarchy)).ok());
+  const auto hierarchy = engine.Hierarchy("top; proc");
+  ASSERT_FALSE(hierarchy.ok());
+  EXPECT_EQ(hierarchy.status().code(), foundation::ErrorCode::kInvalidArgument);
+}
+
+TEST(YosysFacade, HierarchyWithoutOwnershipFails) {
+  TempDir dir;
+  YosysEngine first;
+  ASSERT_TRUE(first.ParseVerilog(dir.Write("top.v", kHierarchy)).ok());
+  YosysEngine second;
+  const auto hierarchy = second.Hierarchy("top");
+  ASSERT_FALSE(hierarchy.ok());
+  EXPECT_EQ(hierarchy.status().code(), foundation::ErrorCode::kInvalidState);
 }
 
 }  // namespace
