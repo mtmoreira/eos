@@ -410,6 +410,25 @@ std::string HierarchyText(const synth::YosysEngine::HierarchyNode& root) {
   return out;
 }
 
+// Renders one netlist stats record in the same key=value line
+// style as HierarchyText, so the GUI model parses it with the
+// same rules: a "module=<module>" line, a
+// "cells=<n> wires=<n> depth=<n> sequential=<n>" line, then one
+// "type <name> <count>" line per cell type, in the facade's
+// name-sorted order. A design with no cells renders no type
+// lines, never an omitted stats line.
+std::string StatsText(const synth::YosysNetlistStats& stats) {
+  std::string out = "module=" + stats.module + "\n";
+  out += "cells=" + std::to_string(stats.cell_count) +
+         " wires=" + std::to_string(stats.wire_count) +
+         " depth=" + std::to_string(stats.logic_depth) +
+         " sequential=" + std::to_string(stats.sequential_cells) + "\n";
+  for (const auto& type : stats.cells_by_type) {
+    out += "type " + type.type + " " + std::to_string(type.count) + "\n";
+  }
+  return out;
+}
+
 // Renders one gate-level schematic in the same key=value line
 // style as BlockDiagramText, so the GUI model parses it with the
 // same rules: names are plain Verilog identifiers, so comma
@@ -2035,6 +2054,34 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return FromStatus(schematic.status());
         }
         return CommandResult::Ok(SchematicText(schematic.value()));
+      });
+
+  // Reports the live design's netlist stats for the session's
+  // top module, as the right panels (GUI unit U5) consume them.
+  // Read-only like synth_hierarchy: it runs no pass and
+  // changes no session state. It fails fast when no elaborated
+  // design exists or when the argument count is wrong. After
+  // synth_generic the live design is the generic netlist, so
+  // the stats describe the generic result; before it runs they
+  // describe the elaborated design.
+  add("synth_stats", "synth_stats",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "synth_stats")) {
+          return *bad;
+        }
+        if (!ctx.synth.elaborated) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no elaborated design: eos::elaborate first");
+        }
+        synth::YosysEngine engine;
+        const foundation::Result<synth::YosysNetlistStats> stats =
+            engine.Stats(ctx.synth.top_cell);
+        if (!stats.ok()) {
+          return FromStatus(stats.status());
+        }
+        return CommandResult::Ok(StatsText(stats.value()));
       });
 
   add("synth_generic", "synth_generic [-script <name>]",

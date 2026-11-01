@@ -15,6 +15,7 @@
 
 #include "eos/ui/diagram.h"
 #include "eos/ui/hierarchy.h"
+#include "eos/ui/panels.h"
 #include "eos/ui/registry.h"
 #include "eos/ui/schematic.h"
 
@@ -27,12 +28,15 @@ enum class StepStatus {
 
 // The Elaboration stage as the GUI sees it: the registry and the
 // shared command context, plus the console echo log, the
-// hierarchy model, and the diagram model with its level plus
-// the schematic model for a leaf level. Dispatching a command runs it on the shared
+// hierarchy model, the diagram model with its level plus
+// the schematic model for a leaf level, and the right panels
+// model with the dispatch message log. Dispatching a command runs it on the shared
 // context (so widgets reading the context see the effect) and
 // records the echo line, including for commands the registry
 // rejects: the console shows what was attempted, not only what
-// succeeded.
+// succeeded. A rejected dispatch also records a message line,
+// so the Messages panel shows the failure and its diagnostic
+// instead of only the attempt.
 class SessionView {
  public:
   SessionView(CommandRegistry& registry, CommandContext& context)
@@ -122,6 +126,28 @@ class SessionView {
   // whose root is a leaf shows its schematic.
   void RefreshSchematic();
 
+  // Right panels model, refreshed from the live session (see
+  // RefreshPanels). The panels snapshot the session record:
+  // sources from the Read step, elaborated totals from the
+  // Elaborate step, the generic record from the Generic synth
+  // step, and the live cell-type breakdown from a synth_stats
+  // query. The snapshot clears when no design is parsed, and
+  // the live stats clear when not elaborated or when the query
+  // or its payload fails, so stale panels never linger.
+  const PanelsModel& Panels() const { return panels_; }
+
+  // Re-reads the right panels from the live session: copies
+  // the session record and dispatches synth_stats WITHOUT an
+  // echo line (a model refresh is not a user action). Messages
+  // are dispatch history, not a refresh, so they survive.
+  void RefreshPanels();
+
+  // Dispatch message log: one line per rejected dispatch, in
+  // dispatch order, as "eos::<command> ...: EOS <diag>:
+  // <message>". Successful dispatches record nothing: messages
+  // are diagnostics, and the echo log is the transcript.
+  const std::vector<std::string>& Messages() const { return messages_; }
+
   // Stepper state, read straight from the synthesis session record:
   // Read is done once a design is parsed, Elaborate once it is
   // elaborated, Generic synth once generic optimization ran. A
@@ -146,9 +172,11 @@ class SessionView {
   CommandRegistry& registry_;
   CommandContext& context_;
   std::vector<std::string> echo_;
+  std::vector<std::string> messages_;
   HierarchyModel hierarchy_;
   DiagramModel diagram_;
   SchematicModel schematic_;
+  PanelsModel panels_;
   std::string diagram_level_;
 };
 

@@ -41,8 +41,14 @@ std::string SessionView::EchoLine(const std::string& name,
 
 CommandResult SessionView::Dispatch(const std::string& name,
                                     const std::vector<std::string>& args) {
-  echo_.push_back(EchoLine(name, args));
-  return registry_.Dispatch(context_, name, args);
+  const std::string line = EchoLine(name, args);
+  echo_.push_back(line);
+  CommandResult result = registry_.Dispatch(context_, name, args);
+  if (!result.ok) {
+    messages_.push_back(line + ": EOS " + DiagName(result.diag) + ": " +
+                        result.message);
+  }
+  return result;
 }
 
 void SessionView::RefreshHierarchy() {
@@ -98,6 +104,35 @@ void SessionView::RefreshSchematic() {
       registry_.Dispatch(context_, "synth_schematic", {node->module});
   if (!result.ok || !schematic_.LoadPayload(result.payload)) {
     schematic_.Clear();
+  }
+}
+
+void SessionView::RefreshPanels() {
+  panels_.Clear();
+  if (!context_.synth.parsed) return;
+  panels_.parsed = true;
+  panels_.top = context_.synth.top_cell;
+  panels_.verilog_path = context_.synth.verilog_path;
+  panels_.filelist_path = context_.synth.filelist_path;
+  panels_.filelist_files = context_.synth.filelist_files;
+  if (!context_.synth.elaborated) return;
+  panels_.elaborated = true;
+  panels_.elaborated_cells = context_.synth.elaborated_cells;
+  panels_.elaborated_wires = context_.synth.elaborated_wires;
+  panels_.elaborated_depth = context_.synth.elaborated_depth;
+  if (context_.synth.generic_optimized) {
+    panels_.generic_run = true;
+    panels_.generic_script = context_.synth.generic_script;
+    panels_.generic_before_and = context_.synth.generic_before_and;
+    panels_.generic_before_levels = context_.synth.generic_before_levels;
+    panels_.generic_after_and = context_.synth.generic_after_and;
+    panels_.generic_after_levels = context_.synth.generic_after_levels;
+    panels_.generic_verilog = context_.synth.generic_verilog;
+  }
+  const CommandResult result =
+      registry_.Dispatch(context_, "synth_stats", {});
+  if (!result.ok || !panels_.live_stats.LoadPayload(result.payload)) {
+    panels_.live_stats.Clear();
   }
 }
 
