@@ -31,22 +31,25 @@ below.
   no .ok file fails the harness with ".ok file not
   found", which is the correct behavior until its crash
   is fixed.
-- CTest entries: NONE yet. Every case is pending-licence
-  (see below), so no case is runnable in CI. When the
-  mock-library unit lands, entries go in
-  tests/unit/CMakeLists.txt (the dbsta precedent: one
-  add_test per case, COMMAND python3 run_case.py
-  repair_<case>.tcl, WORKING_DIRECTORY this dir), the
-  pinned ctest count in tools/tests/test_dep_graph.py
-  moves from 30 by the entry count, and
-  tools/dependency-graph.json is regenerated. The
-  dep-graph rule mapping an add_test block mentioning
-  rsz/tests to modules [rsz, registry] is already in
-  place (tools/dep_graph.py), with a synthetic-repo
-  pytest case covering it, so the future entries are
-  selected on rsz/registry changes.
-- Registry count: 52 (PR4 adds repair_timing and
-  set_wire_rc), pinned in
+- CTest entries: 14, from the mock-library unit (mock/ ports,
+  see mock/README.md). One literal add_test per case in
+  tests/unit/CMakeLists.txt (pd.rsz.mock.<case>, COMMAND
+  python3 run_case.py mock/repair_<case>.tcl, WORKING_DIRECTORY
+  this dir; literal lines, not a foreach loop, so
+  tools/dep_graph.py sees each entry). The pinned ctest count
+  in tools/tests/test_dep_graph.py moved from 30 to 44, and
+  tools/dependency-graph.json is regenerated. The dep-graph
+  rule mapping an add_test block mentioning rsz/tests to
+  modules [rsz, registry] selects them on rsz/registry
+  changes. The 14 are: setup1, setup3, hold4, hold5, fanout2,
+  wire3, tie1, tie2, tie3, tie4, tie5, tie6, tie7,
+  clk_inverters1. The other 13 ported cases crash in the
+  engine at one STA replaceCell null-vertex site (see
+  mock/README.md pending list) and carry no CTest entry until
+  the engine fix lands; the 15 never-ported crash cases and
+  gcd likewise remain without CTest entries. The original
+  pending-licence scripts below are unchanged.
+- Registry count: 53 (was 52 at PR4), pinned in
   tests/unit/ui/registry/registry_test.cc.
 
 ## Disposition (47 upstream drivers; 42 adapt, 5 drop)

@@ -1,0 +1,54 @@
+VERSION 5.8 ; 
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+
+DESIGN repair_slew5 ;
+
+UNITS DISTANCE MICRONS 2000 ;
+
+DIEAREA ( 0 0 ) ( 40000 40000 ) ;
+
+COMPONENTS 21 ;
+- u1 EM_NOR4_X1 + PLACED ( 2000 2000 ) N ;
+- u2 EM_NAND4_X1 + PLACED ( 4000 2000 ) N ;
+- u3 EM_NAND4_X1 + PLACED ( 6000 2000 ) N ;
+- u4 EM_NAND4_X1 + PLACED ( 8000 2000 ) N ;
+- u5 EM_NAND4_X1 + PLACED ( 10000 2000 ) N ;
+- u6 EM_NAND4_X1 + PLACED ( 12000 2000 ) N ;
+- u7 EM_NAND4_X1 + PLACED ( 14000 2000 ) N ;
+
+- x2 EM_BUF_X1 + PLACED ( 2000 20000 ) N ;
+- x3 EM_BUF_X1 + PLACED ( 4000 20000 ) N ;
+- x4 EM_BUF_X1 + PLACED ( 6000 20000 ) N ;
+- x5 EM_BUF_X1 + PLACED ( 8000 20000 ) N ;
+- x6 EM_BUF_X1 + PLACED ( 10000 20000 ) N ;
+- x7 EM_BUF_X1 + PLACED ( 12000 20000 ) N ;
+END COMPONENTS
+
+PINS 3 ;
+- in1 + NET in1 + DIRECTION INPUT + USE SIGNAL + FIXED ( 0 0 ) N + LAYER em1 ( 2000 2000 ) ( 2000 2000 ) ;
+- out1 + NET out1 + DIRECTION OUTPUT + USE SIGNAL + FIXED ( 0 0 ) N + LAYER em1 ( 4000 2000 ) ( 4000 2000 ) ;
+- out2 + NET out2 + DIRECTION OUTPUT + USE SIGNAL + FIXED ( 0 0 ) N + LAYER em1 ( 6000 2000 ) ( 6000 2000 ) ;
+END PINS
+
+SPECIALNETS 2 ;
+- VSS  ( * VSS )
+  + USE GROUND ;
+- VDD  ( * VDD )
+  + USE POWER ;
+END SPECIALNETS
+
+NETS 1 ;
+- in1 ( u1 A1 ) ( PIN in1 ) ;
+- u1zn ( u1 ZN ) ( u2 A3 ) ( u3 A4 ) ( u4 A4 ) ( u5 A3 ) ( u6 A4 ) ( u7 A4 ) ;
+- u2zn ( u2 ZN ) ( x2 A ) ;
+- u3zn ( u3 ZN ) ( x3 A ) ;
+- u4zn ( u4 ZN ) ( x4 A ) ;
+- u5zn ( u5 ZN ) ( x5 A ) ;
+- u6zn ( u6 ZN ) ( x6 A ) ;
+- u7zn ( u7 ZN ) ( x7 A ) ;
+- out1 ( x2 Z ) ( PIN out1 ) ;
+- out2 ( x3 Z ) ( PIN out2 ) ;
+END NETS
+
+END DESIGN

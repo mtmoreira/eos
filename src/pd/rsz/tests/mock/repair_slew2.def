@@ -1,0 +1,56 @@
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+
+DESIGN hi_fanout ;
+UNITS DISTANCE MICRONS 2000 ;
+DIEAREA ( 0 0 ) ( 50000 60000 ) ;
+
+COMPONENTS 21 ;
+- rdrv EM_DFF_SLEW + PLACED ( 2000 2000 ) N ;
+- r0 EM_DFF_X1 + PLACED ( 0 0 ) N ;
+- r1 EM_DFF_X1 + PLACED ( 10000 0 ) N ;
+- r2 EM_DFF_X1 + PLACED ( 20000 0 ) N ;
+- r3 EM_DFF_X1 + PLACED ( 30000 0 ) N ;
+- r4 EM_DFF_X1 + PLACED ( 0 10000 ) N ;
+- r5 EM_DFF_X1 + PLACED ( 10000 10000 ) N ;
+- r6 EM_DFF_X1 + PLACED ( 20000 10000 ) N ;
+- r7 EM_DFF_X1 + PLACED ( 30000 10000 ) N ;
+- r8 EM_DFF_X1 + PLACED ( 0 20000 ) N ;
+- r9 EM_DFF_X1 + PLACED ( 10000 20000 ) N ;
+- r10 EM_DFF_X1 + PLACED ( 20000 20000 ) N ;
+- r11 EM_DFF_X1 + PLACED ( 30000 20000 ) N ;
+- r12 EM_DFF_X1 + PLACED ( 0 30000 ) N ;
+- r13 EM_DFF_X1 + PLACED ( 10000 30000 ) N ;
+- r14 EM_DFF_X1 + PLACED ( 20000 30000 ) N ;
+- r15 EM_DFF_X1 + PLACED ( 30000 30000 ) N ;
+- r16 EM_DFF_X1 + PLACED ( 0 40000 ) N ;
+- r17 EM_DFF_X1 + PLACED ( 10000 40000 ) N ;
+- r18 EM_DFF_X1 + PLACED ( 20000 40000 ) N ;
+- r19 EM_DFF_X1 + PLACED ( 30000 40000 ) N ;
+END COMPONENTS
+
+PINS 1 ;
+- clk1 + NET clk1 + DIRECTION INPUT + USE SIGNAL
++ LAYER em1 ( 0 0 ) ( 200 200 ) + FIXED ( 2000 2000 ) N ;
+END PINS
+
+SPECIALNETS 2 ;
+- VSS  ( * VSS )
+  + USE GROUND ;
+- VDD  ( * VDD )
+  + USE POWER ;
+END SPECIALNETS
+
+NETS 2 ;
+- clk1 ( PIN clk1 ) ( rdrv CK ) ( r0 CK )
+ ( r1 CK ) ( r2 CK ) ( r3 CK ) ( r4 CK ) ( r5 CK ) ( r6 CK ) ( r7 CK ) ( r8 CK ) ( r9 CK ) ( r10 CK )
+ ( r11 CK ) ( r12 CK ) ( r13 CK ) ( r14 CK ) ( r15 CK ) ( r16 CK ) ( r17 CK ) ( r18 CK ) ( r19 CK ) ;
+
+- net0 ( rdrv Q ) ( r0 D )
+ ( r1 D ) ( r2 D ) ( r3 D ) ( r4 D ) ( r5 D ) ( r6 D ) ( r7 D ) ( r8 D ) ( r9 D ) ( r10 D )
+ ( r11 D ) ( r12 D ) ( r13 D ) ( r14 D ) ( r15 D ) ( r16 D ) ( r17 D ) ( r18 D ) ( r19 D ) ;
+
+END NETS
+
+END DESIGN
