@@ -57,6 +57,20 @@ components:
     module: src/pd and src/pv (per-stage provenance at import time)
     patches: 0
     note: "Evaluated 2026-10-31 by place-and-route unit P0 (docs/pd-p0-inventory.md): the nine engine directories ifp, gpl, dpl, cts, grt, drt, rcx, pdn, fin at this commit, the same commit that supplies the in-tree OpenDB. No engine code is imported by P0 itself; imports land per stage unit P1 to P7, each with its own PROVENANCE.md inventory. The support closure P0 measured (dbSta, stt, ant, dst, upf, rsz, gui stub, ord shim) rides with the first stage unit that needs it."
+  - name: or-tools
+    upstream: https://github.com/google/or-tools
+    version: v9.5 (upstream tarball 9.5.2237, amd64 ubuntu-22.04 cpp)
+    licence: Apache-2.0
+    module: src/pd/place (mbff solver), declared external dependency, never vendored
+    patches: 0
+    note: "Added 2026-11-01 by place-and-route unit P2 (owner decision RESOLUTION 2): downloaded as the upstream tarball at configure time (CI install step in .github/workflows/ci.yml, or -DCMAKE_PREFIX_PATH=<extracted dir> for local builds). The repo never contains OR-Tools sources."
+  - name: lemon
+    upstream: https://lemon.cs.elte.hu
+    version: 1.3.1 (system package liblemon-dev)
+    licence: Boost Software License 1.0
+    module: src/pd/place (mbff) and src/pd/stt (Prim-Dijkstra), declared external system dependency
+    patches: 0
+    note: "Added 2026-11-01 by place-and-route unit P2 (owner decision RESOLUTION 2): installed via the CI apt step (liblemon-dev) and found through its CMake config; no LEMON sources are vendored."
   - name: klayout
     upstream: https://github.com/KLayout/klayout
     version: v0.30.12

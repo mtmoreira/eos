@@ -288,7 +288,12 @@ def test_real_repo_check_passes_and_rules_hold():
     # The other 13 ported cases crash in the engine (STA replaceCell
     # null-vertex site, F2 territory) and carry no CTest entry until
     # the engine fix lands; see src/pd/rsz/tests/mock/README.md.
-    assert len(all_tests) == 44
+    # PR4 adds 0 ctest entries: the adapted rsz suite (42 cases
+    # plus gcd) is pending-licence, so no case is runnable in CI
+    # yet; the rsz/tests dep-graph rule and its synthetic test
+    # below already cover the entries when they land.
+    # P2 adds pd.place, the 45th ctest entry.
+    assert len(all_tests) == 45
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),

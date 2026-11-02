@@ -60,8 +60,9 @@ TEST(Registry, CoreSetIsComplete) {
   // adds synth_opt; S4 adds read_filelist; S7 adds
   // write_verilog, check_equivalence, and synth_report; P1 adds
   // floorplan; U3 adds synth_blocks; U4 adds synth_schematic;
-  // U5 adds synth_stats; PR4 adds repair_timing and set_wire_rc.
-  EXPECT_EQ(shell.registry.Names().size(), 53u);
+  // U5 adds synth_stats; PR4 adds repair_timing and set_wire_rc;
+  // P2 adds place.
+  EXPECT_EQ(shell.registry.Names().size(), 54u);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -2912,6 +2913,112 @@ TEST(CoreCommands, FloorplanRejectsBadOptions) {
       shell.Run("floorplan", {"-site", "no_such_site"});
   ASSERT_FALSE(unknown_site.ok);
   EXPECT_NE(unknown_site.message.find("unknown site"), std::string::npos);
+}
+
+// P2: eos::place runs global then detailed placement on the
+// floorplanned imported design, reports placed/total/hpwl/overlaps,
+// and states placed STA unavailability when no timing session is
+// configured. It fails fast on an un-floorplanned design, on bad
+// options, and on missing session state. The DEF is the same
+// PORT-carrying fixture as the floorplan tests.
+TEST(CoreCommands, PlaceRunsOnFloorplannedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  const CommandResult result = shell.Run("place", {});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("placed=2"), std::string::npos);
+  EXPECT_NE(result.payload.find("total=2"), std::string::npos);
+  EXPECT_NE(result.payload.find("overlaps=0"), std::string::npos);
+  EXPECT_NE(result.payload.find("hpwl="), std::string::npos);
+  // No timing session is configured, so the payload states
+  // unavailability with the reason instead of inventing a slack.
+  EXPECT_NE(result.payload.find("sta_slack_ns=unavailable"),
+            std::string::npos);
+  // A second place in the same session succeeds (the runner clears
+  // its STA session before returning).
+  const CommandResult again = shell.Run("place", {});
+  ASSERT_TRUE(again.ok) << again.message;
+}
+
+TEST(CoreCommands, PlaceFailsFastWithoutTechnology) {
+  Shell shell;
+  const CommandResult result = shell.Run("place", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no technology data"), std::string::npos);
+}
+
+TEST(CoreCommands, PlaceFailsFastWithoutMappedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  Shell shell;
+  shell.ctx.timing.odb = std::move(database);
+  const CommandResult result = shell.Run("place", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kUnclosedDesign);
+  EXPECT_NE(result.message.find("no mapped design"), std::string::npos);
+}
+
+TEST(CoreCommands, PlaceFailsFastOnUnfloorplannedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  // No floorplan run: the design has no rows.
+  const CommandResult result = shell.Run("place", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_NE(result.message.find("floorplan"), std::string::npos);
+}
+
+TEST(CoreCommands, PlaceRejectsBadOptions) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+
+  const CommandResult unknown = shell.Run("place", {"-bogus"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  const CommandResult duplicate =
+      shell.Run("place", {"-timing_driven", "-timing_driven"});
+  ASSERT_FALSE(duplicate.ok);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, PlaceTimingDrivenWithoutLibertyFailsFast) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  // Timing-driven placement needs a Liberty-loaded STA session;
+  // this session has none, so it fails fast instead of silently
+  // running untimed placement.
+  const CommandResult result = shell.Run("place", {"-timing_driven"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_NE(result.message.find("Liberty"), std::string::npos);
 }
 
 // S6 backfill: HasDesign mirrors the project's design state.

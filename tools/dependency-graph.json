@@ -18,6 +18,24 @@
         ]
       }
     },
+    "ant": {
+      "depends_on": [
+        "odb",
+        "sta"
+      ],
+      "layer": "L4",
+      "path": "src/pd/ant",
+      "via": {
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
     "antenna": {
       "depends_on": [],
       "layer": "L4",
@@ -268,6 +286,44 @@
       "path": "src/analysis/geomq",
       "via": {}
     },
+    "grt": {
+      "depends_on": [
+        "ant",
+        "dbsta",
+        "odb",
+        "place",
+        "sta",
+        "stt"
+      ],
+      "layer": "L4",
+      "path": "src/pd/grt",
+      "via": {
+        "ant": [
+          "cmake-link",
+          "include"
+        ],
+        "dbsta": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "place": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link",
+          "include"
+        ],
+        "stt": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
     "gui": {
       "depends_on": [
         "registry",
@@ -422,10 +478,50 @@
       }
     },
     "place": {
-      "depends_on": [],
+      "depends_on": [
+        "ant",
+        "dbsta",
+        "errors",
+        "grt",
+        "odb",
+        "rsz",
+        "sta",
+        "stt"
+      ],
       "layer": "L4",
       "path": "src/pd/place",
-      "via": {}
+      "via": {
+        "ant": [
+          "include"
+        ],
+        "dbsta": [
+          "cmake-link",
+          "include"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "grt": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "rsz": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link",
+          "include"
+        ],
+        "stt": [
+          "include"
+        ]
+      }
     },
     "power": {
       "depends_on": [],
@@ -452,6 +548,7 @@
         "ids",
         "ledger",
         "odb",
+        "place",
         "reports",
         "rsz",
         "scenarios",
@@ -503,6 +600,10 @@
           "include"
         ],
         "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "place": [
           "cmake-link",
           "include"
         ],
@@ -698,6 +799,23 @@
       "layer": "L0",
       "path": "src/foundation/strings",
       "via": {}
+    },
+    "stt": {
+      "depends_on": [
+        "odb",
+        "sta"
+      ],
+      "layer": "L4",
+      "path": "src/pd/stt",
+      "via": {
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link"
+        ]
+      }
     },
     "tcl": {
       "depends_on": [
@@ -933,6 +1051,16 @@
       ],
       "sources": [
         "tests/unit/pd/pdr/pdr_test.cc"
+      ]
+    },
+    "pd.place": {
+      "modules": [
+        "floorplan",
+        "odb",
+        "place"
+      ],
+      "sources": [
+        "tests/unit/pd/place/place_test.cc"
       ]
     },
     "pd.rsz": {
