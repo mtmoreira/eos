@@ -118,25 +118,30 @@ disposition, not a second copy of every line.
   const_cast with a comment.
 - P-16 (carried): printf %s sites pass .c_str() for
   std::string values (BufferedNet.cc report).
-- P-17 (carried, VALIDATION OPEN): Rebuffer.cc scene port
-  plus delayAsString arg order swap. pinCapacitance /
+- P-17 (carried; suite evidence, PR4): Rebuffer.cc scene
+  port plus delayAsString arg order swap. pinCapacitance /
   bufferInputCapacitance map 2021 cornerPort(lib_ap)
   capacitance to 2026 port capacitance at the dcalc
-  ap's min_max. Value-equivalence NOT proven: 2021
-  selected a corner library's port, 2026 selects a
-  min/max value within one port's table. Validated
-  against repair_cap* and the gcd pin-cap spot values
-  by the adapted Tcl suite (next increment).
-- P-18 (carried, VALIDATION OPEN): EstimateWireParasitics
+  ap's min_max. Value-equivalence is NOT proven in
+  general: 2021 selected a corner library's port, 2026
+  selects a min/max value within one port's table. Suite
+  evidence: cap1/cap2 match upstream RSZ-0039 (1 resized
+  each) and gcd setup counts match (44 inserted, 8
+  resized ops); no delta observed on the suite's
+  cap/setup families. Counts support the mapping; they
+  do not prove it.
+- P-18 (carried; suite evidence, PR4): EstimateWireParasitics
   scene port plus lazy parasitic reduction. reduceTo
   plus deleteParasiticNetwork are DELETED, not replaced:
   2026 delay calcs reduce lazily during delay
   calculation, and deleting the network would remove
   the estimated parasitics. Deepest semantic area;
   validated on gcd by step 1 (finite sane estimated-net
-  delays, no inf/nan) and further against repair_wire*
-  by the adapted Tcl suite (next increment).
-- P-19 (carried, VALIDATION OPEN): Resizer.cc repair-path
+  delays, no inf/nan). The repair_wire* half did NOT
+  validate: all six wire cases segfault in the engine
+  (see tests/README.md crash table), so wire-family
+  estimation behavior stays open.
+- P-19 (carried; suite evidence, PR4): Resizer.cc repair-path
   port. NonRegSearchPred is a local SearchPred0 subclass
   (refuses internal arcs of sequential cells); the 2026
   base no-mode searchThru loops over modes, so one
@@ -150,9 +155,13 @@ disposition, not a second copy of every line.
   8-arg calls (cell, pvt, in_slew, load_cap, 0.0, false,
   arc_delay, arc_slew) map to the 5-arg form; the
   trailing (0.0, false) args were always literal
-  defaults at both call sites. FLAGGED as an assumption
-  to validate against repair_setup* / repair_slew* by
-  the adapted Tcl suite (next increment).
+  defaults at both call sites. Suite evidence, PR4:
+  setup1 matches upstream exactly (4 inserted, 17
+  resized, end -0.0117 ns, RSZ-0062); slew1-6 match
+  upstream RSZ-0039; setup3 matches RSZ-0041 (2);
+  setup2's design/setup split differs (recorded in
+  tests/README.md). The assumption holds on the
+  passing families; the setup2 split stays open.
 - P-20 (carried): cellWireDelay scratch-sta port (dbBlock
   4-arg create, scratch dbSta without Tcl/OpenRoad,
   makeComponents plus setBlock binding, per-main-scene
@@ -180,15 +189,19 @@ disposition, not a second copy of every line.
   (verified by grep), so the approximation is dormant.
   R1 must re-derive load slew or accept the optimistic
   limit explicitly before any caller uses that function.
-- P-24 (carried, VALIDATION OPEN): NonLatchSearchPred
+- P-24 (carried; suite evidence, PR4): NonLatchSearchPred
   reconstruction (SearchPred0 subclass refusing internal
   arcs of latch cells, detected via isLatchDtoQ /
   isLatchEnToQ roles). Reasoned, not recovered: the
   candidate tree has no sta/ sources, so the exact 2021
-  rule is not recoverable. Validated against repair_hold*
-  (the family most sensitive to search-predicate shape)
-  by the adapted Tcl suite (next increment); any
-  behavioral delta is recorded there.
+  rule is not recoverable. NOT validated by the suite:
+  whole-design hold with real violations segfaults
+  (hold6/7/8/9, plus faithful hold2/3 probes), pin-hold
+  mismatches upstream (4 buffers vs 2, violation
+  unrepaired), and doc-literal hold2/3/4 are vacuous
+  (ideal clock, 0 inserted). The predicate-shape
+  question stays open until the hold path is fixed;
+  see tests/README.md.
 - P-28 (carried, adaptation not upstream behavior):
   graph refresh after buffer insertion in repairSetup
   (networkChangedNonSdc plus ensureGraph plus
@@ -237,11 +250,20 @@ disposition, not a second copy of every line.
   The outer repairHold loop re-times (findRequireds
   plus fresh findHoldViolations) at each pass boundary,
   so inserted buffers become visible to the next pass;
-  staleness is confined within a pass. Quality question
-  only, no crash class found; step-1 END hold is clean
-  on gcd. Applying the refresh inside the pass would
-  change behavior versus the validated step-1 run and
-  is not done silently.
+  staleness is confined within a pass. CONTRADICTED by
+  the PR4 suite: pin-hold inserts to the buffer cap
+  without changing the measured violation (hold1: 4
+  buffers vs upstream 2, end hold still -0.0868 ns),
+  which is the signature of inserted buffers being
+  invisible to re-timing without a graph rebuild, and
+  whole-design hold with real violations segfaults
+  (hold6/7/8/9). The "visible at pass boundary" claim
+  does not hold on this STA; a hold-path graph
+  rebuild mirroring F1 is a follow-up needing owner
+  decision, not a silent change. Step-1 END hold is
+  clean on gcd only because gcd hold had no
+  violations to repair (hold_inserted 0 on the
+  command path too).
 - ensure_linked / link_func_: untouched. No rsz source
   calls ensure_linked (verified by grep over the port
   tree), and the driver path binds the network via
@@ -253,10 +275,94 @@ disposition, not a second copy of every line.
 - Net/Term id(), dbSdcNetwork re-derivation,
   dbNetwork::setLogger, dbSta Tcl-init: closed by PR1
   (M-1, M-4, M-3), not re-opened here.
-- D-8 liberty-loaded re-check, P-12 bus validation,
-  P-17 / P-19 / P-24 semantic-mapping validation: ride
-  with the adapted Tcl suite (next increment). They are
-  acceptance items for the suite, not for this module
-  import alone.
+- D-8 liberty-loaded re-check, P-12 bus validation:
+  the suite loads the per-case liberties and runs
+  without a liberty-load or bus-order failure
+  observed; no dedicated re-check output exists, so
+  these are recorded as no-failure-observed, not as
+  proven. P-17 / P-19 / P-24 semantic-mapping
+  validation: see their entries for PR4 suite
+  evidence; P-24 is not validated (hold path).
 - pdr link-check: decided by the repair-driver link
   result in this increment (see README.md), not by fiat.
+
+## PR4 command layer (registry, not engine)
+
+The repair command lives in the registry module
+(src/ui/registry/src/repair_commands.cc), not in this
+engine, so no engine file changes for the command. Items
+below are command-layer decisions, recorded here because
+they shape what the suite can claim.
+
+- M-3 Tcl-init resolution (PR1 origin): the command builds
+  its own Tcl interp per call and runs the full STA Tcl
+  init sequence (Sta_Init, evalTclInit, init_sta_cmds,
+  readDbAfter) before any STA command, because the
+  interpreter's command table is created by that
+  sequence, not by loading the STA library. The PR1
+  dbsta adapter's Tcl-init shim is what makes a
+  per-call session possible at all; the command does
+  not re-implement it.
+- Wire-RC derivation and selection: see README.md
+  (Wire RC section). Derivation formula, tech-default
+  layer rule, per-layer override, and fail-fast backstop
+  are command-layer policy (Q6). The engine's
+  per-layer layerRC storage is never read by the repair
+  path; the command passes one scalar per scene.
+- Loader SITE workaround: lefin drops tech-file SITE
+  definitions when no library is being created, so the
+  command parses SITE blocks from the tech file and
+  creates any missing site via the odb API before DEF
+  read. General, not sky130-specific; a DEF that still
+  fails fails fast with the loader error, never on a
+  partial DB.
+- dont_use globs expand through STA's own PatternMatch
+  (same matcher the upstream script layer uses), not
+  through a new EOS glob implementation.
+- Limit errors RSZ-0050 / RSZ-0060 map to
+  utilization_limited / buffer_limited result flags:
+  further passes stop, the command still returns Ok
+  with post-repair metrics, mirroring the upstream
+  catch-and-continue scripts.
+- set_wire_rc overrides live on CommandContext (plain
+  data, no engine types in the registry header) and
+  are cleared by ResetProject on close_design, so no
+  override leaks across designs.
+- F1 (PR4, owner decision 2026-11-01): repairSetup loop
+  re-estimate. After the P-28 graph rebuild,
+  estimateWireParasitics() replaces ensureWireParasitics()
+  (one call change in src/pd/rsz/src/Resizer.cc, repairSetup
+  loop). Why: the rebuild drops STA parasitic annotations,
+  and the invalid-only restore zeroes every unchanged net, so
+  the loop re-times optimistically and stops early (setup1:
+  +0.055 ns here, -0.131 ns on a full re-estimate). Cost: one
+  Steiner pass per loop pass, the honest EOS equivalent of
+  upstream v2.0's incremental graph update, which EOS's STA
+  does not provide. Evidence (setup1, upstream .ok as ground
+  truth): start -0.239 ns, inserted 4, RSZ-0041 17 resized,
+  end -0.0117 ns (upstream -0.012), RSZ-0062 warning, loop
+  re-time equal to full re-estimate. GCD re-baseline
+  (command path, F1 loop; owner confirmation 2026-11-01):
+  START -0.294548 / -0.896869 / 0.465122 ns, END WNS
+  -0.115676 ns, TNS -0.487945 ns, 44 inserted, 8 resized
+  operations, 1090 instances, RSZ-0062 unable to repair,
+  as pinned by tests/repair_gcd.ok. The driver-path
+  numbers (START -0.183052 / -0.412361 / 0.456131 ns,
+  END -0.0852105 / -0.273604 / 0.46329 ns) are
+  SUPERSEDED: a bounded investigation proved the delta
+  is entirely measurement configuration (pre-estimation
+  explains START, the clock-RC default explains END).
+  The step-1 anchor (END WNS +0.002058 ns,
+  TNS 0, 22 inserted, 2 resized, 1068 instances) was
+  optimistic-loop output and must never appear as expected
+  results again except inside this re-baseline note. Blast
+  radius: repairSetup loop only; hold, design, tie, and clock
+  loops have no P-28 rebuild and are unaffected. The old loop
+  is not preserved.
+- DECIDED (owner, 2026-11-01): land F1 in PR4 and re-baseline
+  the gcd anchor to the corrected loop's numbers (see the F1
+  entry above). Setup-loop re-timing behavior and the gcd
+  anchor are settled on the F1 loop; the adapted Tcl suite
+  scripts, .ok files, and the gcd command case are generated
+  under it, and the gcd command-path result is recorded in
+  tests/README.md.

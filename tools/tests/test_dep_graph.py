@@ -283,6 +283,10 @@ def test_real_repo_check_passes_and_rules_hold():
     all_tests = sorted(graph["tests"])
     # R1 step 2 adds pd.dbsta, pd.pdr, and pd.rsz, and U1 adds
     # ui.gui, the 27th, 28th, 29th, and 30th ctest entries.
+    # PR4 adds 0 ctest entries: the adapted rsz suite (42 cases
+    # plus gcd) is pending-licence, so no case is runnable in CI
+    # yet; the rsz/tests dep-graph rule and its synthetic test
+    # below already cover the entries when they land.
     assert len(all_tests) == 30
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
@@ -295,3 +299,84 @@ def test_real_repo_check_passes_and_rules_hold():
                         "docs/notes.md")
     assert result.returncode == 0
     assert result.stdout.split() == []
+
+
+def make_rsz_repo(tmp_path):
+    """Fixture repo with rsz + registry and a script-driven entry.
+
+    The suite entry runs an interpreter, not a test exe, so the
+    exe-link scan maps it to nothing; the rsz/tests rule must
+    map it to [rsz, registry] instead.
+    """
+    (tmp_path / "structure.yaml").write_text(
+        "layers:\n"
+        "  - id: L4\n"
+        "    level: 4\n"
+        "    name: pd\n"
+        "    roots: [src/pd]\n"
+        "  - id: L6\n"
+        "    level: 6\n"
+        "    name: ui\n"
+        "    roots: [src/ui]\n"
+        "modules:\n"
+        "  - name: rsz\n"
+        "    layer: L4\n"
+        "    path: src/pd/rsz\n"
+        "    target: eda_pd_rsz\n"
+        "    adopted: false\n"
+        "  - name: registry\n"
+        "    layer: L6\n"
+        "    path: src/ui/registry\n"
+        "    target: eda_ui_registry\n"
+        "    adopted: false\n",
+        encoding="utf-8")
+    write_module(tmp_path, "rsz", "src/pd/rsz", "eda_pd_rsz")
+    write_module(tmp_path, "registry", "src/ui/registry",
+                 "eda_ui_registry")
+    (tmp_path / "tests" / "unit").mkdir(parents=True)
+    (tmp_path / "tests" / "unit" / "CMakeLists.txt").write_text(
+        "add_executable(eda_ui_registry_unit_test\n"
+        "  ui/registry/registry_test.cc)\n"
+        "target_link_libraries(eda_ui_registry_unit_test\n"
+        "  PRIVATE eda_ui_registry GTest::gtest GTest::gtest_main)\n"
+        "add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test)\n"
+        "\n"
+        "add_test(NAME rsz.repair_cap1\n"
+        "  COMMAND python3 run_case.py cap1.tcl\n"
+        "  WORKING_DIRECTORY\n"
+        "  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/pd/rsz/tests)\n",
+        encoding="utf-8")
+    (tmp_path / "tests" / "qualification").mkdir(parents=True)
+    (tmp_path / "tests" / "qualification" / "CMakeLists.txt").write_text(
+        "", encoding="utf-8")
+    return tmp_path
+
+
+def test_script_driven_rsz_entry_maps_to_rsz_and_registry(tmp_path):
+    root = make_rsz_repo(tmp_path)
+    graph_path, graph = generate(root)
+    assert graph["tests"]["rsz.repair_cap1"]["modules"] == [
+        "registry", "rsz"]
+    # The exe-linked entry is untouched by the rule.
+    assert graph["tests"]["ui.registry"]["modules"] == ["registry"]
+    # Both entries are mapped, so check passes.
+    result = run_script(root, "check", "--graph", str(graph_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    # An rsz change selects the suite entry but not the
+    # registry unit test; a registry change selects both.
+    assert select(root, graph_path,
+                  "src/pd/rsz/src/Resizer.cc") == ["rsz.repair_cap1"]
+    assert select(root, graph_path,
+                  "src/ui/registry/src/repair_commands.cc") == [
+                      "rsz.repair_cap1", "ui.registry"]
+
+
+def test_script_driven_entry_without_rsz_tests_maps_to_nothing(tmp_path):
+    root = make_rsz_repo(tmp_path)
+    unit = root / "tests" / "unit" / "CMakeLists.txt"
+    unit.write_text(unit.read_text(encoding="utf-8")
+                    + "\nadd_test(NAME rsz.other\n"
+                    "  COMMAND python3 run_case.py other.tcl)\n",
+                    encoding="utf-8")
+    _path, graph = generate(root)
+    assert graph["tests"]["rsz.other"]["modules"] == []

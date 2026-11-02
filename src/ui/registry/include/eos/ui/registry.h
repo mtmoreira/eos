@@ -225,6 +225,13 @@ struct CommandContext {
   };
   SynthSession synth;
 
+  // Wire-RC overrides (R1 step 2, Q6): per-layer (r_ohm_per_m,
+  // c_f_per_m) values recorded by eos::set_wire_rc, consulted by
+  // eos::repair_timing for their layer ahead of the tech-derived
+  // value. Plain data, no engine types in this header. Cleared by
+  // ResetProject on close_design, like the timing/synth sessions.
+  std::map<std::string, std::pair<double, double>> wire_rc_overrides;
+
   bool HasDesign() const { return project.HasDesign(); }
 };
 
@@ -255,6 +262,10 @@ class CommandRegistry {
  private:
   std::map<std::string, CommandInfo> commands_;
 };
+
+// Registers the repair command set (eos::repair_timing,
+// eos::set_wire_rc); called from RegisterCoreCommands.
+void RegisterRepairCommands(CommandRegistry& registry);
 
 // Registers the core command set: design lifecycle and construction,
 // scenarios, constraints and coverage, collections, ledger

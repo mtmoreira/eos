@@ -1,0 +1,56 @@
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+
+DESIGN hi_fanout ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 25000 30000 ) ;
+
+COMPONENTS 21 ;
+- rdrv DFF_MAX_SLEW + PLACED ( 1000 1000 ) N ;
+- r0 DFF_X1 + PLACED ( 0 0 ) N ;
+- r1 DFF_X1 + PLACED ( 5000 0 ) N ;
+- r2 DFF_X1 + PLACED ( 10000 0 ) N ;
+- r3 DFF_X1 + PLACED ( 15000 0 ) N ;
+- r4 DFF_X1 + PLACED ( 0 5000 ) N ;
+- r5 DFF_X1 + PLACED ( 5000 5000 ) N ;
+- r6 DFF_X1 + PLACED ( 10000 5000 ) N ;
+- r7 DFF_X1 + PLACED ( 15000 5000 ) N ;
+- r8 DFF_X1 + PLACED ( 0 10000 ) N ;
+- r9 DFF_X1 + PLACED ( 5000 10000 ) N ;
+- r10 DFF_X1 + PLACED ( 10000 10000 ) N ;
+- r11 DFF_X1 + PLACED ( 15000 10000 ) N ;
+- r12 DFF_X1 + PLACED ( 0 15000 ) N ;
+- r13 DFF_X1 + PLACED ( 5000 15000 ) N ;
+- r14 DFF_X1 + PLACED ( 10000 15000 ) N ;
+- r15 DFF_X1 + PLACED ( 15000 15000 ) N ;
+- r16 DFF_X1 + PLACED ( 0 20000 ) N ;
+- r17 DFF_X1 + PLACED ( 5000 20000 ) N ;
+- r18 DFF_X1 + PLACED ( 10000 20000 ) N ;
+- r19 DFF_X1 + PLACED ( 15000 20000 ) N ;
+END COMPONENTS
+
+PINS 1 ;
+- clk1 + NET clk1 + DIRECTION INPUT + USE SIGNAL
++ LAYER metal1 ( 0 0 ) ( 100 100 ) + FIXED ( 1000 1000 ) N ;
+END PINS
+
+SPECIALNETS 2 ;
+- VSS  ( * VSS )
+  + USE GROUND ;
+- VDD  ( * VDD )
+  + USE POWER ;
+END SPECIALNETS
+
+NETS 2 ;
+- clk1 ( PIN clk1 ) ( rdrv CK ) ( r0 CK )
+ ( r1 CK ) ( r2 CK ) ( r3 CK ) ( r4 CK ) ( r5 CK ) ( r6 CK ) ( r7 CK ) ( r8 CK ) ( r9 CK ) ( r10 CK )
+ ( r11 CK ) ( r12 CK ) ( r13 CK ) ( r14 CK ) ( r15 CK ) ( r16 CK ) ( r17 CK ) ( r18 CK ) ( r19 CK ) ;
+
+- net0 ( rdrv Q ) ( r0 D )
+ ( r1 D ) ( r2 D ) ( r3 D ) ( r4 D ) ( r5 D ) ( r6 D ) ( r7 D ) ( r8 D ) ( r9 D ) ( r10 D )
+ ( r11 D ) ( r12 D ) ( r13 D ) ( r14 D ) ( r15 D ) ( r16 D ) ( r17 D ) ( r18 D ) ( r19 D ) ;
+
+END NETS
+
+END DESIGN

@@ -2164,7 +2164,15 @@ Resizer::repairSetup(float slack_margin)
     sta_->networkChangedNonSdc();
     graph_ = sta_->ensureGraph();
     level_drvr_vertices_valid_ = false;
-    ensureWireParasitics();
+    // P-28 follow-up (PR4): the rebuild drops STA parasitic
+    // annotations, and the invalid-only restore leaves every
+    // unchanged net at zero wire delay, so the loop re-times
+    // optimistically (setup1: +0.055 ns here, -0.131 ns on a full
+    // re-estimate) and stops early. A full re-estimate after each
+    // rebuild restores all nets; it costs a Steiner pass per loop
+    // pass, which is the honest EOS equivalent of upstream v2.0's
+    // incremental graph update (which EOS's STA does not provide).
+    estimateWireParasitics();
     sta_->findRequireds();
     sta_->worstSlack(max_, worst_slack, worst_vertex);
     bool decreasing_slack = fuzzyLessEqual(worst_slack, prev_worst_slack);

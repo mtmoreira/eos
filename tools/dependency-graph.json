@@ -439,6 +439,7 @@
         "abc",
         "checkpoint",
         "constraints",
+        "dbsta",
         "design",
         "errors",
         "floorplan",
@@ -447,6 +448,7 @@
         "ledger",
         "odb",
         "reports",
+        "rsz",
         "scenarios",
         "session",
         "sta",
@@ -464,6 +466,10 @@
           "cmake-link"
         ],
         "constraints": [
+          "cmake-link",
+          "include"
+        ],
+        "dbsta": [
           "cmake-link",
           "include"
         ],
@@ -496,6 +502,10 @@
           "include"
         ],
         "reports": [
+          "cmake-link",
+          "include"
+        ],
+        "rsz": [
           "cmake-link",
           "include"
         ],

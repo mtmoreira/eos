@@ -231,6 +231,7 @@ void ResetProject(CommandContext& ctx) {
   ctx.next_collection = 1;
   ctx.timing = CommandContext::TimingSession();
   ctx.synth = CommandContext::SynthSession();
+  ctx.wire_rc_overrides.clear();
 }
 
 // A scratch path for a synthesis bridge file: the elaborated
@@ -3629,6 +3630,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         return CommandResult::Ok(out);
       });
+
+  RegisterRepairCommands(registry);
 }
 
 }  // namespace eos::ui

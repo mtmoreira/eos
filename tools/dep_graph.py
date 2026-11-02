@@ -26,7 +26,11 @@ regenerated deterministically (sorted keys, sorted edge lists).
 ``check`` fails on any drift, on a layer-order violation (a
 module depending on a higher layer, which ``check_layers.py``
 also forbids), and on a test that links no registered module
-(such a test would otherwise never be selected). CI runs
+(such a test would otherwise never be selected). Script-driven
+entries are the exception that proves the rule: an add_test
+block mentioning rsz/tests maps to [rsz, registry] (see
+test_map), so the rsz Tcl suite entries are selected by a
+change to either module instead of being flagged. CI runs
 ``check`` in the structure job; the build job uses ``select``
 on pull requests for the fast path, and always runs the full
 suite on push events (including merge commits).
@@ -167,6 +171,60 @@ def module_edges(root, reg):
     return edges
 
 
+def add_test_blocks(text):
+    """Yield (name, block text) for each add_test(...) call.
+
+    Paren matching is string-aware (double quotes, backslash
+    escapes) and skips CMake line comments (# to end of line)
+    and bracket comments (#[[ ... ]]) outside strings, so a
+    paren inside either never extends the block. Used for
+    script-driven entries, which the exe-link scan cannot
+    see: their COMMAND is an interpreter, not a test exe.
+    """
+    blocks = []
+    for m in re.finditer(r"add_test\s*\(\s*NAME\s+(\S+)", text):
+        name = m.group(1)
+        depth = 0
+        in_string = False
+        j = m.start()
+        # Find the opening paren of the call.
+        while j < len(text) and text[j] != "(":
+            j += 1
+        start = j
+        while j < len(text):
+            c = text[j]
+            if in_string:
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == '"':
+                    in_string = False
+                j += 1
+                continue
+            if c == '"':
+                in_string = True
+                j += 1
+                continue
+            if c == "#":
+                if text.startswith("#[[", j):
+                    stop = text.find("]]", j + 3)
+                    j = len(text) if stop < 0 else stop + 2
+                else:
+                    stop = text.find("\n", j)
+                    j = len(text) if stop < 0 else stop + 1
+                continue
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    j += 1
+                    break
+            j += 1
+        blocks.append((name, text[start:j]))
+    return blocks
+
+
 def test_map(root, reg):
     """Return {ctest name: {modules, sources}} from test CMakeLists.
 
@@ -174,6 +232,14 @@ def test_map(root, reg):
     links. ``sources`` are the test's source files relative to
     ``tests/`` (for example ``unit/foundation/ids/ids_test.cc``),
     used to map a changed test file to its own tests.
+
+    Script-driven entries (COMMAND is an interpreter, not a
+    test exe) link no module, so ``check`` would flag them as
+    unselected. The rsz Tcl suite entries are that shape:
+    an add_test block mentioning rsz/tests maps to modules
+    [rsz, registry] (the engine under test plus the command
+    layer driving it), unioned with any exe-link modules
+    the entry already has.
     """
     by_target = {m["target"]: m for m in reg.modules}
     tests = {}
@@ -201,6 +267,12 @@ def test_map(root, reg):
                 "modules": exe_links.get(exe, []),
                 "sources": exe_sources.get(exe, []),
             }
+        for name, block in add_test_blocks(text):
+            if "rsz/tests" not in block:
+                continue
+            entry = tests.setdefault(name, {"modules": [], "sources": []})
+            entry["modules"] = sorted(
+                set(entry["modules"]) | {"registry", "rsz"})
     return tests
 
 

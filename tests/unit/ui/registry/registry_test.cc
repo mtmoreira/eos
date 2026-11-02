@@ -60,8 +60,8 @@ TEST(Registry, CoreSetIsComplete) {
   // adds synth_opt; S4 adds read_filelist; S7 adds
   // write_verilog, check_equivalence, and synth_report; P1 adds
   // floorplan; U3 adds synth_blocks; U4 adds synth_schematic;
-  // U5 adds synth_stats.
-  EXPECT_EQ(shell.registry.Names().size(), 51u);
+  // U5 adds synth_stats; PR4 adds repair_timing and set_wire_rc.
+  EXPECT_EQ(shell.registry.Names().size(), 53u);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -2993,6 +2993,279 @@ TEST(CoreCommands, SynthStatsAfterGenericReportsGenericNetlist) {
   EXPECT_NE(stats.payload.find("cells=3"), std::string::npos);
   EXPECT_NE(stats.payload.find("depth=2"), std::string::npos);
   EXPECT_NE(stats.payload.find("type $and 3"), std::string::npos);
+}
+
+// PR4 validation: set_wire_rc storage and rejection, repair_timing
+// option validation, and the wire-RC fail-fast backstop. None of
+// these pins loop-dependent outcomes: the repair cases fail
+// before any engine setup (option validation runs before any
+// file is opened; RC resolution runs before the engine is
+// built), and set_wire_rc never touches the engine.
+
+// Synthetic LEF/DEF/liberty for the fail-fast tests, in the
+// same shape as the floorplan fixtures: one site, two routing
+// layers, one two-pin macro; two placed instances, two placed
+// top-level pins, three nets. The LEF deliberately carries no
+// RPERSQ/CPERSQDIST/EDGECAPACITANCE data, so no layer is
+// complete and RC resolution must fail fast.
+const char kRepairLef[] = R"LEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MANUFACTURINGGRID 0.005 ;
+SITE core
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END core
+LAYER metal1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal1
+LAYER metal2
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal2
+MACRO BUFX2
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.35 -0.05 0.45 0.05 ;
+    END
+  END Y
+END BUFX2
+END LIBRARY
+)LEF";
+
+const char kRepairDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 2 ;
+- u1 BUFX2 + PLACED ( 1000 1000 ) N ;
+- u2 BUFX2 + PLACED ( 2000 1000 ) N ;
+END COMPONENTS
+PINS 2 ;
+- in1 + NET n_in + DIRECTION INPUT + USE SIGNAL
+  + PORT
+  + LAYER metal1 ( -50 -50 ) ( 50 50 )
+  + PLACED ( 0 5000 ) N ;
+- out1 + NET n_out + DIRECTION OUTPUT + USE SIGNAL
+  + PORT
+  + LAYER metal1 ( -50 -50 ) ( 50 50 )
+  + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 3 ;
+- n_in ( PIN in1 ) ( u1 A ) ;
+- n_mid ( u1 Y ) ( u2 A ) ;
+- n_out ( u2 Y ) ( PIN out1 ) ;
+END NETS
+END DESIGN
+)DEF";
+
+const char kRepairLiberty[] = R"LIB(library (eos_repair_fixture) {
+  delay_model : "table_lookup" ;
+  time_unit : "1ns" ;
+  voltage_unit : "1v" ;
+  capacitive_load_unit (1,pF) ;
+  current_unit : "1mA" ;
+  pulling_resistance_unit : "1kohm" ;
+  leakage_power_unit : "1pW" ;
+  nom_process : 1.0 ;
+  nom_temperature : 25.0 ;
+  nom_voltage : 1.0 ;
+  cell (BUFX2) {
+    area : 1.0 ;
+    pin (A) {
+      direction : input ;
+      capacitance : 0.001 ;
+    }
+    pin (Y) {
+      direction : output ;
+      function : "A" ;
+      capacitance : 0.001 ;
+      timing () {
+        related_pin : "A" ;
+        cell_rise (scalar) { values ("0.1") ; }
+        cell_fall (scalar) { values ("0.1") ; }
+      }
+    }
+  }
+}
+)LIB";
+
+TEST(RepairCommands, SetWireRcStoresOverrideAndRejectsBadValues) {
+  Shell shell;
+  const CommandResult ok =
+      shell.Run("set_wire_rc", {"metal1", "1000", "2e-9"});
+  ASSERT_TRUE(ok.ok) << ok.message;
+  EXPECT_NE(ok.payload.find("layer=metal1"), std::string::npos);
+  const auto it = shell.ctx.wire_rc_overrides.find("metal1");
+  ASSERT_NE(it, shell.ctx.wire_rc_overrides.end());
+  EXPECT_DOUBLE_EQ(it->second.first, 1000.0);
+  EXPECT_DOUBLE_EQ(it->second.second, 2e-9);
+
+  const CommandResult wrong_argc =
+      shell.Run("set_wire_rc", {"metal1", "1000"});
+  ASSERT_FALSE(wrong_argc.ok);
+  EXPECT_EQ(wrong_argc.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(wrong_argc.message.find("usage: eos::set_wire_rc"),
+            std::string::npos);
+
+  const CommandResult not_numbers =
+      shell.Run("set_wire_rc", {"metal1", "abc", "2e-9"});
+  ASSERT_FALSE(not_numbers.ok);
+  EXPECT_EQ(not_numbers.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(not_numbers.message.find("must be numbers"),
+            std::string::npos);
+
+  const CommandResult nan_value =
+      shell.Run("set_wire_rc", {"metal1", "nan", "2e-9"});
+  ASSERT_FALSE(nan_value.ok);
+  EXPECT_NE(nan_value.message.find("must be numbers"),
+            std::string::npos);
+
+  const CommandResult zero =
+      shell.Run("set_wire_rc", {"metal1", "0", "2e-9"});
+  ASSERT_FALSE(zero.ok);
+  EXPECT_NE(zero.message.find("must be positive"), std::string::npos);
+
+  const CommandResult negative =
+      shell.Run("set_wire_rc", {"metal1", "1000", "-2e-9"});
+  ASSERT_FALSE(negative.ok);
+  EXPECT_NE(negative.message.find("must be positive"),
+            std::string::npos);
+
+  // A rejected call leaves the stored override untouched.
+  const auto kept = shell.ctx.wire_rc_overrides.find("metal1");
+  ASSERT_NE(kept, shell.ctx.wire_rc_overrides.end());
+  EXPECT_DOUBLE_EQ(kept->second.first, 1000.0);
+}
+
+TEST(RepairCommands, SetWireRcOverrideClearsOnCloseDesign) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("set_wire_rc", {"metal1", "1000", "2e-9"}).ok);
+  ASSERT_EQ(shell.ctx.wire_rc_overrides.size(), 1u);
+  ASSERT_TRUE(shell.Run("close_design").ok);
+  EXPECT_TRUE(shell.ctx.wire_rc_overrides.empty());
+}
+
+TEST(RepairCommands, RepairTimingRejectsAmbiguousAndPartialOptions) {
+  TimingTempDir dir;
+  const std::string def = dir.Write("top.def", "");
+  const std::string lib = dir.Write("cells.lib", "");
+  const std::string lef = dir.Write("tech.lef", "");
+  const std::string sdc = dir.Write("top.sdc", "");
+  Shell shell;
+
+  const CommandResult missing_def =
+      shell.Run("repair_timing", {"-liberty", lib, "-lef", lef});
+  ASSERT_FALSE(missing_def.ok);
+  EXPECT_EQ(missing_def.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(missing_def.message.find("missing required option -def"),
+            std::string::npos);
+
+  const CommandResult unknown =
+      shell.Run("repair_timing",
+                {"-def", def, "-liberty", lib, "-lef", lef, "-bogus"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_NE(unknown.message.find("unknown option"), std::string::npos);
+
+  const CommandResult ambiguous = shell.Run(
+      "repair_timing",
+      {"-def", def, "-liberty", lib, "-lef", lef, "-sdc", sdc,
+       "-clock", "clk", "-period", "1"});
+  ASSERT_FALSE(ambiguous.ok);
+  EXPECT_NE(ambiguous.message.find("ambiguous"), std::string::npos);
+
+  const CommandResult partial_wire = shell.Run(
+      "repair_timing",
+      {"-def", def, "-liberty", lib, "-lef", lef, "-wire_r", "1000"});
+  ASSERT_FALSE(partial_wire.ok);
+  EXPECT_NE(partial_wire.message.find("must be given together"),
+            std::string::npos);
+
+  const CommandResult zero_wire = shell.Run(
+      "repair_timing",
+      {"-def", def, "-liberty", lib, "-lef", lef, "-wire_r", "0",
+       "-wire_c", "1e-9"});
+  ASSERT_FALSE(zero_wire.ok);
+  EXPECT_NE(zero_wire.message.find("must be positive"),
+            std::string::npos);
+
+  const CommandResult tie_port_no_tie = shell.Run(
+      "repair_timing",
+      {"-def", def, "-liberty", lib, "-lef", lef,
+       "-tie_port", "LOGIC1/Z"});
+  ASSERT_FALSE(tie_port_no_tie.ok);
+  EXPECT_NE(tie_port_no_tie.message.find("-tie_port/-separation require -tie"),
+            std::string::npos);
+
+  const CommandResult tie_no_port = shell.Run(
+      "repair_timing",
+      {"-def", def, "-liberty", lib, "-lef", lef, "-tie"});
+  ASSERT_FALSE(tie_no_port.ok);
+  EXPECT_NE(tie_no_port.message.find("-tie requires at least one -tie_port"),
+            std::string::npos);
+
+  const CommandResult end_pin_alone = shell.Run(
+      "repair_timing",
+      {"-def", def, "-liberty", lib, "-lef", lef, "-hold",
+       "-end_pin", "u1/D"});
+  ASSERT_FALSE(end_pin_alone.ok);
+  EXPECT_NE(end_pin_alone.message.find("must be given together"),
+            std::string::npos);
+}
+
+TEST(RepairCommands, RepairTimingFailsFastWithoutWireRcData) {
+  TimingTempDir dir;
+  const std::string lef = dir.Write("tech.lef", kRepairLef);
+  const std::string def = dir.Write("top.def", kRepairDef);
+  const std::string lib = dir.Write("cells.lib", kRepairLiberty);
+  Shell shell;
+
+  // No -wire_layer and no complete tech layer: the default
+  // resolution fails before any engine setup.
+  const CommandResult no_source = shell.Run(
+      "repair_timing",
+      {"-def", def, "-liberty", lib, "-lef", lef, "-design"});
+  ASSERT_FALSE(no_source.ok) << no_source.payload;
+  EXPECT_EQ(no_source.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(no_source.message.find("no wire RC source"),
+            std::string::npos);
+
+  // Naming an incomplete layer fails with the layer in the
+  // message, still before any engine setup.
+  const CommandResult no_layer_data = shell.Run(
+      "repair_timing",
+      {"-def", def, "-liberty", lib, "-lef", lef, "-design",
+       "-wire_layer", "metal1"});
+  ASSERT_FALSE(no_layer_data.ok) << no_layer_data.payload;
+  EXPECT_EQ(no_layer_data.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(no_layer_data.message.find("no wire RC data for layer metal1"),
+            std::string::npos);
 }
 
 }  // namespace
