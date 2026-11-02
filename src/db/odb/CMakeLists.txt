@@ -89,9 +89,18 @@ target_include_directories(eda_db_odb
     src/zutil
     ${CMAKE_CURRENT_BINARY_DIR}
 )
+# Logger.h is a public header (include/utl is PUBLIC) and includes
+# <spdlog/fmt/fmt.h>, so spdlog must propagate to every consumer that
+# includes it: PRIVATE linkage leaves consumers such as pdr without
+# the spdlog include directory. Linux masks the gap because spdlog
+# sits in /usr/include, a default search path; on macOS Homebrew
+# puts it under its own prefix, which reaches a target only through
+# the link, so the Mac build of pdr failed with 'spdlog/fmt/fmt.h'
+# file not found. ZLIB stays PRIVATE: no public odb header includes
+# a zlib header.
 target_link_libraries(eda_db_odb
-  PUBLIC eda_foundation_errors
-  PRIVATE ZLIB::ZLIB spdlog::spdlog
+  PUBLIC eda_foundation_errors spdlog::spdlog
+  PRIVATE ZLIB::ZLIB
 )
 if(TCL_FOUND)
   target_include_directories(eda_db_odb PRIVATE ${TCL_INCLUDE_PATH})
