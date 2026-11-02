@@ -123,23 +123,23 @@ CTest entry and no .ok file until the engine fix lands.
 | case | original inputs | mock notes | status |
 | ---- | --------------- | ---------- | ------ |
 | setup1 | Nangate, metal3 | verbatim otherwise | run |
-| setup2 | Nangate, metal3/metal5, SDC | TRACKS layers em4/em6-10 added for this DEF | engine-crash |
+| setup2 | Nangate, metal3/metal5, SDC | TRACKS layers em4/em6-10 added for this DEF | crash-fixed, no .ok (see Pending) |
 | setup3 | sky130, met1, SDC | DFF/latch pin renames | run |
-| hold1 | Nangate, metal1, SDC, -buffer_cell BUF_X1 | buffer_cell EM_BUF_X1 | engine-crash |
-| hold2 | Nangate, metal1, ideal clock | faithful port: propagated-clock SDC with input delays 0 and output delay -0.3 (the committed script's ideal clock is vacuous for hold repair) | engine-crash |
-| hold3 | Nangate, metal1, ideal clock | faithful port: new propagated-clock SDC replaces -clock/-period | engine-crash |
+| hold1 | Nangate, metal1, SDC, -buffer_cell BUF_X1 | buffer_cell EM_BUF_X1 | run |
+| hold2 | Nangate, metal1, ideal clock | faithful port: propagated-clock SDC with input delays 0 and output delay -0.3 (the committed script's ideal clock is vacuous for hold repair) | run |
+| hold3 | Nangate, metal1, ideal clock | faithful port: new propagated-clock SDC replaces -clock/-period | run |
 | hold4 | sky130hs, met1 | buf/dfxbp renames, X/CLK pin renames | run |
 | hold5 | sky130hs, met1, SDC | same DEF as hold4; SDC pin rename r1/CLK to r1/CK | run |
-| slew1 | Nangate, metal3, SDC | verbatim otherwise | engine-crash |
-| slew2 | Nangate, metal3, extra lef/lib | extra files folded into the mock (EM_DFF_SLEW) | engine-crash |
-| slew3 | Nangate, metal3, SDC | verbatim otherwise | engine-crash |
-| slew4 | Nangate, metal3, extra lef/lib | extra files folded into the mock (EM_BUFWK) | engine-crash |
-| slew5 | Nangate, metal3, SDC | verbatim otherwise | engine-crash |
-| slew6 | sky130, met1 | o21ai/dfxtp renames | engine-crash |
-| cap1 | Nangate, metal3 | DFF Q max_cap shape | engine-crash |
-| cap2 | Nangate, metal3 | verbatim otherwise | engine-crash |
+| slew1 | Nangate, metal3, SDC | verbatim otherwise | run |
+| slew2 | Nangate, metal3, extra lef/lib | extra files folded into the mock (EM_DFF_SLEW) | run |
+| slew3 | Nangate, metal3, SDC | verbatim otherwise | run |
+| slew4 | Nangate, metal3, extra lef/lib | extra files folded into the mock (EM_BUFWK) | run |
+| slew5 | Nangate, metal3, SDC | verbatim otherwise | run |
+| slew6 | sky130, met1 | o21ai/dfxtp renames | run |
+| cap1 | Nangate, metal3 | DFF Q max_cap shape | run |
+| cap2 | Nangate, metal3 | verbatim otherwise | run |
 | fanout2 | Nangate, SDC | verbatim otherwise | run |
-| fanout3 | Nangate, extra lef, SDC | extra file folded into the mock (EM_LEFONLY) | engine-crash |
+| fanout3 | Nangate, extra lef, SDC | extra file folded into the mock (EM_LEFONLY) | run |
 | wire3 | Nangate, metal99, catch form | negative case; em99 absent by design | run |
 | tie1 | Nangate, LOGIC1_X1/Z | tie_port EM_TIEHI/Z | run |
 | tie2 | Nangate, LOGIC1_X1/Z, -separation | tie_port EM_TIEHI/Z | run |
@@ -152,29 +152,45 @@ CTest entry and no .ok file until the engine fix lands.
 
 ## Pending (explicitly not cut)
 
-13 ported cases crash in the engine at one site: STA
-replaceCell walks to a null vertex (gdb: Sta::replaceCell
-via Resizer::replaceCell via resizeToTargetSlew, faulting in
-VertexInEdgeIterator via delaysInvalidFromFanin). Two callers:
-makeRepeater (setup2, slew1-6, cap1, cap2, fanout3) and
-makeHoldDelay (hold1, hold2, hold3). The crash fires when the
-resizer replaces a cell on a freshly inserted buffer (or a hold
-delay cell) whose pins have no graph vertex yet; it is an
-engine bug, not a mock data gap, and no honest mock change
-avoids it (equalizing buffer caps to dodge the replacement
-would weaken the drive-strength model to force a pass, which
-is forbidden). These keep their ported files but no CTest
-entry and no .ok file until the engine fix lands (F2 scope):
-setup2, hold1, hold2, hold3, slew1, slew2, slew3, slew4, slew5,
-slew6, cap1, cap2, fanout3.
+12 of the 13 formerly-crashing ported cases are fixed by F2
+and now run with CTest entries plus .ok files: hold1, hold2,
+hold3, slew1, slew2, slew3, slew4, slew5, slew6, cap1, cap2,
+fanout3. The crash mechanism (proven by marker trace, not
+gdb): the resizer created buffers with silent dbNetwork
+makeInstance calls, so fresh pins never got graph vertices;
+STA replaceCell on a fresh repeater (or hold-delay cell) then
+walked a null load vertex into VertexInEdgeIterator via
+delaysInvalidFromFanin. The fix switches the six silent
+creation sites (bufferInput, bufferOutput, makeRepeater,
+splitLoads, makeHoldDelay, rebufferTopDown) to notifying
+Sta::makeInstance, which creates pin vertices and edges.
+Zero upstream patches: the fix is in EOS-owned Resizer and
+Rebuffer code only.
 
-15 suite cases were never ported because they segfault in the
-engine (F2's scope: segfaults plus the hold path and P-23
-evaluation). Their scripts are committed in the parent dir;
-they get mock ports and .ok files only after the engine
-crashes are fixed: cap3, clk_nets1, fanout1, hold6, hold7,
-hold8, hold9, slew8, slew9, wire1, wire2, wire4, wire5, wire6,
-wire7.
+Setup2 is the exception: its crash is fixed (exit 0, 883
+buffers inserted by the design pass), but its design-plus-
+setup verdict is INF WNS, so it carries no CTest entry and
+no .ok file. The INF is a pre-existing P-28 graph-rebuild
+gap, not a new F2 regression: the setup pass's first rebuild
+returns INF with 6 endpoints present, while the same rebuild
+on register-endpoint designs (setup1, setup3 design-plus-
+setup) returns real slack. Setup2 is the only combinational
+design with output-delay endpoints in the mock set. Pinning
+an INF verdict would bless broken timing, so setup2 stays
+unpinned until the rebuild gap is fixed (follow-up, outside
+F2). The hold-path rebuild added by F2 shares the P-28
+rebuild behavior, including this gap for output-port
+endpoints; no hold case hits it (all hold endpoints here
+are register D pins).
+
+15 suite cases were never ported. Their engine crashes are
+fixed by the same F2 mechanism (verified on synthetic
+diag fixtures in the F2 workdir, 16 of 16 scripts exit 0;
+see the suite README crash table), but they have no mock
+ports yet, so they get mock ports and .ok files only as
+mock-library follow-up, not in F2: cap3, clk_nets1, fanout1,
+hold6, hold7, hold8, hold9, slew8, slew9, wire1, wire2,
+wire4, wire5, wire6, wire7.
 
 Gcd stays pending: its routed DEF and SDC/lib inputs are
 local-only ORFS outputs, not committed. A mock port needs a

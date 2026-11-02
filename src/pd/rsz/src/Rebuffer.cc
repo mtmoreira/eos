@@ -403,9 +403,9 @@ Resizer::rebufferTopDown(BufferedNet *choice,
     string buffer_name = makeUniqueInstName("rebuffer");
     Net *net2 = makeUniqueNet();
     LibertyCell *buffer_cell = choice->bufferCell();
-    Instance *buffer = db_network_->makeInstance(buffer_cell,
-                                                 buffer_name.c_str(),
-                                                 parent);
+    Instance *buffer = sta_->makeInstance(buffer_name.c_str(),
+                                           buffer_cell,
+                                           parent);
     journalMakeBuffer(buffer);
     inserted_buffer_count_++;
     design_area_ += area(db_network_->cell(buffer_cell));
