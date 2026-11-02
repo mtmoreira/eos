@@ -258,7 +258,8 @@ modules:
     layer: L4
     path: src/pd/cts
     target: eda_pd_cts
-    adopted: false
+    adopted: true
+    upstream: OpenROAD cts (TritonCTS, ead3236) at ead3236, P3
   - name: route
     layer: L4
     path: src/pd/route

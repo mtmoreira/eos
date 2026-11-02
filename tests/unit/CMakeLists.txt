@@ -134,6 +134,11 @@ target_link_libraries(eda_pd_place_unit_test
   PRIVATE eda_pd_place eda_pd_floorplan eda_db_odb GTest::gtest GTest::gtest_main)
 add_test(NAME pd.place COMMAND eda_pd_place_unit_test)
 
+add_executable(eda_pd_cts_unit_test pd/cts/cts_test.cc)
+target_link_libraries(eda_pd_cts_unit_test
+  PRIVATE eda_pd_cts eda_pd_place eda_pd_floorplan eda_db_odb GTest::gtest GTest::gtest_main)
+add_test(NAME pd.cts COMMAND eda_pd_cts_unit_test)
+
 add_executable(eda_pd_dbsta_unit_test pd/dbsta/dbsta_test.cc)
 target_link_libraries(eda_pd_dbsta_unit_test
   PRIVATE eda_pd_dbsta eda_db_odb GTest::gtest GTest::gtest_main)

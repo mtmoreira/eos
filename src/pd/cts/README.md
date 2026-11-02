@@ -1,6 +1,8 @@
 # cts (L4 engines)
 
-Clock tree synthesis and clock-driven optimization.
+Clock tree synthesis: TritonCTS from OpenROAD at ead3236, driven
+by the EOS-owned runner in src/cts.cc behind `eos::cts`.
 
-Status: skeleton, seeded in Phase 0. No implementation yet.
-The stable public API of this module will live in include/ and is versioned per the EOS Code Structure document.
+Status: adopted in P3. The stable public API lives in
+include/eos/pd/cts.h. See PROVENANCE.md for the import audit
+and PATCHES.md for the port adaptations.

@@ -298,7 +298,8 @@ def test_real_repo_check_passes_and_rules_hold():
     # yet; the rsz/tests dep-graph rule and its synthetic test
     # below already cover the entries when they land.
     # P2 adds pd.place, the 45th ctest entry.
-    assert len(all_tests) == 57
+    # P3 adds pd.cts, the 58th ctest entry.
+    assert len(all_tests) == 58
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),
