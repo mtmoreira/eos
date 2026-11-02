@@ -767,7 +767,27 @@ CommandResult RunRepair(CommandContext &ctx, const RepairOptions &o) {
   const double max_buffer_frac =
       (o.max_buffer_percent.has_value() ? *o.max_buffer_percent : 20.0) /
       100.0;
-  const double max_wire_m = o.max_wire_length_m.value_or(0.0);
+  // P-23: the max wire length default is computed per design from tech
+  // data (the buffer split-wire breakeven length), not a hardcoded
+  // number. An explicit -max_wire_length always wins, including 0
+  // (upstream "none" semantics). The computed default applies only to
+  // passes that use the cap (-design, -clk_nets); setup/hold/tie/
+  // clk_inverters-only runs skip the computation entirely. When no
+  // tech data can supply a computed value, fail fast: a silent
+  // uncapped run would hide missing tech data.
+  double max_wire_m;
+  if (o.max_wire_length_m.has_value()) {
+    max_wire_m = *o.max_wire_length_m;
+  } else if (o.design || o.clk_nets) {
+    max_wire_m = resizer.findMaxWireLength();
+    if (!std::isfinite(max_wire_m) || max_wire_m <= 0.0) {
+      return FailConfig(
+          "cannot compute max_wire_length from tech data: "
+          "give an explicit -max_wire_length");
+    }
+  } else {
+    max_wire_m = 0.0;
+  }
   const double max_slew = o.max_slew_margin.value_or(0.0);
   const double max_cap = o.max_cap_margin.value_or(0.0);
 

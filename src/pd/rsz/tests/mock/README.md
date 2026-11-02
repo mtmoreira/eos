@@ -123,7 +123,9 @@ CTest entry and no .ok file until the engine fix lands.
 | case | original inputs | mock notes | status |
 | ---- | --------------- | ---------- | ------ |
 | setup1 | Nangate, metal3 | verbatim otherwise | run |
-| setup2 | Nangate, metal3/metal5, SDC | TRACKS layers em4/em6-10 added for this DEF | crash-fixed, no .ok (see Pending) |
+| setup2 | Nangate, metal3/metal5, SDC | TRACKS layers em4/em6-10 added for this DEF | run (P-23: pinned, computed default) |
+| setup2_override0 | same as setup2 | explicit -max_wire_length 0 wins over the computed default | run |
+| fallback_zero_drive | same design as setup2, degenerate liberty | EM_BUF_X1 slew tables zeroed (see P-23 note); fail-fast error pinned | run |
 | setup3 | sky130, met1, SDC | DFF/latch pin renames | run |
 | hold1 | Nangate, metal1, SDC, -buffer_cell BUF_X1 | buffer_cell EM_BUF_X1 | run |
 | hold2 | Nangate, metal1, ideal clock | faithful port: propagated-clock SDC with input delays 0 and output delay -0.3 (the committed script's ideal clock is vacuous for hold repair) | run |
@@ -167,21 +169,31 @@ Sta::makeInstance, which creates pin vertices and edges.
 Zero upstream patches: the fix is in EOS-owned Resizer and
 Rebuffer code only.
 
-Setup2 is the exception: its crash is fixed (exit 0, 883
-buffers inserted by the design pass), but its design-plus-
-setup verdict is INF WNS, so it carries no CTest entry and
-no .ok file. The INF is a pre-existing P-28 graph-rebuild
-gap, not a new F2 regression: the setup pass's first rebuild
-returns INF with 6 endpoints present, while the same rebuild
-on register-endpoint designs (setup1, setup3 design-plus-
-setup) returns real slack. Setup2 is the only combinational
-design with output-delay endpoints in the mock set. Pinning
-an INF verdict would bless broken timing, so setup2 stays
-unpinned until the rebuild gap is fixed (follow-up, outside
-F2). The hold-path rebuild added by F2 shares the P-28
-rebuild behavior, including this gap for output-port
-endpoints; no hold case hits it (all hold endpoints here
-are register D pins).
+Setup2 is the exception no longer: P-23 (owner-approved
+2026-11-02) pins it. The root cause was not the rebuild.
+Diagnosis (marker traces plus live odb dumps, not gdb):
+the design pass corrupted odb for output-port nets, and
+the rebuild faithfully exposed that corruption. In
+Resizer::makeRepeater, the first repeater on an
+output-port net takes the output-port branch, which moves
+the driver to a fresh input net; every later repeater is
+still called with the ORIGINAL net, but its load lives on
+that fresh net, so using the original net as the new
+repeater's input net strands the driver alone on the fresh
+net and loops the chain onto the first buffer output
+(setup2: U4/ZN and U5/ZN stranded, y1/y2 unreachable, INF
+slack after any graph rebuild). Nets without output-port
+loads never take that branch, which is why only y1/y2
+broke and why register-endpoint designs (setup1, setup3)
+survived. The P-23 fix, in EOS-owned Resizer.cc only
+(STA untouched, zero upstream patches), uses the loads'
+actual net when they share one net as the first-branch
+input net; multi-net loads keep current behavior. After
+the fix the mock setup2 design-plus-setup verdict is real,
+not INF, and is pinned (see the P-23 note below). The
+hold-path rebuild added by F2 shares the P-28 rebuild
+behavior; no hold case hits the output-port shape (all
+hold endpoints here are register D pins).
 
 15 suite cases were never ported. Their engine crashes are
 fixed by the same F2 mechanism (verified on synthetic
@@ -196,6 +208,83 @@ Gcd stays pending: its routed DEF and SDC/lib inputs are
 local-only ORFS outputs, not committed. A mock port needs a
 synthetic mock placed/routed DEF, which is follow-up work, not
 v1.
+
+## P-23 adoption: computed max wire default
+
+Owner-approved 2026-11-02 ("Adopt the computed default, build
+the wiring"). Rule, implemented in
+src/ui/registry/src/repair_commands.cc after resizePreamble
+(buffer cells populated) and after wire RC is set (tech or
+override, fail-fast earlier): an explicit -max_wire_length
+always wins, including 0 (upstream "none" semantics); else,
+for -design or -clk_nets runs, the default is
+resizer.findMaxWireLength(), the per-design buffer
+split-wire breakeven length in meters; else (setup, hold,
+tie, clk_inverters-only runs) the computation is skipped
+entirely, so those passes never pay for or fail on it. When
+the computed value is not finite or not positive, the command
+fails fast with "cannot compute max_wire_length from tech
+data: give an explicit -max_wire_length", never a silent
+uncapped run. No new verdict field: observability comes from
+changed insertion counts in verdict lines. No new command;
+the registry count pin is 55 (P3 added the CTS command),
+unchanged by this unit.
+
+Pins and re-baselines (all measured, each new pin run twice
+byte-identical):
+- setup2 (mock/repair_setup2.ok, CTest pd.rsz.mock.setup2):
+  computed default, design inserted 59 (was 883 uncapped),
+  end instances 62, END WNS -14.940527 ns (real, was INF),
+  END TNS -26.709520 ns, setup inserted 0.
+- setup2_override0 (mock/repair_setup2_override0.ok, CTest
+  pd.rsz.mock.setup2_override0): explicit 0 reproduces the
+  pre-adoption uncapped behavior exactly: design inserted
+  883, end instances 886, END WNS -24.026940 ns.
+- fallback_zero_drive (mock/repair_fallback_zero_drive.ok,
+  CTest pd.rsz.mock.fallback_zero_drive): degenerate liberty
+  mock/eos_mock_zero_drive.lib, derived from eos_mock.lib by
+  zeroing only the EM_BUF_X1 output slew tables
+  (rise_transition, fall_transition); this makes its drive
+  resistance 0 (STA derives drive from slew at max load),
+  so the computed breakeven collapses to 0 and the command
+  fails fast with the documented message, pinned as an
+  error= verdict via the wire3 catch form.
+- slew3 re-baselined: inserted 3 to 6 (computed cap binds,
+  length violations add buffers; upsized unchanged at 3).
+- slew4 re-baselined: inserted 277 to 41 (computed cap
+  pre-empts slew-driven over-insertion; upsized unchanged
+  at 2). Attribution proven by explicit-0 rerun: slew4 with
+  -max_wire_length 0 reproduces the old 277 exactly, so the
+  change is the computed default, not the makeRepeater fix.
+- Unchanged, as required: all 24 other mock cases pass
+  byte-identical, including setup1 and setup3 (setup-only,
+  computation skipped) and wire3 (explicit cap).
+
+Known limits, stated plainly:
+- The PDK setup2.ok (top level, src/pd/rsz/tests/) still
+  pins pre-adoption behavior and needs regeneration on a
+  real PDK run; no PDK numbers are claimed here.
+- Diag cases wire1, wire2, wire4 through wire7 have no
+  committed fixtures in this tree, so their computed-default
+  behavior is unmeasured here; their explicit-cap behavior
+  is unchanged (same code path as before for explicit caps).
+- The fail-fast branch is defensive-only with valid tech
+  data. Probes: -wire_r 0 is rejected earlier by validation
+  ("must be positive"); -wire_r 1e30 yields a huge finite
+  cap (splitting always wins), not the fallback; a
+  buffer-less library aborts pre-existing at RSZ-0022 in
+  resizePreamble, before the computation is reached (the
+  command handler does not catch engine throws; converting
+  that abort into a clean error is separate follow-up, not
+  P-23). The pinned fallback test therefore uses the
+  zero-drive liberty above, the one constructed trigger.
+- Design-phase and setup-phase timing views differ on
+  setup2: design-only END WNS -6.307832 ns (incremental
+  graph) versus combined END WNS -24.026940 ns at cap 0
+  (rebuilt graph). The pinned combined verdict reflects the
+  rebuilt, odb-faithful view and is repeatable; the
+  incremental-graph fidelity gap for deep chains is a
+  known follow-up, not a blocker for the pin.
 
 ## Measured results (v1)
 

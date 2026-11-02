@@ -144,6 +144,23 @@ VACUOUS and CRASH are recorded, not waved through.
   silently. End WNS EOS -0.109683 ns (upstream
   -0.10 after). Design+setup totals: upstream 3
   inserted + 7 resized; EOS 0 inserted + 3 resized.
+  P-23 adoption (owner-approved 2026-11-02) closes this
+  divergence for -design and -clk_nets runs: the command
+  now computes the default from tech data with
+  findMaxWireLength, and an explicit -max_wire_length
+  still wins, including 0 (upstream "none" semantics).
+  Setup, hold, tie, and clk_inverters-only runs skip the
+  computation entirely. When no tech data can supply a
+  computed value the command fails fast with
+  "cannot compute max_wire_length from tech data: give
+  an explicit -max_wire_length", never a silent uncapped
+  run. The PDK .ok file (repair_setup2.ok, top level)
+  still pins pre-adoption behavior and needs
+  regeneration on a real PDK run; the mock setup2
+  verdict is pinned under the computed default (see
+  mock/README.md). The mock setup2 INF anomaly that
+  blocked pinning is also closed by P-23, and its root
+  cause was not the rebuild: see mock/README.md.
 - setup3: MATCH (ops). Upstream 2 resized (RSZ-0041),
   RSZ-0062. EOS RSZ-0041 2, RSZ-0062, end -1.788579 ns
   (upstream .ok carries no end slack). SDC carries
@@ -304,9 +321,10 @@ worked around by weakening it. Verification is on
 synthetic diag fixtures (the PDK fixtures are
 pending-licence and absent here): all 16 diag scripts
 exit 0 with the fix binary; the 13 mock-ported crash
-cases likewise exit 0 (12 pinned with .ok and CTest
-entries, setup2 unpinned for the rebuild gap noted in
-mock/README.md). PDK .ok files for these 15 cases
+cases likewise exit 0 (13 pinned with .ok and CTest
+entries, setup2 pinned by P-23 under the computed
+default; see mock/README.md for the root cause and the
+verdict). PDK .ok files for these 15 cases
 still need a run on real PDK fixtures. Trigger
 descriptions are kept below as history.
 

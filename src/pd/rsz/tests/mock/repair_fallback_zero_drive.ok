@@ -1,0 +1,1 @@
+error=EOS invalid_configuration: cannot compute max_wire_length from tech data: give an explicit -max_wire_length
