@@ -68,6 +68,53 @@ Qt is a declared external dependency, never vendored. Its LGPL terms
 are flagged for licence review at distribution time (see
 PROVENANCE.md); that is a flag, not a licence commitment.
 
+### macOS
+
+Qt6 comes from Homebrew. If `brew install qt` fails with a qt@5
+conflict (qt@5 conflicts with qtbase 6.x), unlink first, then
+install:
+
+```
+brew unlink qt@5
+brew install qt
+```
+
+Configure with the Homebrew prefix so CMake finds Qt6 and the
+other Homebrew dependencies, then build the GUI target:
+
+```
+cmake -S. -B build -DCMAKE_PREFIX_PATH=$(brew --prefix)
+cmake --build build --target eos-gui -j$(sysctl -n hw.ncpu)
+```
+
+The full build uses the same configure line with `cmake --build
+build` and no --target argument.
+
+### Linux (Debian/Ubuntu)
+
+```
+sudo apt-get install qt6-base-dev qt6-base-dev-tools
+cmake -S. -B build
+cmake --build build --target eos-gui -j$(nproc)
+```
+
+Drop the CMAKE_PREFIX_PATH argument on Linux, or point it at
+your dependency prefix. CI installs the same two Qt packages
+(see .github/workflows/ci.yml), so CI always builds the full
+GUI.
+
+### Install
+
+The eos-gui target has a minimal install rule (binary only, no
+bundled Qt: Qt stays an external runtime dependency):
+
+```
+cmake --install build --prefix <dir>
+```
+
+That places eos-gui in <dir>/bin. Running from the build tree
+needs no install step: the binary is build/apps/eos-gui/eos-gui.
+
 ## Run
 
 The eos-gui binary mirrors the eos shell startup: it builds the
@@ -79,6 +126,64 @@ with a warning, the terminal REPL is unavailable, and the window
 still opens on an empty session with its own console entry.
 Typing show in the terminal reopens a hidden window; closing the
 window never kills the session.
+
+### Launching
+
+No script file: the window opens on an empty session (steps
+Pending, empty tree, "No design loaded"). Drive it from the
+console entry line, one registry command per Return, or from the
+terminal REPL (below).
+
+With a script file: pass script files as arguments and they run
+through the Tcl shell on the shared context before the window
+opens, so the window starts on the loaded session:
+
+```
+build/apps/eos-gui/eos-gui <script.tcl> [...]
+```
+
+demo/synth/elab-demo.tcl is a four-command Elaboration script
+for the optloop demo (see demo/synth/README.md).
+
+### Console entry
+
+The console entry line takes one registry command per Return and
+dispatches it through the session, so the stepper, tree, diagram,
+schematic, and panels update after each command. The eos::
+prefix is optional (create_scenario and eos::create_scenario
+mean the same here). Arguments are whitespace-separated;
+double-quoted arguments support backslash escapes for quote and
+backslash, and an unterminated quote is rejected. Lines starting
+with # and empty lines are ignored. Console entry takes registry
+commands only, not Tcl: there is no variable, loop, or procedure
+support here; full Tcl lives in the terminal REPL and in script
+files.
+
+### Terminal REPL
+
+While the window is open, the same process keeps a terminal REPL
+on stdin (prompt eos> on a terminal). Every line is evaluated
+through the Tcl shell on the GUI thread, so terminal and GUI
+commands can never race, and the window refreshes after each
+one. Terminal behaviors:
+
+- show: shows a hidden window again on the same session.
+- exit: quits the process.
+- Closing the window hides it; the session keeps running.
+- If terminal stdin closes while the window is hidden, the
+  application quits instead of lingering headless.
+- The terminal REPL uses plain line input: line editing,
+  history, and tab completion stay in the eos CLI.
+
+Without a Tcl build, the terminal REPL is unavailable and the
+window still opens on the shared context with its own console
+entry.
+
+### Checkpoint indicator
+
+The right end of the stepper row shows the current checkpoint
+path ("Checkpoint: none" until a checkpoint or restore
+succeeds). A successful close_design clears it.
 
 ## Design notes
 

@@ -64,3 +64,51 @@ mapped netlist.
 
 This folder is reference data and documentation. It is outside the
 seven-layer code structure: it adds no CMake target and no test.
+
+## GUI walkthrough
+
+Build the GUI target (see src/ui/gui/README.md for the Mac and
+Linux build commands), then launch it from this directory with
+no script file:
+
+```
+../../build/apps/eos-gui/eos-gui
+```
+
+The window opens on an empty session. Type these commands in
+the console entry line, one per Return (the eos:: prefix is
+optional there):
+
+```
+create_scenario func_tt func tt estimate
+read_verilog optloop.v optloop
+elaborate
+synth_generic
+```
+
+Or launch with the script file instead, which runs the same
+four commands before the window opens:
+
+```
+../../build/apps/eos-gui/eos-gui elab-demo.tcl
+```
+
+What you should see: the stepper moves Read, Elaborate, and
+Generic synth to done as each command runs; the hierarchy tree
+shows the flat optloop root only (optloop has no submodules);
+clicking a stepper step shows that step's outputs in the right
+panels (Read shows Sources, Elaborate shows Results, Generic
+synth shows the Opt log); the center shows the leaf schematic,
+because the flat root is a leaf level. The schematic shows the
+elaborated 6-AND unshared tree, not the generic 3-AND shared
+tree: schematic data comes from the elaborated-design walk, and
+the generic sharing is visible in the Results panel numbers
+instead (3 ANDs at 2 levels after synth_generic). The
+checkpoint indicator at the right of the stepper row reads
+"Checkpoint: none" throughout, since this walkthrough sets no
+checkpoint.
+
+To drive the same session from the terminal instead, type the
+commands at the terminal eos> prompt while the window is open;
+close the window and type show in the terminal to bring it
+back on the same session.
