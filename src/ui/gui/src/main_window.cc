@@ -1,8 +1,11 @@
 // gui: the Elaboration main window (Qt only).
 #include "main_window.h"
 
+#include <QApplication>
+#include <QCloseEvent>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSplitter>
@@ -70,6 +73,11 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
     });
   }
   stepper_layout->addStretch();
+  // Checkpoint indicator (U6): the current checkpoint path
+  // only, no compare UI. It sits at the right of the stepper
+  // row and refreshes with the step states.
+  checkpoint_label_ = new QLabel("Checkpoint: none", stepper);
+  stepper_layout->addWidget(checkpoint_label_);
   layout->addWidget(stepper);
 
   // Center row: hierarchy browser left, block diagram or
@@ -97,14 +105,47 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   layout->addWidget(middle, 1);
 
   // Console echo: GUI-issued commands, read only in U1. Command
-  // entry arrives in U6.
+  // entry arrives in U6: the line below the transcript takes one
+  // registry command per Return, dispatches it through the
+  // session, and refreshes the window, so each effect is visible
+  // live. The entry takes registry commands only, not Tcl; the
+  // terminal REPL keeps full Tcl.
   console_ = new QPlainTextEdit(root);
   console_->setReadOnly(true);
   layout->addWidget(console_);
+  entry_ = new QLineEdit(root);
+  entry_->setPlaceholderText("eos::elaborate");
+  connect(entry_, &QLineEdit::returnPressed, [this]() {
+    view_.DispatchEntry(entry_->text().toStdString());
+    entry_->clear();
+    Refresh();
+  });
+  layout->addWidget(entry_);
 
   setCentralWidget(root);
   setWindowTitle("EOS Elaboration");
   Refresh();
+}
+
+void MainWindow::ShowAgain() {
+  show();
+  raise();
+  activateWindow();
+}
+
+void MainWindow::NoteStdinClosed() {
+  stdin_closed_ = true;
+  if (!isVisible()) QCoreApplication::quit();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+  if (stdin_closed_) {
+    event->accept();
+    QCoreApplication::quit();
+    return;
+  }
+  hide();
+  event->ignore();
 }
 
 void MainWindow::Refresh() {
@@ -134,6 +175,10 @@ void MainWindow::RefreshSteps() {
     step_buttons_[i]->setText(
         QString::fromStdString(StepText(kStepNames[i], states[i])));
   }
+  const std::string& checkpoint = view_.CheckpointName();
+  checkpoint_label_->setText(QString::fromStdString(
+      checkpoint.empty() ? "Checkpoint: none"
+                         : "Checkpoint: " + checkpoint));
 }
 
 void MainWindow::RefreshConsole() {

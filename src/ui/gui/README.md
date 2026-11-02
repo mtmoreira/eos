@@ -4,7 +4,7 @@ The GUI adapter over the command registry, thin by design: every GUI
 action issues a registry command and renders its machine-readable
 result, so the CLI and the GUI cannot drift.
 
-Status: units U1, U2, U3, U4, and U5 of the minimal Elaboration slice
+Status: units U1, U2, U3, U4, U5, and U6 of the minimal Elaboration slice
 (owner approval 2026-10-31, Qt decided 2026-10-31). U1 delivers
 the skeleton: the window, the stage bar (Elaboration active,
 later stages greyed), the Read/Elaborate/Generic synth stepper
@@ -35,8 +35,26 @@ Elaborate shows Results, Generic synth shows the Opt log); the
 stepper keeps only its per-step state, and the detailed outputs
 live in the panels. Messages are diagnostics only: a rejected
 dispatch records one line, a successful dispatch records none.
-Console command entry (U6) and packaging (U7) are later units,
-not this one.
+U6 delivers console command entry plus session persistence: the
+console gains an entry line that takes one registry command per
+Return and dispatches it through the session, so the stepper,
+tree, diagram, schematic, and panels update after each command;
+the checkpoint indicator at the right of the stepper row shows
+the current checkpoint path (none until a checkpoint or restore
+succeeds; a successful close_design clears it); and the session
+outlives the window. The same process keeps a terminal REPL on
+stdin while the window is open, every terminal line is evaluated
+on the GUI thread through the Tcl shell so terminal and GUI
+commands can never race, closing the window hides it instead of
+killing the session, and typing show in the terminal shows the
+window again on the same session. The terminal REPL uses plain
+line input: line editing, history, and tab completion stay in
+the eos CLI. Console entry takes registry commands only, not
+Tcl; the terminal REPL keeps full Tcl, and exit there quits the
+process. If the terminal stdin closes while the window is hidden,
+the application quits instead of lingering headless, since a
+hidden window with no terminal left cannot be reopened.
+Packaging (U7) is the remaining unit, not this one.
 
 ## Build
 
@@ -55,12 +73,12 @@ PROVENANCE.md); that is a flag, not a licence commitment.
 The eos-gui binary mirrors the eos shell startup: it builds the
 registry, registers the core commands, optionally runs script files
 through the Tcl shell on the shared context, then opens the window
-on the same registry and context. Without a Tcl build, script files
-are ignored with a warning and the window still opens on an empty
-session. Console command entry arrives in U6; in U1 the console
-shows GUI-issued commands (none yet from the UI itself, so a
-script-loaded session shows state in the stepper and center while
-the console starts empty).
+on the same registry and context and keeps the Tcl shell alive as
+the terminal REPL. Without a Tcl build, script files are ignored
+with a warning, the terminal REPL is unavailable, and the window
+still opens on an empty session with its own console entry.
+Typing show in the terminal reopens a hidden window; closing the
+window never kills the session.
 
 ## Design notes
 

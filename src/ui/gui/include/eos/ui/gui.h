@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "eos/ui/diagram.h"
+#include "eos/ui/console_entry.h"
 #include "eos/ui/hierarchy.h"
 #include "eos/ui/panels.h"
 #include "eos/ui/registry.h"
@@ -44,6 +45,21 @@ class SessionView {
 
   CommandResult Dispatch(const std::string& name,
                          const std::vector<std::string>& args);
+
+  // Dispatches one console line (U6): parses it with
+  // ParseConsoleLine and dispatches the command, so the console
+  // entry and the terminal REPL drive the session through the
+  // same path. A blank or comment line is a no-op and records
+  // nothing. A malformed line echoes the raw line and records a
+  // message, exactly like a rejected dispatch.
+  CommandResult DispatchEntry(const std::string& line);
+
+  // Current checkpoint path (U6 indicator): the path of the last
+  // successful checkpoint or restore dispatch, empty when no
+  // checkpoint is current. A failed checkpoint or restore leaves
+  // it where it was; a successful close_design clears it, since
+  // the design it belonged to is gone.
+  const std::string& CheckpointName() const { return checkpoint_; }
 
   const std::vector<std::string>& EchoLog() const { return echo_; }
   CommandContext& context() { return context_; }
@@ -173,6 +189,7 @@ class SessionView {
   CommandContext& context_;
   std::vector<std::string> echo_;
   std::vector<std::string> messages_;
+  std::string checkpoint_;
   HierarchyModel hierarchy_;
   DiagramModel diagram_;
   SchematicModel schematic_;
@@ -183,8 +200,19 @@ class SessionView {
 // Runs the Qt GUI application on the given registry and context.
 // Defined only in a Qt build; the eos-gui app target is created
 // only when Qt6 is found at configure time.
+//
+// The shell argument (U6) is the terminal REPL: when non-null,
+// the same process keeps a REPL on stdin while the window is
+// open, and every terminal line is evaluated on the GUI thread
+// through that shell, so terminal and GUI console commands can
+// never race on the session. A null shell means no terminal
+// REPL (a build without Tcl); the GUI console still works, since
+// it dispatches registry commands directly. The window owns no
+// session lifetime: closing it hides it, and the terminal
+// reopen command shows it again.
+class TclShell;
 int RunGui(int argc, char** argv, CommandRegistry& registry,
-           CommandContext& context);
+           CommandContext& context, TclShell* shell);
 
 }  // namespace eos::ui
 

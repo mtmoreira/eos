@@ -10,6 +10,9 @@
 
 #include <string>
 
+class QCloseEvent;
+class QLabel;
+class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QSplitter;
@@ -32,17 +35,37 @@ class MainWindow : public QMainWindow {
   // in the center; otherwise the diagram shows.
   void Refresh();
 
+  // Shows a hidden window again (U6): the terminal reopen
+  // command calls this on the GUI thread, so a window closed
+  // earlier reappears on the same session.
+  void ShowAgain();
+
+  // Records that the terminal stdin reached EOF (U6). A window
+  // hidden with no terminal left cannot be reopened, so in that
+  // state the application quits instead of lingering headless.
+  void NoteStdinClosed();
+
+ protected:
+  // Closing the window hides it (U6); it never kills the
+  // session. The one exception is a window closed after the
+  // terminal stdin closed: with no way back in, the close is
+  // accepted and the application quits.
+  void closeEvent(QCloseEvent* event) override;
+
  private:
   void RefreshSteps();
   void RefreshConsole();
 
   SessionView& view_;
   QPushButton* step_buttons_[3];
+  QLabel* checkpoint_label_ = nullptr;
   HierarchyBrowser* browser_ = nullptr;
   BlockDiagram* diagram_ = nullptr;
   SchematicDiagram* schematic_ = nullptr;
   PanelsView* panels_ = nullptr;
   QPlainTextEdit* console_ = nullptr;
+  QLineEdit* entry_ = nullptr;
+  bool stdin_closed_ = false;
 };
 
 }  // namespace eos::ui

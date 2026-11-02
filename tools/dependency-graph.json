@@ -270,12 +270,17 @@
     },
     "gui": {
       "depends_on": [
-        "registry"
+        "registry",
+        "tcl"
       ],
       "layer": "L6",
       "path": "src/ui/gui",
       "via": {
         "registry": [
+          "cmake-link",
+          "include"
+        ],
+        "tcl": [
           "cmake-link",
           "include"
         ]
