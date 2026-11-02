@@ -64,9 +64,12 @@ struct ScenarioSnapshot {
 // ReportRegistry::RegisterReport (session/reports) and never modified
 // afterwards: it is a snapshot of the conditions the report was
 // computed under, and later changes to the scenario set (or anything
-// else) do not rewrite history. Bindings are project state: they are
-// serialized into the project file alongside the ledger whose
-// artifacts they link to.
+// else) do not rewrite it. A repeat registration does not modify a
+// record either: it replaces the record wholesale with a fresh
+// snapshot under the same name (repeatable reports), and the old
+// artifact stays in the ledger as audit history. Bindings are
+// project state: they are serialized into the project file alongside
+// the ledger whose artifacts they link to.
 struct ReportBinding {
   ArtifactId artifact_id = 0;
   std::string name;

@@ -100,10 +100,9 @@
 // it registers its own report binding, "timing_closure", at the
 // final ledger revision: proof pass exactly when the gate is met,
 // unknown otherwise, so a loop that did not close timing can
-// never certify an export. If that name is already registered the
-// registration failure is returned as the call's Status (the
-// accepted edits and their ledger transactions stand; the design
-// is never rolled back over a bookkeeping name).
+// never certify an export. Re-running the loop re-registers the
+// name (repeatable reports: the binding is overwritten with a
+// fresh snapshot at the new final revision, never duplicated).
 //
 // Fidelity: scenes at extracted parasitics are refused before
 // any analysis or edit, with the transaction engine's reason:
