@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "eos/ui/gui.h"
+#include "eos/ui/console_entry.h"
 #include "eos/ui/diagram.h"
 #include "eos/ui/hierarchy.h"
 #include "eos/ui/panels.h"
@@ -1206,6 +1207,127 @@ TEST(GuiSessionView, MessagesSurviveRefreshPanels) {
   ASSERT_EQ(view.Messages().size(), 1u);
   EXPECT_EQ(view.Messages()[0],
             "eos::nope: EOS invalid_command: unknown command: eos::nope");
+}
+
+TEST(ConsoleEntry, ParsesPlainAndPrefixedNames) {
+  const eos::ui::ConsoleLine plain = eos::ui::ParseConsoleLine("ping a b");
+  EXPECT_TRUE(plain.ok);
+  EXPECT_EQ(plain.name, "ping");
+  ASSERT_EQ(plain.args.size(), 2u);
+  EXPECT_EQ(plain.args[0], "a");
+  EXPECT_EQ(plain.args[1], "b");
+  const eos::ui::ConsoleLine prefixed =
+      eos::ui::ParseConsoleLine("eos::ping a");
+  EXPECT_TRUE(prefixed.ok);
+  EXPECT_EQ(prefixed.name, "ping");
+  ASSERT_EQ(prefixed.args.size(), 1u);
+  EXPECT_EQ(prefixed.args[0], "a");
+}
+
+TEST(ConsoleEntry, ParsesQuotedArgsAndEscapes) {
+  const eos::ui::ConsoleLine parsed =
+      eos::ui::ParseConsoleLine("ping \"a b\" \"c\\\"d\" \"e\\\\f\"");
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_EQ(parsed.name, "ping");
+  ASSERT_EQ(parsed.args.size(), 3u);
+  EXPECT_EQ(parsed.args[0], "a b");
+  EXPECT_EQ(parsed.args[1], "c\"d");
+  EXPECT_EQ(parsed.args[2], "e\\f");
+}
+
+TEST(ConsoleEntry, BlankAndCommentLinesAreNoOps) {
+  const eos::ui::ConsoleLine blank = eos::ui::ParseConsoleLine("   ");
+  EXPECT_TRUE(blank.ok);
+  EXPECT_TRUE(blank.name.empty());
+  const eos::ui::ConsoleLine comment = eos::ui::ParseConsoleLine("  # hello");
+  EXPECT_TRUE(comment.ok);
+  EXPECT_TRUE(comment.name.empty());
+}
+
+TEST(ConsoleEntry, UnterminatedQuoteFails) {
+  const eos::ui::ConsoleLine parsed = eos::ui::ParseConsoleLine("ping \"abc");
+  EXPECT_FALSE(parsed.ok);
+  EXPECT_EQ(parsed.error, "unterminated quote");
+}
+
+TEST(GuiSessionView, DispatchEntryRunsAndEchoes) {
+  CommandRegistry registry;
+  RegisterPing(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  const CommandResult result =
+      view.DispatchEntry("eos::ping \"a b\" plain");
+  EXPECT_TRUE(result.ok);
+  ASSERT_EQ(view.EchoLog().size(), 1u);
+  EXPECT_EQ(view.EchoLog()[0], "eos::ping \"a b\" plain");
+}
+
+TEST(GuiSessionView, DispatchEntryBlankRecordsNothing) {
+  CommandRegistry registry;
+  RegisterPing(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_TRUE(view.DispatchEntry("   ").ok);
+  EXPECT_TRUE(view.EchoLog().empty());
+  EXPECT_TRUE(view.Messages().empty());
+}
+
+TEST(GuiSessionView, DispatchEntryMalformedEchoesAndMessages) {
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  const CommandResult result = view.DispatchEntry("ping \"abc");
+  EXPECT_FALSE(result.ok);
+  ASSERT_EQ(view.EchoLog().size(), 1u);
+  EXPECT_EQ(view.EchoLog()[0], "ping \"abc");
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0],
+            "ping \"abc: EOS invalid_command: unterminated quote");
+}
+
+void RegisterCheckpointStubs(CommandRegistry& registry) {
+  auto one_arg = [](CommandContext&, const std::vector<std::string>& args) {
+    if (args.size() != 1) {
+      return CommandResult::Fail(eos::ui::Diag::kInvalidCommand, "want 1 arg");
+    }
+    return CommandResult::Ok("ok=1");
+  };
+  auto no_arg = [](CommandContext&, const std::vector<std::string>& args) {
+    if (!args.empty()) {
+      return CommandResult::Fail(eos::ui::Diag::kInvalidCommand, "want 0 args");
+    }
+    return CommandResult::Ok("ok=1");
+  };
+  EXPECT_TRUE(registry.Register("checkpoint", "checkpoint <path>", one_arg)
+                  .ok());
+  EXPECT_TRUE(
+      registry.Register("restore", "restore <path>", one_arg).ok());
+  EXPECT_TRUE(
+      registry.Register("close_design", "close_design", no_arg).ok());
+}
+
+TEST(GuiSessionView, CheckpointNameTracksSuccessfulDispatches) {
+  CommandRegistry registry;
+  RegisterCheckpointStubs(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_TRUE(view.CheckpointName().empty());
+  EXPECT_TRUE(view.Dispatch("checkpoint", {"/tmp/a.ckpt"}).ok);
+  EXPECT_EQ(view.CheckpointName(), "/tmp/a.ckpt");
+  EXPECT_TRUE(view.Dispatch("restore", {"/tmp/b.ckpt"}).ok);
+  EXPECT_EQ(view.CheckpointName(), "/tmp/b.ckpt");
+  EXPECT_TRUE(view.Dispatch("close_design", {}).ok);
+  EXPECT_TRUE(view.CheckpointName().empty());
+}
+
+TEST(GuiSessionView, CheckpointNameIgnoresFailures) {
+  CommandRegistry registry;
+  RegisterCheckpointStubs(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_TRUE(view.Dispatch("checkpoint", {"/tmp/a.ckpt"}).ok);
+  EXPECT_FALSE(view.Dispatch("checkpoint", {}).ok);
+  EXPECT_EQ(view.CheckpointName(), "/tmp/a.ckpt");
 }
 
 }  // namespace

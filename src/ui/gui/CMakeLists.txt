@@ -8,6 +8,7 @@
 # time (see PROVENANCE.md and README.md).
 add_library(eda_ui_gui STATIC
   src/gui_session.cc
+  src/console_entry.cc
   src/diagram.cc
   src/hierarchy.cc
   src/panels.cc
@@ -26,5 +27,9 @@ if(Qt6_FOUND)
     src/gui_app.cc)
   target_include_directories(eda_ui_gui PRIVATE internal)
   target_link_libraries(eda_ui_gui PUBLIC Qt6::Widgets)
+  # The terminal REPL evaluates through the Tcl shell, so the
+  # Qt part of the module links the tcl module (same L6 layer
+  # as the registry link above).
+  target_link_libraries(eda_ui_gui PRIVATE eda_ui_tcl)
   set(EOS_HAVE_QT6 TRUE PARENT_SCOPE)
 endif()

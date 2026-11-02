@@ -47,8 +47,24 @@ CommandResult SessionView::Dispatch(const std::string& name,
   if (!result.ok) {
     messages_.push_back(line + ": EOS " + DiagName(result.diag) + ": " +
                         result.message);
+  } else if (name == "checkpoint" || name == "restore") {
+    if (args.size() == 1) checkpoint_ = args[0];
+  } else if (name == "close_design") {
+    checkpoint_.clear();
   }
   return result;
+}
+
+CommandResult SessionView::DispatchEntry(const std::string& line) {
+  const ConsoleLine parsed = ParseConsoleLine(line);
+  if (!parsed.ok) {
+    echo_.push_back(line);
+    messages_.push_back(line + ": EOS " + DiagName(Diag::kInvalidCommand) +
+                        ": " + parsed.error);
+    return CommandResult::Fail(Diag::kInvalidCommand, parsed.error);
+  }
+  if (parsed.name.empty()) return CommandResult::Ok("");
+  return Dispatch(parsed.name, parsed.args);
 }
 
 void SessionView::RefreshHierarchy() {
