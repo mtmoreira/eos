@@ -234,7 +234,26 @@ modules:
     layer: L4
     path: src/pd/place
     target: eda_pd_place
-    adopted: false
+    adopted: true
+    upstream: OpenROAD gpl (RePlAce) and dpl (detailed placement) at ead3236
+  - name: grt
+    layer: L4
+    path: src/pd/grt
+    target: eda_pd_grt
+    adopted: true
+    upstream: OpenROAD grt (GlobalRouter + FastRoute) at ead3236, P2 support import; wire-parasitics builder deferred (see src/pd/grt/PATCHES.md)
+  - name: ant
+    layer: L4
+    path: src/pd/ant
+    target: eda_pd_ant
+    adopted: true
+    upstream: OpenROAD ant (AntennaChecker) at ead3236, P2 support import for grt only; no eos::antenna command
+  - name: stt
+    layer: L4
+    path: src/pd/stt
+    target: eda_pd_stt
+    adopted: true
+    upstream: OpenROAD stt (SteinerTreeBuilder, FLUTE, ead3236 Prim-Dijkstra) at ead3236, P2 support import for grt
   - name: cts
     layer: L4
     path: src/pd/cts

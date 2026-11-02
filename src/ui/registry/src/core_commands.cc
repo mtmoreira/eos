@@ -8,6 +8,7 @@
 
 #include "eos/analysis/sta.h"
 #include "eos/pd/floorplan.h"
+#include "eos/pd/place.h"
 #include "odb/db.h"
 #include "eos/session/flow.h"
 #include "eos/synth/abc.h"
@@ -1722,6 +1723,84 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             " track_grids=" + std::to_string(report.track_grid_count) +
             " io_placed=" + std::to_string(report.io_placed_count) +
             " io_total=" + std::to_string(report.io_total_count));
+      });
+
+  add("place", "place [-timing_driven]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        pd::PlaceOptions options;
+        bool timing_seen = false;
+        for (const std::string& flag : args) {
+          if (flag == "-timing_driven") {
+            if (timing_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -timing_driven given twice");
+            }
+            timing_seen = true;
+            options.timing_driven = true;
+            continue;
+          }
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown place option: " + flag);
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (!ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no mapped design: the imported database holds no top "
+              "block");
+        }
+        pd::PlaceReport report;
+        const foundation::Status status = pd::RunPlace(
+            ctx.timing.odb->RawDatabase(), options, &report);
+        if (!status.ok()) return FromStatus(status);
+        std::string payload =
+            "placed=" + std::to_string(report.instance_placed_count) +
+            " total=" + std::to_string(report.instance_total_count) +
+            " hpwl=" + std::to_string(report.hpwl_dbu) +
+            " overlaps=" + std::to_string(report.overlap_count);
+        // Placed STA: the session timing service on the placed
+        // database, with estimated parasitics (the same path the
+        // synthesis loop uses). Placement itself succeeds whether
+        // or not the session is configured for timing; when it is
+        // not, the payload says so with the reason instead of
+        // inventing a number. The timing-service path writes the
+        // placed database out as a Verilog netlist, so its
+        // estimated parasitics are topology-based and do not yet
+        // use placed coordinates; P6 extraction (SPEF) changes
+        // that.
+        bool from_odb = false;
+        std::vector<analysis::SceneAnalysis> scenes;
+        if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          payload += " sta_slack_ns=unavailable (" + bad->message + ")";
+        } else if (!from_odb) {
+          payload += " sta_slack_ns=unavailable (timing source is "
+                     "Verilog, not the placed database)";
+        } else {
+          analysis::TimingService service;
+          const Result<std::vector<analysis::SceneResult>> analyzed =
+              service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
+                              scenes);
+          if (!analyzed.ok()) {
+            payload += " sta_slack_ns=unavailable (" +
+                       analyzed.status().message() + ")";
+          } else {
+            for (const analysis::SceneResult& result :
+                 analyzed.value()) {
+              payload += " scene=" + result.scenario.name +
+                         " worst_slack_ns=" +
+                         MetricText(result.metrics, "worst_slack_ns");
+            }
+          }
+        }
+        return CommandResult::Ok(payload);
       });
 
   add("read_liberty", "read_liberty <corner> <path>",
