@@ -943,6 +943,104 @@
         "tests/unit/pd/rsz/rsz_test.cc"
       ]
     },
+    "pd.rsz.mock.clk_inverters1": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.fanout2": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.hold4": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.hold5": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.setup1": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.setup3": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.tie1": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.tie2": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.tie3": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.tie4": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.tie5": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.tie6": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.tie7": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.wire3": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
     "qualification.phase1_exit": {
       "modules": [
         "registry",

@@ -1,0 +1,41 @@
+VERSION 5.8 ; 
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN reg1 ;
+UNITS DISTANCE MICRONS 2000 ;
+DIEAREA ( 0 0 ) ( 800000 800000 ) ;
+
+COMPONENTS 6 ;
+- r1 EM_DFF_X1 + PLACED   ( 200000 400000 ) N ;
+- r2 EM_DFF_X1 + PLACED   ( 400000 200000 ) N ;
+- r3 EM_DFF_X1 + PLACED   ( 600000 600000 ) N ;
+- u1 EM_BUF_X1 + PLACED   ( 800000 200000 ) N ;
+- u2 EM_AND2_X1 + PLACED ( 200000 800000 ) N ;
+- c1 EM_INV_X1 + PLACED ( 200000 400000 ) N ;
+END COMPONENTS
+
+PINS 3 ;
+    - in1 + NET in1 + DIRECTION INPUT + USE SIGNAL + FIXED ( 0 0 ) N + LAYER em1 ( 0 0 ) ( 0 0 ) ;
+    - clk1 + NET clk1 + DIRECTION INPUT + USE SIGNAL + FIXED ( 200000 66660 ) N + LAYER em1 ( 0 0 ) ( 0 0 ) ;
+    - out + NET out + DIRECTION OUTPUT + USE SIGNAL + FIXED ( 66660 200000 ) N + LAYER em1 ( 0 0 ) ( 0 0 ) ;
+END PINS
+
+SPECIALNETS 2 ;
+- VSS  ( * VSS )
+  + USE GROUND ;
+- VDD  ( * VDD )
+  + USE POWER ;
+END SPECIALNETS
+
+NETS 10 ;
+- in1 ( PIN in1 ) ( r1 D ) ( r2 D ) + USE SIGNAL ;
+- clk1 ( PIN clk1 ) ( r1 CK ) ( c1 A ) + USE SIGNAL ;
+- clk2 ( c1 ZN ) ( r2 CK ) ( r3 CK ) + USE SIGNAL ;
+- r1q ( r1 Q ) ( u2 A1 ) + USE SIGNAL ;
+- r2q ( r2 Q ) ( u1 A ) + USE SIGNAL ;
+- u1z ( u2 A2 ) ( u1 Z ) + USE SIGNAL ;
+- u2z ( u2 ZN ) ( r3 D ) + USE SIGNAL ;
+- out ( r3 Q ) ( PIN out ) + USE SIGNAL ;
+END NETS
+
+END DESIGN

@@ -1,0 +1,7 @@
+set_load 50 [get_net u2zn]
+set_load 50 [get_net u3zn]
+set_load 50 [get_net u4zn]
+set_load 50 [get_net u5zn]
+set_load 50 [get_net u6zn]
+set_load 50 [get_net u7zn]
+set_max_transition .15 [current_design]

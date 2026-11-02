@@ -144,6 +144,54 @@ target_link_libraries(eda_pd_rsz_unit_test
   PRIVATE eda_pd_rsz GTest::gtest GTest::gtest_main)
 add_test(NAME pd.rsz COMMAND eda_pd_rsz_unit_test)
 
+# Mock-library resizer cases: one literal add_test per ported case
+# (literal lines, not a foreach loop, so tools/dep_graph.py sees
+# each entry). The scripts run against the EOS-owned synthetic
+# mock library, so they are runnable in CI with no real PDK file.
+# WORKING_DIRECTORY is the rsz tests dir (the harness cwd).
+add_test(NAME pd.rsz.mock.setup1
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_setup1.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.setup3
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_setup3.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.hold4
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_hold4.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.hold5
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_hold5.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.fanout2
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_fanout2.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.wire3
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_wire3.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.tie1
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_tie1.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.tie2
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_tie2.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.tie3
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_tie3.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.tie4
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_tie4.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.tie5
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_tie5.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.tie6
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_tie6.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.tie7
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_tie7.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.clk_inverters1
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_clk_inverters1.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+
 add_executable(eda_ui_registry_unit_test ui/registry/registry_test.cc)
 target_link_libraries(eda_ui_registry_unit_test
   PRIVATE eda_ui_registry eda_db_checkpoint GTest::gtest GTest::gtest_main)
