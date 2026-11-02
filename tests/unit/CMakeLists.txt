@@ -237,6 +237,15 @@ add_test(NAME pd.rsz.mock.slew5
 add_test(NAME pd.rsz.mock.slew6
   COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_slew6.tcl
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.setup2
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_setup2.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.setup2_override0
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_setup2_override0.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.fallback_zero_drive
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_fallback_zero_drive.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
 
 add_executable(eda_ui_registry_unit_test ui/registry/registry_test.cc)
 target_link_libraries(eda_ui_registry_unit_test

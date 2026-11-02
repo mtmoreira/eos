@@ -293,13 +293,17 @@ def test_real_repo_check_passes_and_rules_hold():
     # pre-existing P-28 graph-rebuild gap, so it carries no entry
     # and no .ok until that gap is fixed; see
     # src/pd/rsz/tests/mock/README.md.
+    # P-23 fixes the setup2 INF (makeRepeater chaining on
+    # output-port nets, not a rebuild gap) and adopts the computed
+    # max wire default, adding setup2, setup2_override0, and
+    # fallback_zero_drive, the 59th through 61st ctest entries.
     # PR4 adds 0 ctest entries: the adapted rsz suite (42 cases
     # plus gcd) is pending-licence, so no case is runnable in CI
     # yet; the rsz/tests dep-graph rule and its synthetic test
     # below already cover the entries when they land.
     # P2 adds pd.place, the 45th ctest entry.
     # P3 adds pd.cts, the 58th ctest entry.
-    assert len(all_tests) == 58
+    assert len(all_tests) == 61
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),

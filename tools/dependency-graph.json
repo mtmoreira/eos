@@ -1140,6 +1140,13 @@
       ],
       "sources": []
     },
+    "pd.rsz.mock.fallback_zero_drive": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
     "pd.rsz.mock.fanout2": {
       "modules": [
         "registry",
@@ -1190,6 +1197,20 @@
       "sources": []
     },
     "pd.rsz.mock.setup1": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.setup2": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.setup2_override0": {
       "modules": [
         "registry",
         "rsz"

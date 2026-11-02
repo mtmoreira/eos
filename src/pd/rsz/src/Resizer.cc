@@ -1315,11 +1315,36 @@ Resizer::makeRepeater(const char *where,
   Net *in_net, *out_net;
   Instance *parent = db_network_->topInstance();
 
+  // P-23: chained repeaters on output-port nets. The first repeater on
+  // such a net takes the output-port branch below, which moves the
+  // driver to a fresh input net; later repeaters are still called with
+  // the ORIGINAL net, but their loads live on that fresh net. Using
+  // the original net as the new repeater's input net strands the driver
+  // alone on the fresh net and loops the chain onto the first buffer
+  // output (setup2: U4/ZN and U5/ZN stranded, y1/y2 unreachable, INF
+  // slack after any graph rebuild). Use the loads' actual net when
+  // they share one; otherwise keep the parameter net (multi-net trees
+  // keep current behavior).
+  Net *load_net = net;
+  if (!load_pins.empty()
+      && !network_->isTopLevelPort(load_pins[0])) {
+    Net *first_net = network_->net(load_pins[0]);
+    bool single_net = first_net != nullptr;
+    for (const Pin *pin : load_pins) {
+      if (network_->net(pin) != first_net) {
+        single_net = false;
+        break;
+      }
+    }
+    if (single_net)
+      load_net = first_net;
+  }
+
   // If the net is driven by an input port,
   // use the net as the repeater input net so the port stays connected to it.
   if (hasInputPort(net)
       || !have_output_port_load) {
-    in_net = net;
+    in_net = load_net;
     out_net = makeUniqueNet();
     // Copy signal type to new net.
     dbNet *out_net_db = db_network_->staToDb(out_net);
