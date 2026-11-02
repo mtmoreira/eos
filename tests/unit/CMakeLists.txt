@@ -196,6 +196,42 @@ add_test(NAME pd.rsz.mock.tie7
 add_test(NAME pd.rsz.mock.clk_inverters1
   COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_clk_inverters1.tcl
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.cap1
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_cap1.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.cap2
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_cap2.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.fanout3
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_fanout3.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.hold1
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_hold1.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.hold2
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_hold2.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.hold3
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_hold3.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.slew1
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_slew1.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.slew2
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_slew2.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.slew3
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_slew3.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.slew4
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_slew4.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.slew5
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_slew5.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
+add_test(NAME pd.rsz.mock.slew6
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests/run_case.py mock/repair_slew6.tcl
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/pd/rsz/tests)
 
 add_executable(eda_ui_registry_unit_test ui/registry/registry_test.cc)
 target_link_libraries(eda_ui_registry_unit_test

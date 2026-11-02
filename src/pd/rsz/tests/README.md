@@ -19,38 +19,45 @@ below.
 - Scripts: all 42 adapted cases plus the gcd command case
   exist (repair_<case>.tcl, plus repair_gcd.tcl).
 - .ok files: 28 exist (27 suite cases plus gcd). The
-  other 15 suite cases segfault in the engine (see the
-  crash table); a segfault produces no verdict line, so
-  no .ok file can honestly be written for them. Their
-  scripts are committed and marked CRASH below, not
-  silently dropped, and they get .ok files only after
-  the engine crashes are fixed.
+  other 15 suite cases no longer segfault: F2 fixed the
+  engine crashes (see the crash table, now marked FIXED
+  with the mechanism). They still have no PDK .ok file
+  here because the PDK fixtures are pending-licence and
+  absent from this tree, so no PDK verdict line can be
+  honestly written here; their scripts are committed and
+  marked FIXED below, not silently dropped, and they get
+  PDK .ok files only from a run on real PDK fixtures
+  (or from mock ports, as mock-library follow-up).
 - Harness: run_case.py is committed. Usage:
   `python3 run_case.py repair_setup1.tcl` from this dir
   (EOS_BIN overrides the eos binary path). A case with
   no .ok file fails the harness with ".ok file not
   found", which is the correct behavior until its crash
   is fixed.
-- CTest entries: 14, from the mock-library unit (mock/ ports,
-  see mock/README.md). One literal add_test per case in
+- CTest entries: 26, from the mock-library unit (mock/ ports,
+  see mock/README.md) plus F2. One literal add_test per case in
   tests/unit/CMakeLists.txt (pd.rsz.mock.<case>, COMMAND
   python3 run_case.py mock/repair_<case>.tcl, WORKING_DIRECTORY
   this dir; literal lines, not a foreach loop, so
   tools/dep_graph.py sees each entry). The pinned ctest count
-  in tools/tests/test_dep_graph.py moved from 30 to 44, and
+  in tools/tests/test_dep_graph.py moved from 30 to 44 at the
+  mock-library unit, to 45 with P2 (pd.place), and to 57 with
+  F2 (12 formerly-crashing ported cases), and
   tools/dependency-graph.json is regenerated. The dep-graph
   rule mapping an add_test block mentioning rsz/tests to
   modules [rsz, registry] selects them on rsz/registry
-  changes. The 14 are: setup1, setup3, hold4, hold5, fanout2,
+  changes. The 26 are: setup1, setup3, hold4, hold5, fanout2,
   wire3, tie1, tie2, tie3, tie4, tie5, tie6, tie7,
-  clk_inverters1. The other 13 ported cases crash in the
-  engine at one STA replaceCell null-vertex site (see
-  mock/README.md pending list) and carry no CTest entry until
-  the engine fix lands; the 15 never-ported crash cases and
-  gcd likewise remain without CTest entries. The original
-  pending-licence scripts below are unchanged.
-- Registry count: 53 (was 52 at PR4), pinned in
-  tests/unit/ui/registry/registry_test.cc.
+  clk_inverters1, plus cap1, cap2, fanout3, hold1, hold2,
+  hold3, slew1, slew2, slew3, slew4, slew5, slew6. Setup2
+  runs crash-free after F2 but carries no CTest entry and
+  no .ok file (its design-plus-setup verdict is INF on a
+  pre-existing P-28 graph-rebuild gap; see mock/README.md);
+  the 15 never-ported cases and gcd likewise remain without
+  CTest entries. The original pending-licence scripts below
+  are unchanged.
+- Registry count: 54, pinned in
+  tests/unit/ui/registry/registry_test.cc. F2 adds no command.
 
 ## Disposition (47 upstream drivers; 42 adapt, 5 drop)
 
@@ -142,18 +149,29 @@ VACUOUS and CRASH are recorded, not waved through.
   (upstream .ok carries no end slack). SDC carries
   the clock because the command rejects -sdc with
   -clock/-period.
-- hold1: MISMATCH. Upstream 2 hold buffers, repaired.
+- hold1: MISMATCH (pre-F2 numbers below; F2 changes
+  the mechanism, not the PDK verdict, which still
+  needs a PDK run). Upstream 2 hold buffers, repaired.
   EOS 4 hold buffers (RSZ-0032), RSZ-0060 max buffer
   count, RSZ-0066 unable to repair, end hold still
   -0.086759 ns (unchanged from start). Cause: the
-  pin-hold loop inserts until the cap because the
-  inserted buffers are invisible to re-timing (no
+  pin-hold loop inserted until the cap because the
+  inserted buffers were invisible to re-timing (no
   graph rebuild in the hold path; contrast F1 for
-  setup). The 20% default cap fires on top of that.
-  Raising the cap to 100% inserts 16 buffers and
-  still does not move the slack, confirming the
-  visibility cause, not the cap. Follow-up needs
-  owner decision (hold-path rebuild mirroring F1).
+  setup). The 20% default cap fired on top of that.
+  Raising the cap to 100% inserted 16 buffers and
+  still did not move the slack, confirming the
+  visibility cause, not the cap. F2 implements the
+  hold-path graph rebuild mirroring F1 (loop-only
+  scope, full Steiner re-estimate per pass, endpoint
+  pins re-derived on the fresh graph): on diag data
+  pin-hold TNS improves (-0.624 to -0.400 ns) with
+  worst held by untargeted sibling endpoints, and
+  whole-design hold on the same DEF improves worst
+  to -0.141 ns; on mock data hold3 is fully repaired
+  and hold1/hold2 improve. The PDK hold1 verdict
+  above is superseded by a PDK rerun once fixtures
+  are available.
 - hold2, hold3, hold4: VACUOUS (kept doc-literal).
   Upstream 11 / 2 / 3 hold buffers. EOS 0 inserted
   in all three: the design-doc -clock/-period form
@@ -161,28 +179,29 @@ VACUOUS and CRASH are recorded, not waved through.
   skew (and, for hold2, without the input/output
   delays) the designs have no hold violations to
   repair. Faithful SDCs (propagated clock plus
-  delays) were probed and segfault in whole-design
-  hold (see crash table), so the committed scripts
-  stay doc-literal and these three cases must NOT be
-  read as hold-repair coverage.
+  delays) were probed and segfaulted in whole-design
+  hold before F2 (see crash table); the crash is now
+  fixed, but the committed scripts stay doc-literal
+  and these three cases must NOT be read as
+  hold-repair coverage.
 - hold5: MATCH. Upstream 0 inserted (blocked by the
   max_delay setup constraint). EOS 0 inserted, end
   hold still -0.142044 ns, setup still violated.
-- hold6, hold7, hold8, hold9: CRASH (see crash table).
-  Upstream counts for reference: hold6 3 buffers;
+- hold6, hold7, hold8, hold9: FIXED by F2 (see crash
+  table). Upstream counts for reference: hold6 3 buffers;
   hold7 114 buffers then RSZ-0050; hold8 40 buffers;
   hold9 20 buffers then RSZ-0060.
 - slew1, slew2, slew3, slew4, slew5, slew6: MATCH.
   Upstream RSZ-0039 resized 1, 1, 1, 2, 7, 1. EOS
   RSZ-0039 identical in each case, 0 inserted.
-- slew8, slew9: CRASH (see crash table). Upstream:
+- slew8, slew9: FIXED by F2 (see crash table). Upstream:
   slew8 14 buffers in 1 net; slew9 1 buffer,
   1 resized.
 - cap1, cap2: MATCH. Upstream RSZ-0039 resized 1
   each. EOS identical, 0 inserted.
-- cap3: CRASH (see crash table). Upstream 1 buffer,
+- cap3: FIXED by F2 (see crash table). Upstream 1 buffer,
   1 resized.
-- fanout1: CRASH (see crash table). Upstream 4
+- fanout1: FIXED by F2 (see crash table). Upstream 4
   buffers in 1 net, 2 resized.
 - fanout2: NO-COUNT both sides. Upstream .ok carries
   no repair lines (wire-load models, no RC, no
@@ -196,8 +215,8 @@ VACUOUS and CRASH are recorded, not waved through.
   upstream -buffer_cell BUF_X1 option is not
   carried: EOS -design takes no buffer-cell option
   and the engine picks buffers internally.
-- wire1, wire2, wire4, wire5, wire6, wire7: CRASH
-  (see crash table). Upstream counts: wire1 2
+- wire1, wire2, wire4, wire5, wire6, wire7: FIXED
+  by F2 (see crash table). Upstream counts: wire1 2
   buffers + 2 resized; wire2 3 + 2; wire4 3 + 2;
   wire5 2 + 1; wire6 3 + 2; wire7 3 + 2.
 - wire3: NEGATIVE PASS. .ok is the fail-fast error
@@ -215,7 +234,7 @@ VACUOUS and CRASH are recorded, not waved through.
   and passes upstream check_ties (tie6 .ok shows no
   check error); counting iterms only flagged it
   wrongly, fixed in repair_commands.cc.
-- clk_nets1: CRASH (see crash table). Upstream .ok
+- clk_nets1: FIXED by F2 (see crash table). Upstream .ok
   carries no repair count.
 - clk_inverters1: NO-COUNT upstream. EOS 2 inserted,
   1 removed, 0 resized. Upstream ran with no wire RC;
@@ -264,64 +283,112 @@ pre-estimation, clock RC unset), not a second
 valid result. The old numbers never appear as
 expected results again except inside this note.
 
-## Crash table (engine segfaults, SIGSEGV exit -11)
+## Crash table (engine segfaults, SIGSEGV exit -11) - FIXED by F2
 
-These are engine crashes, not script errors: the
+These were engine crashes, not script errors: the
 bisects below vary one option at a time on the same
-inputs. No gdb exists on this box, so crash
-mechanisms are unknown; these paths were never
-exercised before PR4 (the PR3 driver ran setup+hold
-only on gcd). Fixing them is engine work needing
-owner decision (F2-class), not a script change, and
-no case below is worked around by weakening it.
+inputs. No gdb exists on this box, so the mechanism
+was proven by marker trace, not by a debugger: the
+resizer created buffers with silent dbNetwork
+makeInstance calls, so fresh pins never got graph
+vertices, and STA replaceCell on a fresh repeater
+(or hold-delay cell) then walked a null load vertex
+into VertexInEdgeIterator via delaysInvalidFromFanin.
+The fix switches the six silent creation sites
+(bufferInput, bufferOutput, makeRepeater, splitLoads,
+makeHoldDelay, rebufferTopDown) to notifying
+Sta::makeInstance, which creates pin vertices and
+edges. Zero upstream patches: the fix is in EOS-owned
+Resizer and Rebuffer code only. No case below was
+worked around by weakening it. Verification is on
+synthetic diag fixtures (the PDK fixtures are
+pending-licence and absent here): all 16 diag scripts
+exit 0 with the fix binary; the 13 mock-ported crash
+cases likewise exit 0 (12 pinned with .ok and CTest
+entries, setup2 unpinned for the rebuild gap noted in
+mock/README.md). PDK .ok files for these 15 cases
+still need a run on real PDK fixtures. Trigger
+descriptions are kept below as history.
 
 - wire1, wire2, wire4, wire5, wire6, wire7: trigger
-  is -max_wire_length above 0. wire6 without the
-  length option passes (0 inserted). All six crash
-  with it, with or without an SDC.
-- clk_nets1: trigger is the -clk_nets pass (clock
+  was -max_wire_length above 0. wire6 without the
+  length option passed (0 inserted). All six crashed
+  with it, with or without an SDC. Diag results with
+  the fix: wire1 2 inserted + 2 upsized (matches
+  upstream 2+2); wire2 3+2 (matches); wire4 3+3,
+  wire6 3+3, wire7 3+3 (upstream 3+2 each; the extra
+  upsize is diag-fixture driven); wire5 3+1 (upstream
+  2+1; diag adaptation driven).
+- clk_nets1: trigger was the -clk_nets pass (clock
   nets + max_wire_length 600 um). No finer bisect
-  was run; recorded as the clk_nets pass.
-- cap3: trigger is -max_cap_margin 10. Same DEF
-  with a plain -design passes (0 inserted,
-  1 resized).
+  was run; recorded as the clk_nets pass. Diag with
+  the fix: 3 clk_nets inserted, exit 0.
+- cap3: trigger was -max_cap_margin 10. Same DEF
+  with a plain -design passed (0 inserted,
+  1 resized). Diag with the fix: 4 inserted, exit 0.
 - slew9: trigger presumed -max_slew_margin 5 by
   analogy with cap3 on the same DEF (cap3's margin
   bisect is the evidence; slew9 without margin was
-  not separately bisected).
-- slew8: trigger is the met2/met5 wire layers.
-  Same DEF with met3 passes with and without the
+  not separately bisected). Diag with the fix:
+  5 inserted, exit 0.
+- slew8: trigger was the met2/met5 wire layers.
+  Same DEF with met3 passed with and without the
   dont_use globs, so dont_use is exonerated and the
-  layers are implicated. Mechanism unknown.
-- fanout1: trigger needs the design pass plus the
+  layers are implicated. Diag with the fix exits 0
+  but still inserts 0 (the met2 RC differentiation
+  did not make the diag data violate slew), so the
+  slew8-specific insert-then-crash path is fixed by
+  the shared makeRepeater mechanism but not directly
+  demonstrated on diag data; the mock port of slew8
+  does not exist yet.
+- fanout1: trigger needed the design pass plus the
   max_fanout SDC on the fanout1 DEF. Evidence:
-  cap1 DEF + fanout SDC crashes; cap1 DEF +
-  clock-only SDC passes; cap1 DEF + fanout SDC +
-  setup pass (no design) passes; fanout3 with the
-  same constraint class passes. DEF-dependent.
-- hold6: trigger is -allow_setup_violations. Same
-  SDC and DEF with a plain -hold passes (blocked,
-  0 inserted, same as hold5).
-- hold7: trigger needs -slack_margin 0.4 and/or
+  cap1 DEF + fanout SDC crashed; cap1 DEF +
+  clock-only SDC passed; cap1 DEF + fanout SDC +
+  setup pass (no design) passed; fanout3 with the
+  same constraint class passed. DEF-dependent.
+  Diag with the fix: 3 inserted, WNS 9.194 to 9.486
+  ns, hold slack 0.649 to 0.362 ns, exit 0.
+- hold6: trigger was -allow_setup_violations. Same
+  SDC and DEF with a plain -hold passed (blocked,
+  0 inserted, same as hold5). Diag with the fix plus
+  the hold-path rebuild: hold fully repaired
+  (-0.196 to +0.036 ns), 4 inserted, exit 0.
+- hold7: trigger needed -slack_margin 0.4 and/or
   -max_utilization 13. Plain -hold on the gcd
-  placed DEF passes with 0 inserted (ideal clock
-  finds no violations there).
-- hold8: trigger is whole-design hold with real
+  placed DEF passed with 0 inserted (ideal clock
+  finds no violations there). Flag adaptation on
+  diag data with the fix plus the hold-path rebuild:
+  -0.289 to -0.224 ns, 5 inserted, exit 0 (the gcd
+  placed DEF is pending-licence, so the exact gcd
+  run is not reproduced here).
+- hold8: trigger was whole-design hold with real
   violations from the SDC (delays + propagated
-  clock). Removing -slack_margin still crashes;
-  plain -hold with an ideal clock passes vacuous.
-- hold9: trigger needs -slack_margin 0.4 and/or
+  clock). Removing -slack_margin still crashed;
+  plain -hold with an ideal clock passed vacuous.
+  Diag with the fix plus the hold-path rebuild:
+  -0.289 to -0.224 ns, 3 inserted, exit 0.
+- hold9: trigger needed -slack_margin 0.4 and/or
   -max_buffer_percent 2. Buffer-percent alone
-  passes with 0 inserted (ideal clock, no
-  violations).
+  passed with 0 inserted (ideal clock, no
+  violations). Flag adaptation on diag data with
+  the fix plus the hold-path rebuild: -0.289 to
+  -0.224 ns, 5 inserted, exit 0.
 - Probes (not committed scripts): whole-design
-  hold with faithful SDCs crashes for hold2
+  hold with faithful SDCs crashed for hold2
   (propagated clock + input/output delays) and
   hold3 (propagated clock only). Together with
-  hold6/7/8/9, the pattern is: whole-design
-  repairHold segfaults when it actually tries to
-  repair violations, while pin-hold (hold1) runs
-  but does not fix (see hold1 cross-check).
+  hold6/7/8/9, the pattern was: whole-design
+  repairHold segfaulted when it actually tried to
+  repair violations. Pin-hold (hold1) ran but did
+  not fix (see hold1 cross-check); F2's hold-path
+  graph rebuild (mirroring P-28, loop-only scope)
+  restores hold visibility: diag hold6 fully
+  repaired, mock hold3 fully repaired, mock hold1
+  and hold2 improved, diag pin-hold TNS improved
+  (-0.624 to -0.400 ns) with worst held by untargeted
+  sibling endpoints, which is correct pin-hold
+  behavior, not continued invisibility.
 
 ## OPEN runtime items: outcomes
 
@@ -333,8 +400,10 @@ no case below is worked around by weakening it.
   sky130_fd_sc_hd__probec_p_*), the option is
   accepted, and a met3 run with dont_use completes.
   Whether dont_use changes repair choices is NOT
-  directly observed, because the full slew8 case
-  (met2/met5) crashes; recorded as such.
+  directly observed: the full slew8 case (met2/met5)
+  no longer crashes after F2, but the diag run
+  inserts 0, so no repair choice is exercised there;
+  recorded as such.
 - tie2 separation unit conversion: upstream
   -separation is in Liberty units (microns, per the
   OpenROAD resizer docs); EOS -separation is in

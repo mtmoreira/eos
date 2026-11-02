@@ -520,9 +520,9 @@ Resizer::bufferInput(Pin *top_pin,
   string buffer_name = makeUniqueInstName("input");
   Instance *parent = db_network_->topInstance();
   Net *buffer_out = makeUniqueNet();
-  Instance *buffer = db_network_->makeInstance(buffer_cell,
-                                               buffer_name.c_str(),
-                                               parent);
+  Instance *buffer = sta_->makeInstance(buffer_name.c_str(),
+                                         buffer_cell,
+                                         parent);
   if (buffer) {
     journalMakeBuffer(buffer);
     Point pin_loc = db_network_->location(top_pin);
@@ -606,9 +606,9 @@ Resizer::bufferOutput(Pin *top_pin,
   string buffer_name = makeUniqueInstName("output");
   Instance *parent = network->topInstance();
   Net *buffer_in = makeUniqueNet();
-  Instance *buffer = network->makeInstance(buffer_cell,
-                                           buffer_name.c_str(),
-                                           parent);
+  Instance *buffer = sta_->makeInstance(buffer_name.c_str(),
+                                         buffer_cell,
+                                         parent);
   if (buffer) {
     journalMakeBuffer(buffer);
     setLocation(buffer, db_network_->location(top_pin));
@@ -1362,9 +1362,13 @@ Resizer::makeRepeater(const char *where,
     }
   }
 
-  Instance *buffer = db_network_->makeInstance(buffer_cell,
-                                               buffer_name.c_str(),
-                                               parent);
+  // Create through sta_ (not db_network_) so the new instance gets
+  // graph vertices and edges: silent db creation leaves fresh pins
+  // vertex-less, and the resize below segfaults in replaceCell when
+  // it dereferences the null load vertex of the fresh repeater.
+  Instance *buffer = sta_->makeInstance(buffer_name.c_str(),
+                                         buffer_cell,
+                                         parent);
   journalMakeBuffer(buffer);
   Point buf_loc(x, y);
   setLocation(buffer, buf_loc);
@@ -2400,9 +2404,9 @@ Resizer::splitLoads(const Path *drvr_path,
   string buffer_name = makeUniqueInstName("split");
   Instance *parent = db_network_->topInstance();
   LibertyCell *buffer_cell = buffer_lowest_drive_;
-  Instance *buffer = db_network_->makeInstance(buffer_cell,
-                                               buffer_name.c_str(),
-                                               parent);
+  Instance *buffer = sta_->makeInstance(buffer_name.c_str(),
+                                         buffer_cell,
+                                         parent);
   journalMakeBuffer(buffer);
   inserted_buffer_count_++;
   designAreaIncr(area(db_network_->cell(buffer_cell)));
@@ -2598,6 +2602,12 @@ Resizer::repairHold(VertexSet *ends,
     inserted_buffer_count_ = 0;
     int repair_count = 1;
     int pass = 1;
+    // Snapshot the endpoint pins: the per-pass graph rebuild below
+    // invalidates every cached vertex, so ends are re-derived from
+    // pins on the fresh graph each pass.
+    PinSeq ends_pins;
+    for (Vertex *end : *ends)
+      ends_pins.push_back(end->pin());
     while (!hold_failures.empty()
            // Make sure we are making progress.
            && repair_count > 0
@@ -2611,7 +2621,24 @@ Resizer::repairHold(VertexSet *ends,
                  delayAsString(worst_slack, 3, sta_),
                  hold_failures .size(),
                  repair_count);
+      // Mirror the setup-path (P-28) graph rebuild. Buffer insertion
+      // adds instances and pins that the cached graph does not know,
+      // so re-timing on the stale graph never sees the inserted
+      // delay and the loop inserts until the buffer cap without
+      // improving slack (hold1: 4 capped, end hold unchanged from
+      // start). Rebuild from the current network, refresh the
+      // cached graph pointer and the level-driver-vertex cache,
+      // then fully re-estimate parasitics: the rebuild drops STA
+      // parasitic annotations, and an invalid-only restore would
+      // re-time optimistically (same P-28 follow-up as setup).
+      sta_->networkChangedNonSdc();
+      graph_ = sta_->ensureGraph();
+      level_drvr_vertices_valid_ = false;
+      estimateWireParasitics();
       sta_->findRequireds();
+      ends->clear();
+      for (const Pin *end_pin : ends_pins)
+        ends->insert(graph_->pinLoadVertex(end_pin));
       findHoldViolations(ends, slack_margin, worst_slack, hold_failures);
       pass++;
     }
@@ -2935,8 +2962,11 @@ Resizer::makeHoldDelay(Vertex *drvr,
     Net *buf_out_net = (i == buffer_count - 1) ? out_net : makeUniqueNet();
     // drvr_pin->drvr_net->hold_buffer->net2->load_pins
     string buffer_name = makeUniqueInstName("hold");
-    buffer = db_network_->makeInstance(buffer_cell, buffer_name.c_str(),
-                                       parent);
+    // Create through sta_ so the hold buffers get graph vertices and
+    // are visible to the re-timing in the hold loop (same reason as
+    // the repeater site above).
+    buffer = sta_->makeInstance(buffer_name.c_str(), buffer_cell,
+                                parent);
     journalMakeBuffer(buffer);
     inserted_buffer_count_++;
     designAreaIncr(area(db_network_->cell(buffer_cell)));

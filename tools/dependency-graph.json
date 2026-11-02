@@ -1071,6 +1071,20 @@
         "tests/unit/pd/rsz/rsz_test.cc"
       ]
     },
+    "pd.rsz.mock.cap1": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.cap2": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
     "pd.rsz.mock.clk_inverters1": {
       "modules": [
         "registry",
@@ -1079,6 +1093,34 @@
       "sources": []
     },
     "pd.rsz.mock.fanout2": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.fanout3": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.hold1": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.hold2": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.hold3": {
       "modules": [
         "registry",
         "rsz"
@@ -1107,6 +1149,48 @@
       "sources": []
     },
     "pd.rsz.mock.setup3": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.slew1": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.slew2": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.slew3": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.slew4": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.slew5": {
+      "modules": [
+        "registry",
+        "rsz"
+      ],
+      "sources": []
+    },
+    "pd.rsz.mock.slew6": {
       "modules": [
         "registry",
         "rsz"
