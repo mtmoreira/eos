@@ -110,10 +110,42 @@
       "via": {}
     },
     "cts": {
-      "depends_on": [],
+      "depends_on": [
+        "dbsta",
+        "errors",
+        "odb",
+        "rsz",
+        "sta",
+        "stt"
+      ],
       "layer": "L4",
       "path": "src/pd/cts",
-      "via": {}
+      "via": {
+        "dbsta": [
+          "cmake-link",
+          "include"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "rsz": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link",
+          "include"
+        ],
+        "stt": [
+          "cmake-link",
+          "include"
+        ]
+      }
     },
     "dbsta": {
       "depends_on": [
@@ -540,6 +572,7 @@
         "abc",
         "checkpoint",
         "constraints",
+        "cts",
         "dbsta",
         "design",
         "errors",
@@ -568,6 +601,10 @@
           "cmake-link"
         ],
         "constraints": [
+          "cmake-link",
+          "include"
+        ],
+        "cts": [
           "cmake-link",
           "include"
         ],
@@ -1024,6 +1061,17 @@
       ],
       "sources": [
         "tests/unit/foundation/ids/ids_test.cc"
+      ]
+    },
+    "pd.cts": {
+      "modules": [
+        "cts",
+        "floorplan",
+        "odb",
+        "place"
+      ],
+      "sources": [
+        "tests/unit/pd/cts/cts_test.cc"
       ]
     },
     "pd.dbsta": {

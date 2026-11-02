@@ -7,6 +7,7 @@
 #include "eos/ui/registry.h"
 
 #include "eos/analysis/sta.h"
+#include "eos/pd/cts.h"
 #include "eos/pd/floorplan.h"
 #include "eos/pd/place.h"
 #include "odb/db.h"
@@ -1783,6 +1784,147 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         } else if (!from_odb) {
           payload += " sta_slack_ns=unavailable (timing source is "
                      "Verilog, not the placed database)";
+        } else {
+          analysis::TimingService service;
+          const Result<std::vector<analysis::SceneResult>> analyzed =
+              service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
+                              scenes);
+          if (!analyzed.ok()) {
+            payload += " sta_slack_ns=unavailable (" +
+                       analyzed.status().message() + ")";
+          } else {
+            for (const analysis::SceneResult& result :
+                 analyzed.value()) {
+              payload += " scene=" + result.scenario.name +
+                         " worst_slack_ns=" +
+                         MetricText(result.metrics, "worst_slack_ns");
+            }
+          }
+        }
+        return CommandResult::Ok(payload);
+      });
+
+  add("cts",
+      "cts -clock <net> [-buffer <cell>...] [-root_buffer <cell>] "
+      "[-sink_buffer <cell>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        pd::CtsOptions options;
+        bool clock_seen = false;
+        bool root_seen = false;
+        bool sink_seen = false;
+        for (size_t i = 0; i < args.size(); ++i) {
+          const std::string& flag = args[i];
+          auto need_value = [&](const std::string& name)
+              -> std::optional<CommandResult> {
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option " + name + " needs a value");
+            }
+            return std::nullopt;
+          };
+          if (flag == "-clock") {
+            if (clock_seen) {
+              return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                         "option -clock given twice");
+            }
+            if (auto bad = need_value(flag)) return *bad;
+            clock_seen = true;
+            options.clock_nets.push_back(args[++i]);
+            continue;
+          }
+          if (flag == "-buffer") {
+            if (auto bad = need_value(flag)) return *bad;
+            options.buffer_list.push_back(args[++i]);
+            continue;
+          }
+          if (flag == "-root_buffer") {
+            if (root_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -root_buffer given twice");
+            }
+            if (auto bad = need_value(flag)) return *bad;
+            root_seen = true;
+            options.root_buffer = args[++i];
+            continue;
+          }
+          if (flag == "-sink_buffer") {
+            if (sink_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -sink_buffer given twice");
+            }
+            if (auto bad = need_value(flag)) return *bad;
+            sink_seen = true;
+            options.sink_buffer = args[++i];
+            continue;
+          }
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown cts option: " + flag);
+        }
+        if (!clock_seen) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "cts needs a clock net: cts -clock <net>");
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (!ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no mapped design: the imported database holds no top "
+              "block");
+        }
+        if (ctx.timing.liberty_by_corner.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no Liberty loaded: eos::read_liberty first");
+        }
+        // One Liberty library feeds the CTS characterization; prefer
+        // the tt corner when present, else the first corner in map
+        // order. The chosen corner is named in the payload.
+        std::string liberty_corner;
+        auto liberty_it = ctx.timing.liberty_by_corner.find("tt");
+        if (liberty_it == ctx.timing.liberty_by_corner.end()) {
+          liberty_it = ctx.timing.liberty_by_corner.begin();
+        }
+        liberty_corner = liberty_it->first;
+        options.liberty_path = liberty_it->second;
+        pd::CtsReport report;
+        const foundation::Status status = pd::RunCts(
+            ctx.timing.odb->RawDatabase(), options, &report);
+        if (!status.ok()) return FromStatus(status);
+        std::string payload =
+            "roots=" + std::to_string(report.clock_root_count) +
+            " buffers=" + std::to_string(report.buffers_inserted) +
+            " sinks=" + std::to_string(report.sink_count) +
+            " subnets=" + std::to_string(report.clock_subnet_count) +
+            " skew_ns=unavailable (TritonCTS reports no ns skew; "
+            "measure via post-CTS STA)"
+            " insertion_delay_ns=unavailable (TritonCTS insertion "
+            "delay is a length, not a time)"
+            " liberty_corner=" +
+            liberty_corner;
+        // Post-CTS STA: the session timing service on the CTS
+        // database, with estimated parasitics (the same path the
+        // synthesis loop uses). CTS itself succeeds whether or not
+        // the session is configured for timing; when it is not,
+        // the payload says so with the reason instead of
+        // inventing a number.
+        bool from_odb = false;
+        std::vector<analysis::SceneAnalysis> scenes;
+        if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          payload += " sta_slack_ns=unavailable (" + bad->message + ")";
+        } else if (!from_odb) {
+          payload += " sta_slack_ns=unavailable (timing source is "
+                     "Verilog, not the CTS database)";
         } else {
           analysis::TimingService service;
           const Result<std::vector<analysis::SceneResult>> analyzed =

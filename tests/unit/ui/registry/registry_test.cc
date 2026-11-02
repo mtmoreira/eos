@@ -61,8 +61,8 @@ TEST(Registry, CoreSetIsComplete) {
   // write_verilog, check_equivalence, and synth_report; P1 adds
   // floorplan; U3 adds synth_blocks; U4 adds synth_schematic;
   // U5 adds synth_stats; PR4 adds repair_timing and set_wire_rc;
-  // P2 adds place.
-  EXPECT_EQ(shell.registry.Names().size(), 54u);
+  // P2 adds place; P3 adds cts.
+  EXPECT_EQ(shell.registry.Names().size(), 55u);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -3135,6 +3135,58 @@ TEST(CoreCommands, PlaceTimingDrivenWithoutLibertyFailsFast) {
   const CommandResult result = shell.Run("place", {"-timing_driven"});
   ASSERT_FALSE(result.ok);
   EXPECT_NE(result.message.find("Liberty"), std::string::npos);
+}
+
+// P3: eos::cts option parsing and session preconditions. The
+// engine run itself is covered by the pd.cts unit tests; these
+// tests pin the command layer: unknown and duplicate options,
+// the required -clock, and the fail-fast order (technology,
+// mapped design, Liberty) before any engine runs.
+TEST(CoreCommands, CtsRejectsBadOptions) {
+  Shell shell;
+  const CommandResult unknown = shell.Run("cts", {"-bogus"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(unknown.message.find("unknown cts option"),
+            std::string::npos);
+  const CommandResult duplicate =
+      shell.Run("cts", {"-clock", "clk", "-clock", "clk"});
+  ASSERT_FALSE(duplicate.ok);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(duplicate.message.find("given twice"), std::string::npos);
+  const CommandResult missing_value = shell.Run("cts", {"-clock"});
+  ASSERT_FALSE(missing_value.ok);
+  EXPECT_EQ(missing_value.diag, Diag::kInvalidConfiguration);
+  const CommandResult no_clock = shell.Run("cts", {});
+  ASSERT_FALSE(no_clock.ok);
+  EXPECT_EQ(no_clock.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(no_clock.message.find("needs a clock net"),
+            std::string::npos);
+}
+
+TEST(CoreCommands, CtsFailsFastWithoutTechnology) {
+  Shell shell;
+  const CommandResult result = shell.Run("cts", {"-clock", "clk"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no technology data"), std::string::npos);
+}
+
+TEST(CoreCommands, CtsFailsFastWithoutLiberty) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  // No read_liberty in this session, so cts fails fast before
+  // any engine runs.
+  const CommandResult result = shell.Run("cts", {"-clock", "clk"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no Liberty loaded"), std::string::npos);
 }
 
 // S6 backfill: HasDesign mirrors the project's design state.

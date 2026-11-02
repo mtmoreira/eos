@@ -15,6 +15,7 @@ target_link_libraries(eda_ui_registry
          eda_pd_floorplan
          eda_pd_rsz eda_pd_dbsta
          eda_pd_place
+         eda_pd_cts
          eda_synth_abc
          "$<LINK_LIBRARY:WHOLE_ARCHIVE,eda_synth_yosys>")
 
