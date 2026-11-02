@@ -805,9 +805,125 @@ TEST(CoreCommands, TimingRunRegistersPerSceneReports) {
                                          "timing_func_tt"),
             nullptr);
   ASSERT_EQ(shell.ctx.timing.last_results.size(), 1u);
-  // A second run cannot re-register the same report names.
+  const std::size_t first_artifact_at = run.payload.find("artifact=");
+  ASSERT_NE(first_artifact_at, std::string::npos);
+  const std::uint64_t first_artifact =
+      std::stoull(run.payload.substr(first_artifact_at + 9));
+  // A second run overwrites the same report names (repeatable
+  // reports, Immediate unit 1): it succeeds with a new artifact id,
+  // and exactly one live binding remains per name.
   const CommandResult again = shell.Run("run_timing");
-  EXPECT_FALSE(again.ok);
+  ASSERT_TRUE(again.ok) << again.message;
+  EXPECT_NE(again.payload.find("report=timing_func_tt"), std::string::npos);
+  const std::size_t second_artifact_at = again.payload.find("artifact=");
+  ASSERT_NE(second_artifact_at, std::string::npos);
+  EXPECT_NE(std::stoull(again.payload.substr(second_artifact_at + 9)),
+            first_artifact);
+  EXPECT_EQ(shell.ctx.reports.bindings(shell.ctx.project).size(), 1u);
+  ASSERT_EQ(shell.ctx.timing.last_results.size(), 1u);
+}
+
+TEST(CoreCommands, RepeatReportTimingOverwritesItsBinding) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult first = shell.Run("report_timing", {});
+  ASSERT_TRUE(first.ok) << first.message;
+  const std::size_t first_at = first.payload.find("artifact=");
+  ASSERT_NE(first_at, std::string::npos);
+  const std::uint64_t first_artifact =
+      std::stoull(first.payload.substr(first_at + 9));
+  const CommandResult second = shell.Run("report_timing", {});
+  ASSERT_TRUE(second.ok) << second.message;
+  const std::size_t second_at = second.payload.find("artifact=");
+  ASSERT_NE(second_at, std::string::npos);
+  EXPECT_NE(std::stoull(second.payload.substr(second_at + 9)),
+            first_artifact);
+  EXPECT_EQ(shell.ctx.reports.bindings(shell.ctx.project).size(), 1u);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "timing_report_func_tt"),
+            nullptr);
+}
+
+TEST(CoreCommands, TimingRepeatAfterRestoreOverwritesRestoredBinding) {
+  TimingTempDir dir;
+  Shell shell;
+  // Checkpoint needs a project design open; the timing session
+  // design from read_verilog is a separate store, so open one first.
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  const std::string lib = dir.Write("cells.lib", kTimingLiberty);
+  const std::string verilog = dir.Write("top.v", kTimingVerilog);
+  const std::string sdc = dir.Write("top.sdc", kTimingSdc);
+  ASSERT_TRUE(shell.Run("read_liberty", {"tt", lib}).ok);
+  ASSERT_TRUE(shell.Run("read_verilog", {verilog, "top"}).ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {sdc}).ok);
+  const CommandResult first = shell.Run("run_timing");
+  ASSERT_TRUE(first.ok) << first.message;
+  const std::size_t first_at = first.payload.find("artifact=");
+  ASSERT_NE(first_at, std::string::npos);
+  const std::uint64_t first_artifact =
+      std::stoull(first.payload.substr(first_at + 9));
+  const std::string path = dir.Path("imm1_project.eosproj");
+  const CommandResult saved = shell.Run("checkpoint", {path});
+  ASSERT_TRUE(saved.ok) << saved.message;
+
+  Shell fresh;
+  const CommandResult restored = fresh.Run("restore", {path});
+  ASSERT_TRUE(restored.ok) << restored.message;
+  EXPECT_NE(restored.payload.find("bindings_restored=1"),
+            std::string::npos);
+  // Project state restores; the timing session does not, so
+  // re-establish it, then repeat the run: the restored binding is
+  // overwritten, not duplicated.
+  ASSERT_TRUE(fresh.Run("read_liberty", {"tt", lib}).ok);
+  ASSERT_TRUE(fresh.Run("read_verilog", {verilog, "top"}).ok);
+  ASSERT_TRUE(fresh.Run("read_sdc", {sdc}).ok);
+  const CommandResult again = fresh.Run("run_timing");
+  ASSERT_TRUE(again.ok) << again.message;
+  const std::size_t again_at = again.payload.find("artifact=");
+  ASSERT_NE(again_at, std::string::npos);
+  EXPECT_NE(std::stoull(again.payload.substr(again_at + 9)), first_artifact);
+  EXPECT_EQ(fresh.ctx.reports.bindings(fresh.ctx.project).size(), 1u);
+}
+
+TEST(CoreCommands, TimingRunOverwritesACollidingExplicitBinding) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  // A binding from another source under run_timing's name does not
+  // block the run: the run overwrites it, it is not duplicated.
+  ASSERT_TRUE(shell.Run("register_report", {"timing_func_tt", "pass"}).ok);
+  EXPECT_EQ(shell.ctx.reports.bindings(shell.ctx.project).size(), 1u);
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  EXPECT_EQ(shell.ctx.reports.bindings(shell.ctx.project).size(), 1u);
+  const auto* binding = shell.ctx.reports.FindByName(shell.ctx.project,
+                                                     "timing_func_tt");
+  ASSERT_NE(binding, nullptr);
+  const std::size_t at = run.payload.find("artifact=");
+  ASSERT_NE(at, std::string::npos);
+  EXPECT_EQ(binding->artifact_id, std::stoull(run.payload.substr(at + 9)));
 }
 
 TEST(CoreCommands, TimingRunDiagnostics) {

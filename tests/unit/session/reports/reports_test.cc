@@ -80,14 +80,43 @@ TEST(Reports, RegisterCreatesArtifactAndBindingTogether) {
   EXPECT_EQ(*binding->parasitics, ParasiticsLevel::kEstimate);
 }
 
-TEST(Reports, DuplicateOrEmptyRegistrationIsRejectedCleanly) {
+TEST(Reports, DuplicateRegistrationOverwritesWithFreshSnapshot) {
   Fixture f;
-  ASSERT_TRUE(f.reports.RegisterReport(f.project, "timing",
-                                       ProofStatus::kPass, "NLDM")
-                  .ok());
-  EXPECT_FALSE(f.reports.RegisterReport(f.project, "timing",
-                                        ProofStatus::kPass, "NLDM")
-                   .ok());
+  const Result<ArtifactId> first = f.reports.RegisterReport(
+      f.project, "timing", ProofStatus::kPass, "NLDM", "build-42");
+  ASSERT_TRUE(first.ok());
+  EXPECT_EQ(first.value(), 1u);
+  f.Commit();
+  const Result<ArtifactId> second = f.reports.RegisterReport(
+      f.project, "timing", ProofStatus::kFail, "NLDM", "build-43");
+  ASSERT_TRUE(second.ok());
+  EXPECT_EQ(second.value(), 2u);
+  // Exactly one live binding per name, resolving to the new run.
+  EXPECT_EQ(f.reports.bindings(f.project).size(), 1u);
+  const ReportBinding* binding =
+      f.reports.FindByName(f.project, "timing");
+  ASSERT_NE(binding, nullptr);
+  EXPECT_EQ(binding->artifact_id, second.value());
+  EXPECT_EQ(binding->bound_revision, 1u);
+  EXPECT_EQ(binding->timing_model, "NLDM");
+  EXPECT_EQ(binding->tool_build, "build-43");
+  EXPECT_EQ(f.reports.FindByArtifact(f.project, second.value()), binding);
+  EXPECT_EQ(f.reports.FindByArtifact(f.project, first.value()), nullptr);
+  // The old artifact stays in the ledger as audit history.
+  EXPECT_EQ(f.project.ledger.artifacts().size(), 2u);
+  ASSERT_NE(f.project.ledger.FindArtifact(first.value()), nullptr);
+  // Status and the gate follow the latest binding, not the first.
+  const ReportStatus status = f.reports.StatusFor(f.project, "timing");
+  ASSERT_TRUE(status.found);
+  EXPECT_EQ(status.artifact_id, second.value());
+  EXPECT_EQ(status.proof, ProofStatus::kFail);
+  const ExportVerdict verdict = f.reports.Evaluate(f.project, {"timing"});
+  ASSERT_EQ(verdict.blockers.size(), 1u);
+  EXPECT_TRUE(HasKind(verdict, BlockerKind::kProofNotPass));
+}
+
+TEST(Reports, EmptyRegistrationIsRejectedCleanly) {
+  Fixture f;
   EXPECT_FALSE(
       f.reports.RegisterReport(f.project, "", ProofStatus::kPass, "NLDM")
           .ok());
@@ -95,8 +124,8 @@ TEST(Reports, DuplicateOrEmptyRegistrationIsRejectedCleanly) {
                                         ProofStatus::kPass, "")
                    .ok());
   // The rejected registrations created no artifact and no binding.
-  EXPECT_EQ(f.project.ledger.artifacts().size(), 1u);
-  EXPECT_EQ(f.reports.bindings(f.project).size(), 1u);
+  EXPECT_EQ(f.project.ledger.artifacts().size(), 0u);
+  EXPECT_EQ(f.reports.bindings(f.project).size(), 0u);
 }
 
 TEST(Reports, BindingIsAnImmutableSnapshot) {

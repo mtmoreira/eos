@@ -7,10 +7,14 @@
 // fidelity, the timing model and the tool build. RegisterReport
 // creates the ledger artifact and its ReportBinding together, in one
 // step, so a report can never exist in the ledger without the binding
-// that says what it certifies, or the other way round. The binding is
-// immutable afterwards: it is a snapshot, and later changes to the
-// scenario set (or anything else) do not rewrite history. Freshness
-// and validity are never stored in the binding; they are read from
+// that says what it certifies, or the other way round. Each binding
+// record is immutable afterwards: it is a snapshot, and later changes
+// to the scenario set (or anything else) do not rewrite it. What a
+// repeat registration does instead is REPLACE the record wholesale
+// (Immediate unit 1, repeatable reports): re-registering a name
+// overwrites its binding with a fresh snapshot at the current
+// revision, and the old artifact stays in the ledger as audit
+// history. Freshness and validity are never stored in the binding; they are read from
 // the ledger on every query, so a state change that invalidates or
 // ages a report is seen by the gate immediately.
 //
@@ -91,11 +95,17 @@ class ReportRegistry {
   // step. The binding is stored on the project and snapshots the
   // project's active scenario set, the ledger's current revision and
   // the declared timing model and tool build. Fails with
-  // kInvalidArgument on an empty name, an empty timing model, or a
-  // name the project already holds a binding under (one name
-  // certifies one report; register the new run under a new name),
-  // and leaves the ledger untouched on failure, because the
-  // duplicate check runs before registration.
+  // kInvalidArgument on an empty name or an empty timing model, and
+  // leaves the ledger untouched on failure, because those checks run
+  // before registration. Re-registering a name is NOT a failure:
+  // it overwrites the binding under that name with a fresh snapshot
+  // at the current revision and returns the new artifact id (the
+  // old artifact stays in the ledger as audit history, orphaned).
+  // Exactly one live binding exists per name, so the export gate,
+  // which resolves by name, always sees the latest run. This is
+  // what makes repeated run_timing and report_timing calls work in
+  // one session, including after a restore (a restored binding is
+  // overwritten the same way).
   Result<ArtifactId> RegisterReport(Project& project,
                                     const std::string& name,
                                     ProofStatus proof,

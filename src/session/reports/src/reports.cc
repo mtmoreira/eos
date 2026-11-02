@@ -30,11 +30,18 @@ Result<ArtifactId> ReportRegistry::RegisterReport(
     return Status::Error(ErrorCode::kInvalidArgument,
                          "report timing model is empty");
   }
-  if (FindByName(project, name) != nullptr) {
-    return Status::Error(ErrorCode::kInvalidArgument,
-                         "a report named " + name +
-                             " is already registered");
-  }
+  // Repeatable reports (Immediate unit 1): re-registering a name
+  // OVERWRITES its binding with a fresh snapshot at the current
+  // revision. The old binding record is replaced wholesale, never
+  // mutated, and the old artifact stays in the ledger as audit
+  // history (orphaned: no binding points to it, so the gate, which
+  // resolves by name, never sees it). Versioned names were
+  // rejected: the name is the stable handle the export gate and
+  // every payload use, and a second name for the same report would
+  // break required-name matching. A repeat run therefore always
+  // succeeds with a new artifact id, and the latest run is the
+  // report: a binding bound to an older revision is stale for
+  // export purposes anyway.
   const ArtifactId id = project.ledger.RegisterArtifact(
       ArtifactKind::kReport, name, proof);
   ReportBinding binding;
@@ -64,7 +71,18 @@ Result<ArtifactId> ReportRegistry::RegisterReport(
   if (!uniform) {
     binding.parasitics.reset();
   }
-  project.report_bindings.push_back(std::move(binding));
+  ReportBinding* existing = nullptr;
+  for (ReportBinding& held : project.report_bindings) {
+    if (held.name == name) {
+      existing = &held;
+      break;
+    }
+  }
+  if (existing != nullptr) {
+    *existing = std::move(binding);
+  } else {
+    project.report_bindings.push_back(std::move(binding));
+  }
   return id;
 }
 
