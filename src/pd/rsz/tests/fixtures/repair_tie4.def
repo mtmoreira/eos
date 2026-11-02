@@ -1,0 +1,27 @@
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+
+DIEAREA ( 0 0 ) ( 50000 50000 ) ;
+
+COMPONENTS 11 ;
+    - t1 LOGIC1_X1 ;
+ - u0 BUF_X1 + PLACED ( 10000 10000 ) N ;
+ - u1 BUF_X1 + PLACED ( 20000 10000 ) N ;
+ - u2 BUF_X1 + PLACED ( 30000 10000 ) N ;
+ - u3 BUF_X1 + PLACED ( 10000 20000 ) N ;
+ - u4 BUF_X1 + PLACED ( 20000 20000 ) N ;
+ - u5 BUF_X1 + PLACED ( 30000 20000 ) N ;
+ - u6 BUF_X1 + PLACED ( 10000 30000 ) N ;
+ - u7 BUF_X1 + PLACED ( 20000 30000 ) N ;
+ - u8 BUF_X1 + PLACED ( 30000 30000 ) N ;
+ - u9 BUF_X1 + PLACED ( 10000 40000 ) N ;
+END COMPONENTS
+NETS 1 ;
+- n1 ( t1 Z )   ( u0 A )
+  ( u1 A )  ( u2 A )  ( u3 A )  ( u4 A )  ( u5 A )
+  ( u6 A )  ( u7 A )  ( u8 A )  ( u9 A ) + USE SIGNAL ;
+END NETS
+END DESIGN

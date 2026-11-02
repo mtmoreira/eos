@@ -1,5 +1,6 @@
 # registry: the one command registry (L6 interface).
-add_library(eda_ui_registry STATIC src/registry.cc src/core_commands.cc)
+add_library(eda_ui_registry STATIC src/registry.cc src/core_commands.cc
+  src/repair_commands.cc)
 target_include_directories(eda_ui_registry PUBLIC include)
 # The synthesis commands drive the Yosys and ABC facades, so the
 # registry links both: Yosys whole-archive, exactly as every other
@@ -12,5 +13,13 @@ target_link_libraries(eda_ui_registry
          eda_db_checkpoint eda_db_odb eda_analysis_timing
          eda_foundation_ids eda_foundation_errors
          eda_pd_floorplan
+         eda_pd_rsz eda_pd_dbsta
          eda_synth_abc
          "$<LINK_LIBRARY:WHOLE_ARCHIVE,eda_synth_yosys>")
+
+# repair_commands.cc builds its own Tcl interp and STA session, so the
+# registry needs Tcl headers and link (same conditional as rsz/dbsta).
+if(TCL_FOUND)
+  target_include_directories(eda_ui_registry PRIVATE ${TCL_INCLUDE_PATH})
+  target_link_libraries(eda_ui_registry PRIVATE ${TCL_LIBRARY})
+endif()

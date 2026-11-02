@@ -1,0 +1,1 @@
+error=EOS invalid_configuration: no wire RC data for layer metal99 (load tech data for it, pass -wire_layer naming a layer with data, or pass -wire_r/-wire_c)
