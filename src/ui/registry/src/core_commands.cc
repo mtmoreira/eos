@@ -11,6 +11,7 @@
 #include "eos/pd/floorplan.h"
 #include "eos/pd/place.h"
 #include "eos/pd/route.h"
+#include "eos/pv/extract.h"
 #include "odb/db.h"
 #include "eos/session/flow.h"
 #include "eos/synth/abc.h"
@@ -2061,6 +2062,120 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         // not the session is configured for timing; when it is
         // not, the payload says so with the reason instead of
         // inventing a number.
+        bool from_odb = false;
+        std::vector<analysis::SceneAnalysis> scenes;
+        if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          payload += " sta_slack_ns=unavailable (" + bad->message + ")";
+        } else if (!from_odb) {
+          payload += " sta_slack_ns=unavailable (timing source is "
+                     "Verilog, not the routed database)";
+        } else {
+          analysis::TimingService service;
+          const Result<std::vector<analysis::SceneResult>> analyzed =
+              service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
+                              scenes);
+          if (!analyzed.ok()) {
+            payload += " sta_slack_ns=unavailable (" +
+                       analyzed.status().message() + ")";
+          } else {
+            for (const analysis::SceneResult& result :
+                 analyzed.value()) {
+              payload += " scene=" + result.scenario.name +
+                         " worst_slack_ns=" +
+                         MetricText(result.metrics, "worst_slack_ns");
+            }
+          }
+        }
+        return CommandResult::Ok(payload);
+      });
+
+  add("extract_parasitics",
+      "extract_parasitics <spef_path> [-model <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        // Argument shape first, mirroring the route command: exactly
+        // one positional (the SPEF path) plus at most one -model
+        // value. Unknown options, a duplicate -model, a missing
+        // value, and a second positional all fail here, before any
+        // session state is touched, so the registry-level tests can
+        // exercise them on an empty context.
+        std::string spef_path;
+        std::string model_path;
+        bool model_seen = false;
+        for (size_t i = 0; i < args.size(); ++i) {
+          const std::string& flag = args[i];
+          if (flag == "-model") {
+            if (model_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -model given twice");
+            }
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -model needs a value");
+            }
+            model_seen = true;
+            model_path = args[++i];
+            continue;
+          }
+          if (!flag.empty() && flag[0] == '-') {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown extract_parasitics option: " + flag);
+          }
+          if (!spef_path.empty()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "usage: eos::extract_parasitics <spef_path> "
+                "[-model <path>]");
+          }
+          spef_path = flag;
+        }
+        if (spef_path.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::extract_parasitics <spef_path> "
+              "[-model <path>]");
+        }
+        if (!model_seen) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no extraction model file: pass -model <rules file>");
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (!ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no mapped design: the imported database holds no top "
+              "block");
+        }
+        pv::ExtractOptions options;
+        options.spef_path = spef_path;
+        options.model_path = model_path;
+        pv::ExtractReport report;
+        const foundation::Status status = pv::ExtractParasitics(
+            ctx.timing.odb->RawDatabase(), options, &report);
+        if (!status.ok()) return FromStatus(status);
+        std::string payload =
+            "nets=" + std::to_string(report.nets_extracted) +
+            " rsegs=" + std::to_string(report.rseg_count) +
+            " cap_nodes=" + std::to_string(report.cap_node_count) +
+            " cc_segs=" + std::to_string(report.cc_seg_count) +
+            " spef=" + report.spef_path;
+        // Estimated STA on the routed database, the same way the
+        // route command reports it: extraction itself succeeds
+        // whether or not the session is configured for timing;
+        // when it is not, the payload says so with the reason
+        // instead of inventing a number. The extracted-STA
+        // comparison is demonstrated by the unit tests, not faked
+        // into this payload.
         bool from_odb = false;
         std::vector<analysis::SceneAnalysis> scenes;
         if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {

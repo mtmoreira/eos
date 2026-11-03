@@ -230,10 +230,30 @@
       "via": {}
     },
     "extract": {
-      "depends_on": [],
+      "depends_on": [
+        "dbsta",
+        "errors",
+        "odb",
+        "sta"
+      ],
       "layer": "L4",
       "path": "src/pv/extract",
-      "via": {}
+      "via": {
+        "dbsta": [
+          "cmake-link"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link"
+        ]
+      }
     },
     "finish": {
       "depends_on": [],
@@ -604,6 +624,7 @@
         "dbsta",
         "design",
         "errors",
+        "extract",
         "floorplan",
         "flow",
         "ids",
@@ -646,6 +667,10 @@
           "include"
         ],
         "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "extract": [
           "cmake-link",
           "include"
         ],
@@ -1410,6 +1435,19 @@
         "rsz"
       ],
       "sources": []
+    },
+    "pv.extract": {
+      "modules": [
+        "extract",
+        "floorplan",
+        "odb",
+        "place",
+        "route",
+        "timing"
+      ],
+      "sources": [
+        "tests/unit/pv/extract/extract_test.cc"
+      ]
     },
     "qualification.phase1_exit": {
       "modules": [
