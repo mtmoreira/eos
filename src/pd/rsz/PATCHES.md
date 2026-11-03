@@ -366,3 +366,21 @@ they shape what the suite can claim.
   scripts, .ok files, and the gcd command case are generated
   under it, and the gcd command-path result is recorded in
   tests/README.md.
+- Mac printf fix (owner approval 2026-11-02, "Fix in repo"):
+  src/pd/rsz/src/Rebuffer.cc passed std::string values to
+  printf %s slots at 7 sites, which Apple Clang rejects with
+  -Wnon-pod-varargs (error) while GCC emits no diagnostic for
+  this at all (the warning is Clang-only; GCC has no
+  -Wnon-pod-varargs option), which is why Linux CI stays
+  green and the owner's Mac eos-gui build
+  fails in eda_pd_rsz. Fixed by appending .c_str() to each
+  argument, no behavior change: buffer debug print
+  (asString cap value, delayAsString req value), insert print
+  (pathName(net), buffer_cell name, pathName(net2)),
+  connect-load print (pathName(load_pin), pathName(net)).
+  Sweep: every printf-family call in src/pd/ inspected
+  (rsz only: BufferedNet, Rebuffer, Resizer, SteinerTree; no
+  fprintf/sprintf/snprintf anywhere in src/pd); all other
+  %s arguments were already .c_str() or const char*, and the
+  rsz target builds clean under -Werror=non-pod-varargs.
+  Zero siblings found.
