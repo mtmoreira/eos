@@ -264,7 +264,7 @@ modules:
     layer: L4
     path: src/pd/route
     target: eda_pd_route
-    adopted: false
+    adopted: true
   - name: finish
     layer: L4
     path: src/pd/finish

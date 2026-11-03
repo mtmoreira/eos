@@ -10,6 +10,7 @@
 #include "eos/pd/cts.h"
 #include "eos/pd/floorplan.h"
 #include "eos/pd/place.h"
+#include "eos/pd/route.h"
 #include "odb/db.h"
 #include "eos/session/flow.h"
 #include "eos/synth/abc.h"
@@ -1925,6 +1926,122 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         } else if (!from_odb) {
           payload += " sta_slack_ns=unavailable (timing source is "
                      "Verilog, not the CTS database)";
+        } else {
+          analysis::TimingService service;
+          const Result<std::vector<analysis::SceneResult>> analyzed =
+              service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
+                              scenes);
+          if (!analyzed.ok()) {
+            payload += " sta_slack_ns=unavailable (" +
+                       analyzed.status().message() + ")";
+          } else {
+            for (const analysis::SceneResult& result :
+                 analyzed.value()) {
+              payload += " scene=" + result.scenario.name +
+                         " worst_slack_ns=" +
+                         MetricText(result.metrics, "worst_slack_ns");
+            }
+          }
+        }
+        return CommandResult::Ok(payload);
+      });
+
+  add("route", "route [-min_layer <n>] [-max_layer <n>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        pd::RouteOptions options;
+        bool min_seen = false;
+        bool max_seen = false;
+        for (size_t i = 0; i < args.size(); ++i) {
+          const std::string& flag = args[i];
+          int* slot = nullptr;
+          bool* seen = nullptr;
+          if (flag == "-min_layer") {
+            slot = &options.min_routing_layer;
+            seen = &min_seen;
+          } else if (flag == "-max_layer") {
+            slot = &options.max_routing_layer;
+            seen = &max_seen;
+          } else {
+            return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                       "unknown route option: " + flag);
+          }
+          if (*seen) {
+            return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                       "option " + flag + " given twice");
+          }
+          if (i + 1 >= args.size()) {
+            return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                       "option " + flag + " needs a value");
+          }
+          if (!ParseCoord(args[i + 1], *slot)) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "option " + flag + " layer is not an integer: " +
+                    args[i + 1]);
+          }
+          *seen = true;
+          ++i;
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (!ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no mapped design: the imported database holds no top "
+              "block");
+        }
+        if (ctx.timing.liberty_by_corner.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no Liberty loaded: eos::read_liberty first");
+        }
+        // One Liberty library feeds the engine's clock-net
+        // detection; prefer the tt corner when present, else the
+        // first corner in map order. The chosen corner is named in
+        // the payload.
+        std::string liberty_corner;
+        auto liberty_it = ctx.timing.liberty_by_corner.find("tt");
+        if (liberty_it == ctx.timing.liberty_by_corner.end()) {
+          liberty_it = ctx.timing.liberty_by_corner.begin();
+        }
+        liberty_corner = liberty_it->first;
+        options.liberty_path = liberty_it->second;
+        pd::RouteReport report;
+        const foundation::Status status = pd::RunRoute(
+            ctx.timing.odb->RawDatabase(), options, &report);
+        if (!status.ok()) return FromStatus(status);
+        std::string payload =
+            "routed=" + std::to_string(report.net_routed_count) +
+            " total=" + std::to_string(report.net_total_count) +
+            " guides=" + std::to_string(report.guide_count) +
+            " overflow=" + std::to_string(report.total_overflow);
+        for (const pd::LayerCongestion& layer : report.per_layer) {
+          payload += " layer_" + std::to_string(layer.layer) + "=" +
+                     layer.name +
+                     " capacity=" + std::to_string(layer.capacity) +
+                     " usage=" + std::to_string(layer.usage) +
+                     " overflow=" + std::to_string(layer.overflow);
+        }
+        payload += " liberty_corner=" + liberty_corner;
+        // Routed STA: the session timing service on the routed
+        // database, with estimated parasitics (the same path the
+        // synthesis loop uses). Routing itself succeeds whether or
+        // not the session is configured for timing; when it is
+        // not, the payload says so with the reason instead of
+        // inventing a number.
+        bool from_odb = false;
+        std::vector<analysis::SceneAnalysis> scenes;
+        if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          payload += " sta_slack_ns=unavailable (" + bad->message + ")";
+        } else if (!from_odb) {
+          payload += " sta_slack_ns=unavailable (timing source is "
+                     "Verilog, not the routed database)";
         } else {
           analysis::TimingService service;
           const Result<std::vector<analysis::SceneResult>> analyzed =

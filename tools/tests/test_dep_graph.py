@@ -303,7 +303,8 @@ def test_real_repo_check_passes_and_rules_hold():
     # below already cover the entries when they land.
     # P2 adds pd.place, the 45th ctest entry.
     # P3 adds pd.cts, the 58th ctest entry.
-    assert len(all_tests) == 61
+    # P4 adds pd.route, the 62nd ctest entry.
+    assert len(all_tests) == 62
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),
