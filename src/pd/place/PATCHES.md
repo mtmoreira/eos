@@ -107,3 +107,22 @@ folded back into place.cc.
   runner runs plain Nesterov plus detailed placement instead;
   the router path itself is unchanged and stays live whenever
   Liberty is loaded.
+
+## 5. gpl timingBase.cpp: format Delay mean in the worst-slack log
+
+Mac-only build failure (owner's build-fresh eos-gui rebuild, after
+PR 75 and PR 81): Homebrew fmt rejects the call at timingBase.cpp
+line 165, log_->info(GPL, 100, "worst slack {:.3g}", slack_min),
+because sta::Delay in this OpenSTA pin is a class (mean,
+mean_shift, std_dev2, skewness) with no fmt formatter, and fmt
+reports implicit instantiation of undefined template
+fmt::detail::type_is_unformattable_for<sta::Delay, char>. The fmt
+CI uses accepts the same line, which is why CI stayed green.
+The port copy passes slack_min.mean() instead of slack_min.
+Output is identical: Delay's own operator float() returns mean().
+No change to the format string, the log id, or the message text.
+Sweep of the whole place module (gpl, dpl, runner, headers):
+this was the only logger or fmt call passing a sta::Delay or
+other STA class value; every other formatted argument is an
+integer, float, double, size, string, or coordinate, all
+fmt-formattable.

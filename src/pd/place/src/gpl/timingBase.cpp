@@ -162,7 +162,7 @@ bool TimingBase::updateGNetWeights(float overflow)
   auto slack_max
       = rs_->resizeNetSlack(worst_slack_nets[worst_slack_nets.size() - 1]);
 
-  log_->info(GPL, 100, "worst slack {:.3g}", slack_min);
+  log_->info(GPL, 100, "worst slack {:.3g}", slack_min.mean());
 
   if (sta::fuzzyInf(slack_min)) {
     log_->warn(GPL, 102, "No slacks found. Timing-driven mode disabled.");
