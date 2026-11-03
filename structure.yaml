@@ -265,6 +265,12 @@ modules:
     path: src/pd/route
     target: eda_pd_route
     adopted: true
+  - name: drt
+    layer: L4
+    path: src/pd/drt
+    target: eda_pd_drt
+    adopted: true
+    upstream: OpenROAD drt (TritonRoute, ead3236) at ead3236, P5
   - name: finish
     layer: L4
     path: src/pd/finish

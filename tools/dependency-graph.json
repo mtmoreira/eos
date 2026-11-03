@@ -195,6 +195,34 @@
       "path": "src/pv/drc",
       "via": {}
     },
+    "drt": {
+      "depends_on": [
+        "dbsta",
+        "odb",
+        "sta",
+        "stt"
+      ],
+      "layer": "L4",
+      "path": "src/pd/drt",
+      "via": {
+        "dbsta": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link",
+          "include"
+        ],
+        "stt": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
     "errors": {
       "depends_on": [],
       "layer": "L0",
@@ -714,6 +742,7 @@
       "depends_on": [
         "ant",
         "dbsta",
+        "drt",
         "errors",
         "grt",
         "odb",
@@ -728,6 +757,10 @@
           "include"
         ],
         "dbsta": [
+          "cmake-link",
+          "include"
+        ],
+        "drt": [
           "cmake-link",
           "include"
         ],

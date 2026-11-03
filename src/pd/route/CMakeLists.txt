@@ -13,7 +13,7 @@ target_include_directories(eda_pd_route
   PRIVATE src
 )
 target_link_libraries(eda_pd_route
-  PUBLIC eda_pd_grt eda_pd_place eda_pd_dbsta eda_db_odb
+  PUBLIC eda_pd_grt eda_pd_drt eda_pd_place eda_pd_dbsta eda_db_odb
          eda_analysis_sta eda_foundation_errors
 )
 # route.cc creates a private Tcl interp for its STA session (see
