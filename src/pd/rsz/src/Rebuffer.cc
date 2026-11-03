@@ -367,8 +367,8 @@ Resizer::addWireAndBuffer(BufferedNetSeq Z,
             printf("%*sbuffer %s cap %s req %s ->\n",
                    level, "",
                    tree->name(prev, sdc_network_),
-                   units_->capacitanceUnit()->asString(best_option->cap()),
-                   delayAsString(best_req, this));
+                   units_->capacitanceUnit()->asString(best_option->cap()).c_str(),
+                   delayAsString(best_req, this).c_str());
             z->report(level, this);
           }
           buffered_options.push_back(z);
@@ -415,10 +415,10 @@ Resizer::rebufferTopDown(BufferedNet *choice,
     if (logger_->debugCheck(RSZ, "rebuffer", 3))
       printf("%*sinsert %s -> %s (%s) -> %s",
              level, "",
-             sdc_network_->pathName(net),
+             sdc_network_->pathName(net).c_str(),
              buffer_name.c_str(),
-             buffer_cell->name(),
-             sdc_network_->pathName(net2));
+             buffer_cell->name().c_str(),
+             sdc_network_->pathName(net2).c_str());
     sta_->connectPin(buffer, input, net);
     sta_->connectPin(buffer, output, net2);
     setLocation(buffer, choice->location());
@@ -447,8 +447,8 @@ Resizer::rebufferTopDown(BufferedNet *choice,
       if (logger_->debugCheck(RSZ, "rebuffer", 3))
         printf("%*sconnect load %s to %s",
                level, "",
-               sdc_network_->pathName(load_pin),
-               sdc_network_->pathName(net));
+               sdc_network_->pathName(load_pin).c_str(),
+               sdc_network_->pathName(net).c_str());
       sta_->disconnectPin(const_cast<Pin*>(load_pin));
       sta_->connectPin(load_inst, load_port, net);
       parasiticsInvalid(load_net);
