@@ -61,8 +61,10 @@ TEST(Registry, CoreSetIsComplete) {
   // write_verilog, check_equivalence, and synth_report; P1 adds
   // floorplan; U3 adds synth_blocks; U4 adds synth_schematic;
   // U5 adds synth_stats; PR4 adds repair_timing and set_wire_rc;
-  // P2 adds place; P3 adds cts; P4 adds route.
-  EXPECT_EQ(shell.registry.Names().size(), 56u);
+  // P2 adds place; P3 adds cts; P4 adds route; P6 adds
+  // extract_parasitics.
+  EXPECT_EQ(shell.registry.Names().size(), 57u);
+  EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -3321,6 +3323,43 @@ TEST(CoreCommands, RouteRejectsBadOptions) {
       shell.Run("route", {"-min_layer", "wide"});
   ASSERT_FALSE(not_a_number.ok);
   EXPECT_EQ(not_a_number.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, ExtractParasiticsRejectsBadArguments) {
+  // Argument shape is validated before any session state is
+  // touched, so these run on an empty context.
+  Shell shell;
+  const CommandResult no_args = shell.Run("extract_parasitics", {});
+  ASSERT_FALSE(no_args.ok);
+  EXPECT_EQ(no_args.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(no_args.message.find("usage"), std::string::npos);
+  const CommandResult two_positional =
+      shell.Run("extract_parasitics", {"a.spef", "b.spef"});
+  ASSERT_FALSE(two_positional.ok);
+  EXPECT_EQ(two_positional.diag, Diag::kInvalidConfiguration);
+  const CommandResult unknown =
+      shell.Run("extract_parasitics", {"a.spef", "-bogus"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(unknown.message.find("unknown extract_parasitics option"),
+            std::string::npos);
+  const CommandResult duplicate = shell.Run(
+      "extract_parasitics", {"a.spef", "-model", "m.rules", "-model",
+                             "m.rules"});
+  ASSERT_FALSE(duplicate.ok);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(duplicate.message.find("given twice"), std::string::npos);
+  const CommandResult missing_value =
+      shell.Run("extract_parasitics", {"a.spef", "-model"});
+  ASSERT_FALSE(missing_value.ok);
+  EXPECT_EQ(missing_value.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(missing_value.message.find("needs a value"),
+            std::string::npos);
+  const CommandResult missing_model =
+      shell.Run("extract_parasitics", {"a.spef"});
+  ASSERT_FALSE(missing_model.ok);
+  EXPECT_EQ(missing_model.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(missing_model.message.find("-model"), std::string::npos);
 }
 
 TEST(CoreCommands, RouteAcceptsDetailedOptions) {

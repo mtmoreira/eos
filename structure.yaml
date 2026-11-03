@@ -295,7 +295,7 @@ modules:
     layer: L4
     path: src/pv/extract
     target: eda_pv_extract
-    adopted: false
+    adopted: true
   - name: transactions
     layer: L4
     path: src/eco/transactions
