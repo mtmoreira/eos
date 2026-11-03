@@ -61,8 +61,8 @@ TEST(Registry, CoreSetIsComplete) {
   // write_verilog, check_equivalence, and synth_report; P1 adds
   // floorplan; U3 adds synth_blocks; U4 adds synth_schematic;
   // U5 adds synth_stats; PR4 adds repair_timing and set_wire_rc;
-  // P2 adds place; P3 adds cts.
-  EXPECT_EQ(shell.registry.Names().size(), 55u);
+  // P2 adds place; P3 adds cts; P4 adds route.
+  EXPECT_EQ(shell.registry.Names().size(), 56u);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -464,6 +464,58 @@ LAYER metal1
   PITCH 0.19 ;
   WIDTH 0.065 ;
 END metal1
+MACRO BUFX2
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.35 -0.05 0.45 0.05 ;
+    END
+  END Y
+END BUFX2
+END LIBRARY
+)LEF";
+
+// Route command fixture: kTimingLef plus a second, vertical
+// routing layer. kTimingLef itself carries only metal1, so a
+// route test built on it can never report layer_2; the shared
+// fixture stays untouched and only the route test uses this one.
+const char kRouteLef[] = R"LEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MANUFACTURINGGRID 0.005 ;
+SITE core
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END core
+LAYER metal1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal1
+LAYER metal2
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal2
 MACRO BUFX2
   CLASS CORE ;
   ORIGIN 0 0 ;
@@ -3187,6 +3239,96 @@ TEST(CoreCommands, CtsFailsFastWithoutLiberty) {
   ASSERT_FALSE(result.ok);
   EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
   EXPECT_NE(result.message.find("no Liberty loaded"), std::string::npos);
+}
+
+// P4: eos::route runs global routing on the floorplanned and
+// placed imported design, reports routed/total/guides/overflow
+// plus the per-layer congestion entries, and states routed STA
+// unavailability when no timing session is configured. The engine
+// run itself is covered by the pd.route unit tests; these tests
+// pin the command layer: the happy path, unknown and duplicate
+// options, non-integer layers, and the fail-fast order
+// (technology, mapped design) before any engine runs. The DEF is
+// the same PORT-carrying fixture as the floorplan tests.
+TEST(CoreCommands, RouteRunsOnPlacedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kRouteLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  const CommandResult result = shell.Run("route", {});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("routed=3"), std::string::npos);
+  EXPECT_NE(result.payload.find("total=3"), std::string::npos);
+  EXPECT_NE(result.payload.find("guides="), std::string::npos);
+  EXPECT_NE(result.payload.find("overflow=0"), std::string::npos);
+  EXPECT_NE(result.payload.find("layer_1="), std::string::npos);
+  EXPECT_NE(result.payload.find("layer_2="), std::string::npos);
+  EXPECT_NE(result.payload.find("liberty_corner=tt"), std::string::npos);
+  // No timing session is configured, so the payload states
+  // unavailability with the reason instead of inventing a slack.
+  EXPECT_NE(result.payload.find("sta_slack_ns=unavailable"),
+            std::string::npos);
+  // A second route in the same session succeeds (the runner
+  // clears its STA session before returning).
+  const CommandResult again = shell.Run("route", {});
+  ASSERT_TRUE(again.ok) << again.message;
+}
+
+TEST(CoreCommands, RouteRejectsBadOptions) {
+  Shell shell;
+  const CommandResult unknown = shell.Run("route", {"-bogus"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(unknown.message.find("unknown route option"),
+            std::string::npos);
+  const CommandResult duplicate =
+      shell.Run("route", {"-min_layer", "1", "-min_layer", "1"});
+  ASSERT_FALSE(duplicate.ok);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(duplicate.message.find("given twice"), std::string::npos);
+  const CommandResult missing_value = shell.Run("route", {"-max_layer"});
+  ASSERT_FALSE(missing_value.ok);
+  EXPECT_EQ(missing_value.diag, Diag::kInvalidConfiguration);
+  const CommandResult not_a_number =
+      shell.Run("route", {"-min_layer", "wide"});
+  ASSERT_FALSE(not_a_number.ok);
+  EXPECT_EQ(not_a_number.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, RouteFailsFastWithoutLiberty) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  // No read_liberty in this session, so route fails fast before
+  // any engine runs.
+  const CommandResult result = shell.Run("route", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no Liberty loaded"), std::string::npos);
+}
+
+TEST(CoreCommands, RouteFailsFastWithoutTechnology) {
+  Shell shell;
+  const CommandResult result = shell.Run("route", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no technology data"), std::string::npos);
 }
 
 // S6 backfill: HasDesign mirrors the project's design state.

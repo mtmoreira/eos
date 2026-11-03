@@ -583,6 +583,7 @@
         "odb",
         "place",
         "reports",
+        "route",
         "rsz",
         "scenarios",
         "session",
@@ -648,6 +649,10 @@
           "cmake-link",
           "include"
         ],
+        "route": [
+          "cmake-link",
+          "include"
+        ],
         "rsz": [
           "cmake-link",
           "include"
@@ -706,10 +711,50 @@
       }
     },
     "route": {
-      "depends_on": [],
+      "depends_on": [
+        "ant",
+        "dbsta",
+        "errors",
+        "grt",
+        "odb",
+        "place",
+        "sta",
+        "stt"
+      ],
       "layer": "L4",
       "path": "src/pd/route",
-      "via": {}
+      "via": {
+        "ant": [
+          "include"
+        ],
+        "dbsta": [
+          "cmake-link",
+          "include"
+        ],
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "grt": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "place": [
+          "cmake-link",
+          "include"
+        ],
+        "sta": [
+          "cmake-link",
+          "include"
+        ],
+        "stt": [
+          "include"
+        ]
+      }
     },
     "rsz": {
       "depends_on": [
@@ -1109,6 +1154,17 @@
       ],
       "sources": [
         "tests/unit/pd/place/place_test.cc"
+      ]
+    },
+    "pd.route": {
+      "modules": [
+        "floorplan",
+        "odb",
+        "place",
+        "route"
+      ],
+      "sources": [
+        "tests/unit/pd/route/route_test.cc"
       ]
     },
     "pd.rsz": {
