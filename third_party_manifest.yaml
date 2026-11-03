@@ -71,6 +71,13 @@ components:
     module: src/pd/place (mbff) and src/pd/stt (Prim-Dijkstra), declared external system dependency
     patches: 0
     note: "Added 2026-11-01 by place-and-route unit P2 (owner decision RESOLUTION 2): installed via the CI apt step (liblemon-dev) and found through its CMake config; no LEMON sources are vendored."
+  - name: boost-serialization
+    upstream: https://www.boost.org
+    version: 1.83.0 (system package libboost-serialization-dev)
+    licence: Boost Software License 1.0
+    module: src/pd/drt (FlexDR worker serialization)
+    patches: 0
+    note: "Added 2026-11-02 by place-and-route unit P5: binary archives for FlexDR worker serialization; found through its CMake config; no Boost sources are vendored. CI install step still owed: the CI apt list installs libboost-dev but not libboost-serialization-dev (flagged as a judgment item for the owner, since .github/workflows/ci.yml is structural)."
   - name: klayout
     upstream: https://github.com/KLayout/klayout
     version: v0.30.12

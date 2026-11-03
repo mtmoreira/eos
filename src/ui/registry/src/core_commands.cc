@@ -1946,22 +1946,38 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(payload);
       });
 
-  add("route", "route [-min_layer <n>] [-max_layer <n>]",
+  add("route",
+      "route [-min_layer <n>] [-max_layer <n>] "
+      "[-max_iterations <n>] [-bottom_layer <name>] "
+      "[-top_layer <name>]",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
         pd::RouteOptions options;
         bool min_seen = false;
         bool max_seen = false;
+        bool iter_seen = false;
+        bool bottom_seen = false;
+        bool top_seen = false;
         for (size_t i = 0; i < args.size(); ++i) {
           const std::string& flag = args[i];
           int* slot = nullptr;
           bool* seen = nullptr;
+          std::string* name_slot = nullptr;
           if (flag == "-min_layer") {
             slot = &options.min_routing_layer;
             seen = &min_seen;
           } else if (flag == "-max_layer") {
             slot = &options.max_routing_layer;
             seen = &max_seen;
+          } else if (flag == "-max_iterations") {
+            slot = &options.max_detailed_iterations;
+            seen = &iter_seen;
+          } else if (flag == "-bottom_layer") {
+            name_slot = &options.bottom_routing_layer;
+            seen = &bottom_seen;
+          } else if (flag == "-top_layer") {
+            name_slot = &options.top_routing_layer;
+            seen = &top_seen;
           } else {
             return CommandResult::Fail(Diag::kInvalidConfiguration,
                                        "unknown route option: " + flag);
@@ -1974,10 +1990,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             return CommandResult::Fail(Diag::kInvalidConfiguration,
                                        "option " + flag + " needs a value");
           }
-          if (!ParseCoord(args[i + 1], *slot)) {
+          if (name_slot != nullptr) {
+            *name_slot = args[i + 1];
+          } else if (!ParseCoord(args[i + 1], *slot)) {
             return CommandResult::Fail(
                 Diag::kInvalidConfiguration,
-                "option " + flag + " layer is not an integer: " +
+                "option " + flag + " value is not an integer: " +
                     args[i + 1]);
           }
           *seen = true;
@@ -2020,7 +2038,15 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             "routed=" + std::to_string(report.net_routed_count) +
             " total=" + std::to_string(report.net_total_count) +
             " guides=" + std::to_string(report.guide_count) +
-            " overflow=" + std::to_string(report.total_overflow);
+            " overflow=" + std::to_string(report.total_overflow) +
+            " violations=" + std::to_string(report.violation_count) +
+            " detailed_iterations=" +
+            std::to_string(report.detailed_iterations_used) +
+            " detailed_bound=" +
+            std::to_string(report.detailed_iteration_bound) +
+            " stopped_at_bound=" +
+            std::string(report.detailed_stopped_at_bound ? "true"
+                                                         : "false");
         for (const pd::LayerCongestion& layer : report.per_layer) {
           payload += " layer_" + std::to_string(layer.layer) + "=" +
                      layer.name +

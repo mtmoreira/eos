@@ -36,7 +36,7 @@ jobs:
           # commits) always run the full suite, so they do not use it.
           fetch-depth: 0
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y tcl-dev bison flex libfl-dev swig libeigen3-dev libboost-dev zlib1g-dev libspdlog-dev libfmt-dev liblemon-dev qt6-base-dev qt6-base-dev-tools
+        run: sudo apt-get update && sudo apt-get install -y tcl-dev bison flex libfl-dev swig libeigen3-dev libboost-dev libboost-serialization-dev zlib1g-dev libspdlog-dev libfmt-dev liblemon-dev qt6-base-dev qt6-base-dev-tools
       - name: Install OR-Tools (P2 declared external dependency, never vendored)
         run: |
           curl -L -o /tmp/or-tools.tar.gz https://github.com/google/or-tools/releases/download/v9.5/or-tools_amd64_ubuntu-22.04_cpp_v9.5.2237.tar.gz

@@ -508,14 +508,26 @@ LAYER metal1
   TYPE ROUTING ;
   DIRECTION HORIZONTAL ;
   PITCH 0.19 ;
-  WIDTH 0.065 ;
+  WIDTH 0.06 ;
 END metal1
+LAYER via1
+  TYPE CUT ;
+  WIDTH 0.06 ;
+END via1
 LAYER metal2
   TYPE ROUTING ;
   DIRECTION VERTICAL ;
   PITCH 0.19 ;
-  WIDTH 0.065 ;
+  WIDTH 0.06 ;
 END metal2
+VIA VIA12
+  LAYER metal1 ;
+    RECT -0.05 -0.05 0.05 0.05 ;
+  LAYER via1 ;
+    RECT -0.03 -0.03 0.03 0.03 ;
+  LAYER metal2 ;
+    RECT -0.05 -0.05 0.05 0.05 ;
+END VIA12
 MACRO BUFX2
   CLASS CORE ;
   ORIGIN 0 0 ;
@@ -526,7 +538,7 @@ MACRO BUFX2
     USE SIGNAL ;
     PORT
       LAYER metal1 ;
-        RECT -0.05 -0.05 0.05 0.05 ;
+        RECT 0.05 0.05 0.25 0.25 ;
     END
   END A
   PIN Y
@@ -534,7 +546,7 @@ MACRO BUFX2
     USE SIGNAL ;
     PORT
       LAYER metal1 ;
-        RECT -0.35 -0.05 0.45 0.05 ;
+        RECT 0.26 0.05 0.46 0.25 ;
     END
   END Y
 END BUFX2
@@ -3241,15 +3253,17 @@ TEST(CoreCommands, CtsFailsFastWithoutLiberty) {
   EXPECT_NE(result.message.find("no Liberty loaded"), std::string::npos);
 }
 
-// P4: eos::route runs global routing on the floorplanned and
-// placed imported design, reports routed/total/guides/overflow
-// plus the per-layer congestion entries, and states routed STA
-// unavailability when no timing session is configured. The engine
-// run itself is covered by the pd.route unit tests; these tests
-// pin the command layer: the happy path, unknown and duplicate
-// options, non-integer layers, and the fail-fast order
-// (technology, mapped design) before any engine runs. The DEF is
-// the same PORT-carrying fixture as the floorplan tests.
+// P4/P5: eos::route runs global plus detailed routing on the
+// floorplanned and placed imported design, reports
+// routed/total/guides/overflow plus the per-layer congestion
+// entries, the detailed violation count, and the loop iterations
+// against the bound, and states routed STA unavailability when no
+// timing session is configured. The engine run itself is covered
+// by the pd.route unit tests; these tests pin the command layer:
+// the happy path, unknown and duplicate options, non-integer
+// layers, and the fail-fast order (technology, mapped design)
+// before any engine runs. The DEF is the same PORT-carrying
+// fixture as the floorplan tests.
 TEST(CoreCommands, RouteRunsOnPlacedDesign) {
   TimingTempDir dir;
   db::OdbDatabase database;
@@ -3272,6 +3286,11 @@ TEST(CoreCommands, RouteRunsOnPlacedDesign) {
   EXPECT_NE(result.payload.find("overflow=0"), std::string::npos);
   EXPECT_NE(result.payload.find("layer_1="), std::string::npos);
   EXPECT_NE(result.payload.find("layer_2="), std::string::npos);
+  EXPECT_NE(result.payload.find("violations="), std::string::npos);
+  EXPECT_NE(result.payload.find("detailed_iterations="),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("detailed_bound=64"), std::string::npos);
+  EXPECT_NE(result.payload.find("stopped_at_bound="), std::string::npos);
   EXPECT_NE(result.payload.find("liberty_corner=tt"), std::string::npos);
   // No timing session is configured, so the payload states
   // unavailability with the reason instead of inventing a slack.
@@ -3302,6 +3321,59 @@ TEST(CoreCommands, RouteRejectsBadOptions) {
       shell.Run("route", {"-min_layer", "wide"});
   ASSERT_FALSE(not_a_number.ok);
   EXPECT_EQ(not_a_number.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, RouteAcceptsDetailedOptions) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kRouteLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  const CommandResult result = shell.Run(
+      "route", {"-max_iterations", "1", "-bottom_layer", "metal1",
+                "-top_layer", "metal2"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("detailed_bound=1"), std::string::npos);
+  EXPECT_NE(result.payload.find("detailed_iterations=1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("violations="), std::string::npos);
+  // Duplicate and non-integer detailed options fail at the
+  // command layer, before any engine runs.
+  const CommandResult duplicate = shell.Run(
+      "route", {"-max_iterations", "1", "-max_iterations", "2"});
+  ASSERT_FALSE(duplicate.ok);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  const CommandResult not_a_number =
+      shell.Run("route", {"-max_iterations", "many"});
+  ASSERT_FALSE(not_a_number.ok);
+  EXPECT_EQ(not_a_number.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, RouteRejectsZeroIterations) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kRouteLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  const CommandResult result =
+      shell.Run("route", {"-max_iterations", "0"});
+  ASSERT_FALSE(result.ok);
 }
 
 TEST(CoreCommands, RouteFailsFastWithoutLiberty) {

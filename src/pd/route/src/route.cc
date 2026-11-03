@@ -19,6 +19,7 @@
 #include "sta/MinMax.hh"
 #include "sta/Scene.hh"
 #include "stt/SteinerTreeBuilder.h"
+#include "triton_route/TritonRoute.h"
 #include "utl/Logger.h"
 
 namespace eos::pd {
@@ -129,10 +130,46 @@ Status RunRoute(odb::dbDatabase* db, const RouteOptions& options,
         "route: minimum routing layer is above the maximum routing "
         "layer");
   }
+  if (options.max_detailed_iterations < 1) {
+    return InvalidState(
+        "route: detailed iteration bound starts at 1 (the loop must "
+        "run at least one rip-up and reroute pass)");
+  }
+  for (const std::string* name :
+       {&options.bottom_routing_layer, &options.top_routing_layer}) {
+    if (name->empty()) {
+      continue;
+    }
+    odb::dbTechLayer* layer = tech->findLayer(name->c_str());
+    if (layer == nullptr ||
+        layer->getType() != odb::dbTechLayerType::ROUTING) {
+      return InvalidState("route: detailed layer " + *name +
+                          " is not a routing layer in the technology");
+    }
+  }
   if (options.liberty_path.empty()) {
     return InvalidState(
         "route: no Liberty library (the engine's clock-net "
         "detection builds the STA graph and fails without one)");
+  }
+
+  // Re-route starts from the placed state: a previous run leaves
+  // guides from the global stage and wires from the detailed
+  // stage in the database, and the global router treats a net
+  // that already has a wire as routed, so it would report zero
+  // new routes on a second run. Strip both before the engine
+  // runs, so every run routes the same placed design. Supply
+  // and special nets are never routed here, so they keep their
+  // wires and guides.
+  for (odb::dbNet* net : block->getNets()) {
+    if (net->getSigType().isSupply() || net->isSpecial()) {
+      continue;
+    }
+    net->clearGuides();
+    odb::dbWire* wire = net->getWire();
+    if (wire != nullptr) {
+      odb::dbWire::destroy(wire);
+    }
   }
 
   utl::Logger logger;
@@ -265,12 +302,69 @@ Status RunRoute(odb::dbDatabase* db, const RouteOptions& options,
     }
 
     grt::DeleteGlobalRouter(grouter);
-    sta::Sta::setSta(nullptr);
 
     if (out.net_total_count > 0 && out.net_routed_count == 0) {
+      sta::Sta::setSta(nullptr);
       return InvalidState(
           "route: engine routed zero nets on a design that holds nets");
     }
+
+    // Detailed stage (P5): TritonRoute in single-step mode, driven
+    // by the EOS-owned rip-up and reroute loop. main() runs pin
+    // access, guide reading, region preparation, and track
+    // assignment, then initializes (but does not run) the detailed
+    // router; each stepDR is one rip-up and reroute pass. The first
+    // pass rips up everything and follows the guides; later passes
+    // repair DRC markers only, with the engine strategy's DRC
+    // entry parameters. The loop stops early at zero violations
+    // and stops at the bound otherwise; a nonzero count is
+    // reported, never failed on, and the report states whether
+    // the loop stopped at the bound. Distributed routing stays
+    // off: the runner passes a null distributed backend, and the
+    // drt port copies fail loudly on any distributed call (see
+    // src/pd/drt/PATCHES.md). The detailed router reads the
+    // technology, design, and guides from the database directly,
+    // so it needs no STA session of its own; the private STA
+    // session above stays alive until the end of this scope.
+    triton_route::TritonRoute detailed;
+    triton_route::ParamStruct params;
+    params.doPa = true;
+    params.singleStepDR = true;
+    params.verbose = 1;
+    params.enableViaGen = true;
+    if (!options.bottom_routing_layer.empty()) {
+      params.bottomRoutingLayer = options.bottom_routing_layer;
+    }
+    if (!options.top_routing_layer.empty()) {
+      params.topRoutingLayer = options.top_routing_layer;
+    }
+    detailed.setParams(params);
+    detailed.init(tcl_guard.interp, db, &logger, nullptr, &stt_builder);
+    detailed.main();
+    int iterations = 0;
+    while (iterations < options.max_detailed_iterations) {
+      if (iterations == 0) {
+        detailed.stepDR(7, 0, 3, 8, 0, 8, 0.95f, 1, true);
+      } else {
+        detailed.stepDR(7, 0, 8, 8, 32, 16, 0.95f, 0, false);
+      }
+      ++iterations;
+      if (detailed.getNumDRVs() == 0) {
+        break;
+      }
+    }
+    detailed.endFR();
+    // endFR recounts the markers after writing the routed design
+    // back to the database (FlexDR::end changes no markers, it only
+    // reports), so this count is the count of the written design.
+    out.violation_count = detailed.getNumDRVs();
+    out.detailed_iterations_used = iterations;
+    out.detailed_iteration_bound = options.max_detailed_iterations;
+    out.detailed_stopped_at_bound =
+        (out.violation_count > 0 &&
+         iterations >= options.max_detailed_iterations);
+
+    sta::Sta::setSta(nullptr);
     if (report != nullptr) {
       *report = out;
     }

@@ -1,14 +1,14 @@
 // route: the EOS-owned driver over the imported OpenROAD global
-// router (L4 engines).
+// router and detailed router (L4 engines).
 //
 // The runner operates on the live OpenDB database: the caller hands
-// it the database the session owns, and the engine mutates that
-// database in place (guide objects on every routed net, plus the
-// block congestion grid). It never copies the design through a
-// file. The imported engine code itself lives in the grt module
-// (P2 support import); this header is the only surface other
-// modules use. This unit imports no new engine: detailed routing,
-// rip-up and reroute, and DRC-clean loops are P5, not P4.
+// it the database the session owns, and the engines mutate that
+// database in place (guide objects on every routed net from the
+// global stage, plus the block congestion grid, then real wires
+// and vias from the detailed stage). It never copies the design
+// through a file. The imported engine code itself lives in the grt
+// module (P2 support import) and the drt module (P5 import); this
+// header is the only surface other modules use.
 //
 // Preconditions, defined precisely: the block must hold rows (a
 // floorplanned design, as for place and cts) and at least one
@@ -69,14 +69,25 @@ namespace eos::pd {
 
 using foundation::Status;
 
-// Options for one global routing run. A layer value of 0 means
-// "engine default" on that end of the range. liberty_path names
-// the Liberty library the engine's clock-net detection needs; an
-// empty path fails fast.
+// Options for one routing run: global routing followed by detailed
+// routing. A layer value of 0 means "engine default" on that end of
+// the range. liberty_path names the Liberty library the engine's
+// clock-net detection needs; an empty path fails fast.
+// max_detailed_iterations bounds the EOS-owned rip-up and reroute
+// loop of the detailed stage (see RunRoute): the loop stops early
+// when the violation count reaches zero, and stops at the bound
+// otherwise, reporting that it did. Values below 1 fail fast.
+// bottom_routing_layer and top_routing_layer name the detailed
+// stage's layer range; empty means the engine default on that end.
+// A named layer that is not a routing layer in the technology fails
+// fast before either engine runs.
 struct RouteOptions {
   int min_routing_layer = 0;
   int max_routing_layer = 0;
   std::string liberty_path;
+  int max_detailed_iterations = 64;
+  std::string bottom_routing_layer;
+  std::string top_routing_layer;
 };
 
 // Per-layer congestion sums, in the layer's own direction
@@ -91,26 +102,47 @@ struct LayerCongestion {
   long long overflow = 0;
 };
 
-// Measured outcome of a run.
+// Measured outcome of a run. The global-stage fields (routed nets,
+// guides, congestion) are as before; the detailed-stage fields are
+// filled by the detailed stage on every successful run:
+// violation_count is the DRC marker count the detailed stage leaves
+// in the design (zero means DRC-clean on the rules the engine
+// checks); detailed_iterations_used counts the rip-up and reroute
+// steps actually run; detailed_iteration_bound echoes the bound
+// the run was given; detailed_stopped_at_bound is true exactly
+// when the loop ran out of iterations with violations remaining
+// (it is false when the loop stopped early at zero violations, and
+// the report states which case happened through this flag).
 struct RouteReport {
   int net_total_count = 0;
   int net_routed_count = 0;
   int guide_count = 0;
   long long total_overflow = 0;
   std::vector<LayerCongestion> per_layer;
+  int violation_count = 0;
+  int detailed_iterations_used = 0;
+  int detailed_iteration_bound = 0;
+  bool detailed_stopped_at_bound = false;
 };
 
 // Runs global routing (GlobalRouter::globalRoute with guides saved
-// to the database) on the block of db, and fills report. Fails
+// to the database) followed by detailed routing (TritonRoute in
+// single-step mode, driven by the EOS-owned rip-up and reroute
+// loop described above) on the block of db, and fills report. Fails
 // with kInvalidState when the database holds no technology data or
 // no mapped design (no top block), when the block holds no rows (an
 // un-floorplanned design), when no instance is placed (an
-// unplaced design), when the layer range is invalid, when no
+// unplaced design), when the layer range is invalid, when the
+// detailed iteration bound is below 1, when a named detailed
+// layer is not a routing layer in the technology, when no
 // Liberty library path is given or the file cannot be read, and
 // when the engine routes zero nets on a design that holds nets. Engine
 // logger errors surface as kInvalidState with the engine's
 // message; the database is left as the engine left it on such a
-// failure, which the caller reports rather than hides.
+// failure, which the caller reports rather than hides. Congestion
+// is reported, never failed on; a nonzero violation count is
+// reported, never failed on: the loop's job is to state the count
+// and whether it stopped at the bound.
 Status RunRoute(odb::dbDatabase* db, const RouteOptions& options,
                 RouteReport* report);
 

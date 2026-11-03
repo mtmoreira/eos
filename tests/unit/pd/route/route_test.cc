@@ -1,5 +1,5 @@
 // Unit tests: pd/route (the EOS runner over the in-tree global
-// router).
+// router and detailed router).
 //
 // Fixture shape mirrors the place tests: one site, two routing
 // layers, one two-pin macro in LEF; two placed instances, two
@@ -60,14 +60,26 @@ LAYER metal1
   TYPE ROUTING ;
   DIRECTION HORIZONTAL ;
   PITCH 0.05 ;
-  WIDTH 0.065 ;
+  WIDTH 0.06 ;
 END metal1
+LAYER via1
+  TYPE CUT ;
+  WIDTH 0.06 ;
+END via1
 LAYER metal2
   TYPE ROUTING ;
   DIRECTION VERTICAL ;
   PITCH 0.05 ;
-  WIDTH 0.065 ;
+  WIDTH 0.06 ;
 END metal2
+VIA VIA12
+  LAYER metal1 ;
+    RECT -0.05 -0.05 0.05 0.05 ;
+  LAYER via1 ;
+    RECT -0.03 -0.03 0.03 0.03 ;
+  LAYER metal2 ;
+    RECT -0.05 -0.05 0.05 0.05 ;
+END VIA12
 MACRO BUFX2
   CLASS CORE ;
   ORIGIN 0 0 ;
@@ -78,7 +90,7 @@ MACRO BUFX2
     USE SIGNAL ;
     PORT
       LAYER metal1 ;
-        RECT -0.05 -0.05 0.05 0.05 ;
+        RECT 0.05 0.05 0.25 0.25 ;
     END
   END A
   PIN Y
@@ -86,7 +98,7 @@ MACRO BUFX2
     USE SIGNAL ;
     PORT
       LAYER metal1 ;
-        RECT 0.35 -0.05 0.45 0.05 ;
+        RECT 0.26 0.05 0.46 0.25 ;
     END
   END Y
 END BUFX2
@@ -264,6 +276,135 @@ TEST(Route, RoutesEveryNetAndReportsCongestion) {
     EXPECT_EQ(layer.overflow, 0);
   }
   EXPECT_EQ(report.total_overflow, 0);
+}
+
+TEST(Route, DetailedStageWritesWiresAndReportsViolations) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.liberty_path = dir.Write("test.lib", kLiberty);
+  RouteReport report;
+  const foundation::Status status =
+      RunRoute(db.RawDatabase(), options, &report);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(report.net_routed_count, 3);
+  // The detailed stage ran: the bound is echoed, at least one
+  // rip-up and reroute pass ran, and the violation count is
+  // stated (zero on this clean fixture means DRC-clean on the
+  // rules the engine checks).
+  EXPECT_EQ(report.detailed_iteration_bound, 64);
+  EXPECT_GE(report.detailed_iterations_used, 1);
+  EXPECT_LE(report.detailed_iterations_used,
+            report.detailed_iteration_bound);
+  EXPECT_GE(report.violation_count, 0);
+  EXPECT_EQ(report.detailed_stopped_at_bound,
+            report.violation_count > 0 &&
+                report.detailed_iterations_used ==
+                    report.detailed_iteration_bound);
+  // The detailed stage wrote real wires back into the database.
+  odb::dbBlock* block = db.RawDatabase()->getChip()->getBlock();
+  for (odb::dbNet* net : block->getNets()) {
+    EXPECT_NE(net->getWire(), nullptr)
+        << "net " << net->getConstName() << " has no detailed wire";
+  }
+}
+
+TEST(Route, DetailedBoundOfOneRunsExactlyOnePass) {
+  // With the bound at 1 the loop runs exactly one pass whatever
+  // the outcome: it stops at the bound exactly when violations
+  // remain, and stops early (same single pass, flag false) when
+  // the first pass already reaches zero violations.
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.max_detailed_iterations = 1;
+  options.liberty_path = dir.Write("test.lib", kLiberty);
+  RouteReport report;
+  ASSERT_TRUE(RunRoute(db.RawDatabase(), options, &report).ok());
+  EXPECT_EQ(report.detailed_iterations_used, 1);
+  EXPECT_EQ(report.detailed_iteration_bound, 1);
+  EXPECT_EQ(report.detailed_stopped_at_bound,
+            report.violation_count > 0);
+}
+
+TEST(Route, ExplicitDetailedLayerRangeRoutes) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.bottom_routing_layer = "metal1";
+  options.top_routing_layer = "metal2";
+  options.liberty_path = dir.Write("test.lib", kLiberty);
+  RouteReport report;
+  ASSERT_TRUE(RunRoute(db.RawDatabase(), options, &report).ok())
+      << "explicit metal1..metal2 detailed range must route";
+  EXPECT_EQ(report.net_routed_count, 3);
+  EXPECT_GE(report.violation_count, 0);
+}
+
+TEST(Route, UnknownDetailedLayerFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.bottom_routing_layer = "metal9";
+  RouteReport report;
+  const foundation::Status status =
+      RunRoute(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+  EXPECT_NE(status.message().find("routing layer"), std::string::npos);
+}
+
+TEST(Route, NonRoutingDetailedLayerFailsFast) {
+  // via1 is a CUT layer, not a routing layer, so naming it as a
+  // detailed layer bound must fail fast before either engine runs.
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.top_routing_layer = "via1";
+  RouteReport report;
+  const foundation::Status status =
+      RunRoute(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+}
+
+TEST(Route, ZeroDetailedIterationsFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.max_detailed_iterations = 0;
+  RouteReport report;
+  const foundation::Status status =
+      RunRoute(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+  EXPECT_NE(status.message().find("iteration bound"), std::string::npos);
+}
+
+TEST(Route, NegativeDetailedIterationsFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.max_detailed_iterations = -1;
+  RouteReport report;
+  const foundation::Status status =
+      RunRoute(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
 }
 
 TEST(Route, SecondRunSucceeds) {
