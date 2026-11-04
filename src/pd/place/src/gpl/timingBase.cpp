@@ -194,7 +194,7 @@ bool TimingBase::updateGNetWeights(float overflow)
                  1,
                  "net:{} slack:{} weight:{}",
                  gNet->net()->dbNet()->getConstName(),
-                 net_slack,
+                 net_slack.mean(),
                  gNet->totalWeight());
     }
   }

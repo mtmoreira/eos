@@ -126,3 +126,34 @@ this was the only logger or fmt call passing a sta::Delay or
 other STA class value; every other formatted argument is an
 integer, float, double, size, string, or coordinate, all
 fmt-formattable.
+
+## 6. gpl timingBase.cpp: format Delay mean in the net-slack debug print
+
+Mac-only build failure (owner's build-fresh eos-gui rebuild of
+main 2d69060): Homebrew fmt rejects the debugPrint call at
+timingBase.cpp line 191, which passes net_slack, a sta::Delay
+from resizeNetSlack, as the slack:{} argument, because Delay has
+no fmt formatter (same
+fmt::detail::type_is_unformattable_for<sta::Delay, char>
+diagnostic as section 5). The port copy passes net_slack.mean()
+instead of net_slack. Output is identical: Delay's own operator
+float() returns mean(). No change to the format string or the
+other arguments.
+Correction to section 5: its sweep claim ("the only logger or
+fmt call passing a sta::Delay") was wrong. It covered direct
+log_ calls but missed this site because it travels through the
+debugPrint macro (Logger.h expands debugPrint to
+logger->debug), not a direct log call.
+Sweep for this fix (whole place module, gpl, dpl, runner,
+headers; direct log_ calls, logger calls, fmt::format, and
+debugPrint macro sites; 159 sites inventoried): Delay, Slack,
+and Arrival values (Arrival is a Delay alias) occur only in
+timingBase.cpp, from resizeNetSlack, and both format arguments
+are now .mean() (lines 165 and 191). The replace.cpp Slack hit
+is the resizeSlackPreamble() method name, not a value; mbff.cpp
+uses sta:: pointers only and its log arguments are ints, floats,
+strings, and names; place.cc constructs the STA session only and
+has no format call; no place header has a format call.
+Corroboration: the owner's Mac build compiled every other place
+translation unit with only the timingBase error, so no other
+unformattable argument hides in the module.
