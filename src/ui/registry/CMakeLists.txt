@@ -17,6 +17,7 @@ target_link_libraries(eda_ui_registry
          eda_pd_place
          eda_pd_cts
          eda_pd_route
+         eda_pd_finish
          eda_pv_extract
          eda_synth_abc
          "$<LINK_LIBRARY:WHOLE_ARCHIVE,eda_synth_yosys>")

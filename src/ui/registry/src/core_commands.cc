@@ -8,6 +8,7 @@
 
 #include "eos/analysis/sta.h"
 #include "eos/pd/cts.h"
+#include "eos/pd/finish.h"
 #include "eos/pd/floorplan.h"
 #include "eos/pd/place.h"
 #include "eos/pd/route.h"
@@ -2201,6 +2202,126 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
         }
         return CommandResult::Ok(payload);
+      });
+
+  add("finish", "finish [-pdn] [-fill_config <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        // Argument shape first, mirroring extract_parasitics: -pdn
+        // is a bare flag, -fill_config takes one value, duplicates
+        // and unknown options fail here, before any session state
+        // is touched, so the registry-level tests can exercise
+        // them on an empty context.
+        pd::FinishOptions options;
+        bool pdn_seen = false;
+        bool fill_config_seen = false;
+        for (size_t i = 0; i < args.size(); ++i) {
+          const std::string& flag = args[i];
+          if (flag == "-pdn") {
+            if (pdn_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -pdn given twice");
+            }
+            pdn_seen = true;
+            options.with_pdn = true;
+            continue;
+          }
+          if (flag == "-fill_config") {
+            if (fill_config_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -fill_config given twice");
+            }
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -fill_config needs a value");
+            }
+            fill_config_seen = true;
+            options.fill_config_path = args[++i];
+            continue;
+          }
+          if (!flag.empty() && flag[0] == '-') {
+            return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                       "unknown finish option: " + flag);
+          }
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::finish [-pdn] [-fill_config <path>]");
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (!ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no mapped design: the imported database holds no top "
+              "block");
+        }
+        pd::FinishReport report;
+        const foundation::Status status = pd::RunFinish(
+            ctx.timing.odb->RawDatabase(), options, &report);
+        if (!status.ok()) return FromStatus(status);
+        return CommandResult::Ok(
+            "fillers=" + std::to_string(report.filler_count) +
+            " grid_shapes=" + std::to_string(report.grid_shape_count) +
+            " metal_fills=" + std::to_string(report.metal_fill_count) +
+            " pdn=" + std::string(report.with_pdn ? "true" : "false"));
+      });
+
+  add("write_gds", "write_gds <path>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        // Exactly one positional, mirroring extract_parasitics:
+        // unknown options, a second positional, and a missing path
+        // fail here, before any session state is touched.
+        std::string path;
+        for (const std::string& flag : args) {
+          if (!flag.empty() && flag[0] == '-') {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown write_gds option: " + flag);
+          }
+          if (!path.empty()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "usage: eos::write_gds <path>");
+          }
+          path = flag;
+        }
+        if (path.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration, "usage: eos::write_gds <path>");
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (!ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no mapped design: the imported database holds no top "
+              "block");
+        }
+        pd::WriteGdsOptions options;
+        options.path = path;
+        pd::WriteGdsReport report;
+        const foundation::Status status = pd::WriteGds(
+            ctx.timing.odb->RawDatabase(), options, &report);
+        if (!status.ok()) return FromStatus(status);
+        return CommandResult::Ok(
+            "gds=" + report.path +
+            " size=" + std::to_string(report.size_bytes) +
+            " instances=" + std::to_string(report.instance_count) +
+            " structures=" + std::to_string(report.structure_count));
       });
 
   add("read_liberty", "read_liberty <corner> <path>",

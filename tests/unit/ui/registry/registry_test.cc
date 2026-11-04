@@ -62,8 +62,10 @@ TEST(Registry, CoreSetIsComplete) {
   // floorplan; U3 adds synth_blocks; U4 adds synth_schematic;
   // U5 adds synth_stats; PR4 adds repair_timing and set_wire_rc;
   // P2 adds place; P3 adds cts; P4 adds route; P6 adds
-  // extract_parasitics.
-  EXPECT_EQ(shell.registry.Names().size(), 57u);
+  // extract_parasitics; P7 adds finish and write_gds.
+  EXPECT_EQ(shell.registry.Names().size(), 59u);
+  EXPECT_NE(shell.registry.Find("finish"), nullptr);
+  EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
@@ -552,6 +554,82 @@ MACRO BUFX2
     END
   END Y
 END BUFX2
+END LIBRARY
+)LEF";
+
+// P7: the route fixture plus filler masters (LEF CLASS CORE
+// SPACER), so eos::finish has filler cells to place. The DEF stays
+// kFloorplanDef: plain finish needs no supply nets, and the -pdn
+// grid path is covered by the pd.finish unit tests.
+const char kFinishLef[] = R"LEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MANUFACTURINGGRID 0.005 ;
+SITE core
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END core
+LAYER metal1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.19 ;
+  WIDTH 0.06 ;
+END metal1
+LAYER via1
+  TYPE CUT ;
+  WIDTH 0.06 ;
+END via1
+LAYER metal2
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.19 ;
+  WIDTH 0.06 ;
+END metal2
+VIA VIA12
+  LAYER metal1 ;
+    RECT -0.05 -0.05 0.05 0.05 ;
+  LAYER via1 ;
+    RECT -0.03 -0.03 0.03 0.03 ;
+  LAYER metal2 ;
+    RECT -0.05 -0.05 0.05 0.05 ;
+END VIA12
+MACRO BUFX2
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.05 0.05 0.25 0.25 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.26 0.05 0.46 0.25 ;
+    END
+  END Y
+END BUFX2
+MACRO FILL1
+  CLASS CORE SPACER ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+END FILL1
+MACRO FILL2
+  CLASS CORE SPACER ;
+  ORIGIN 0 0 ;
+  SIZE 0.92 BY 2.72 ;
+  SITE core ;
+END FILL2
 END LIBRARY
 )LEF";
 
@@ -3448,6 +3526,89 @@ TEST(CommandContext, HasDesignTracksCreateDesign) {
   EXPECT_FALSE(shell.ctx.HasDesign());
   ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
   EXPECT_TRUE(shell.ctx.HasDesign());
+}
+
+// P7: eos::finish runs filler insertion on the routed design and
+// eos::write_gds streams it out, with the finish-before-write
+// ordering enforced at the command layer. The engine run itself is
+// covered by the pd.finish unit tests; these tests pin the command
+// layer: the happy path, the write-before-finish failure, and the
+// argument-shape failures on an empty context.
+TEST(CoreCommands, FinishAndWriteGdsRunOnRoutedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kFinishLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  ASSERT_TRUE(shell.Run("route", {}).ok);
+  // Stream-out before finish fails fast with the finish message.
+  const CommandResult early =
+      shell.Run("write_gds", {dir.Path("early.gds")});
+  ASSERT_FALSE(early.ok);
+  EXPECT_NE(early.message.find("finish has not run"),
+            std::string::npos);
+  const CommandResult finished = shell.Run("finish", {});
+  ASSERT_TRUE(finished.ok) << finished.message;
+  EXPECT_NE(finished.payload.find("fillers="), std::string::npos);
+  EXPECT_NE(finished.payload.find("pdn=false"), std::string::npos);
+  const CommandResult written =
+      shell.Run("write_gds", {dir.Path("top.gds")});
+  ASSERT_TRUE(written.ok) << written.message;
+  EXPECT_NE(written.payload.find("gds="), std::string::npos);
+  EXPECT_NE(written.payload.find("size="), std::string::npos);
+  EXPECT_NE(written.payload.find("instances="), std::string::npos);
+  EXPECT_NE(written.payload.find("structures="), std::string::npos);
+}
+
+TEST(CoreCommands, FinishRejectsBadOptions) {
+  Shell shell;
+  const CommandResult unknown = shell.Run("finish", {"-bogus"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(unknown.message.find("unknown finish option"),
+            std::string::npos);
+  const CommandResult duplicate = shell.Run("finish", {"-pdn", "-pdn"});
+  ASSERT_FALSE(duplicate.ok);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(duplicate.message.find("given twice"), std::string::npos);
+  const CommandResult missing_value =
+      shell.Run("finish", {"-fill_config"});
+  ASSERT_FALSE(missing_value.ok);
+  EXPECT_EQ(missing_value.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(missing_value.message.find("needs a value"),
+            std::string::npos);
+  const CommandResult positional =
+      shell.Run("finish", {"stray"});
+  ASSERT_FALSE(positional.ok);
+  EXPECT_EQ(positional.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(positional.message.find("usage"), std::string::npos);
+}
+
+TEST(CoreCommands, WriteGdsRejectsBadArguments) {
+  Shell shell;
+  const CommandResult no_args = shell.Run("write_gds", {});
+  ASSERT_FALSE(no_args.ok);
+  EXPECT_EQ(no_args.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(no_args.message.find("usage"), std::string::npos);
+  const CommandResult two_positional =
+      shell.Run("write_gds", {"a.gds", "b.gds"});
+  ASSERT_FALSE(two_positional.ok);
+  EXPECT_EQ(two_positional.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(two_positional.message.find("usage"), std::string::npos);
+  const CommandResult unknown =
+      shell.Run("write_gds", {"-bogus"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(unknown.message.find("unknown write_gds option"),
+            std::string::npos);
 }
 
 TEST(CoreCommands, SynthStatsFailsFastWhenNotElaborated) {
