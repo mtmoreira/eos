@@ -150,6 +150,12 @@ target_link_libraries(eda_pv_extract_unit_test
           eda_analysis_timing eda_db_odb GTest::gtest GTest::gtest_main)
 add_test(NAME pv.extract COMMAND eda_pv_extract_unit_test)
 
+add_executable(eda_pd_finish_unit_test pd/finish/finish_test.cc)
+target_link_libraries(eda_pd_finish_unit_test
+  PRIVATE eda_pd_finish eda_pd_route eda_pd_place eda_pd_floorplan
+          eda_db_odb GTest::gtest GTest::gtest_main)
+add_test(NAME pd.finish COMMAND eda_pd_finish_unit_test)
+
 add_executable(eda_pd_dbsta_unit_test pd/dbsta/dbsta_test.cc)
 target_link_libraries(eda_pd_dbsta_unit_test
   PRIVATE eda_pd_dbsta eda_db_odb GTest::gtest GTest::gtest_main)

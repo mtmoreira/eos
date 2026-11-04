@@ -255,11 +255,56 @@
         ]
       }
     },
+    "fin": {
+      "depends_on": [
+        "dbsta",
+        "odb"
+      ],
+      "layer": "L4",
+      "path": "src/pd/fin",
+      "via": {
+        "dbsta": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
     "finish": {
-      "depends_on": [],
+      "depends_on": [
+        "errors",
+        "fin",
+        "odb",
+        "pdn",
+        "place"
+      ],
       "layer": "L4",
       "path": "src/pd/finish",
-      "via": {}
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ],
+        "fin": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ],
+        "pdn": [
+          "cmake-link",
+          "include"
+        ],
+        "place": [
+          "cmake-link",
+          "include"
+        ]
+      }
     },
     "floorplan": {
       "depends_on": [
@@ -544,6 +589,24 @@
       "path": "src/analysis/parasitics",
       "via": {}
     },
+    "pdn": {
+      "depends_on": [
+        "dbsta",
+        "odb"
+      ],
+      "layer": "L4",
+      "path": "src/pd/pdn",
+      "via": {
+        "dbsta": [
+          "cmake-link",
+          "include"
+        ],
+        "odb": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
     "pdr": {
       "depends_on": [
         "odb"
@@ -625,6 +688,7 @@
         "design",
         "errors",
         "extract",
+        "finish",
         "floorplan",
         "flow",
         "ids",
@@ -671,6 +735,10 @@
           "include"
         ],
         "extract": [
+          "cmake-link",
+          "include"
+        ],
+        "finish": [
           "cmake-link",
           "include"
         ],
@@ -1184,6 +1252,18 @@
       ],
       "sources": [
         "tests/unit/pd/dbsta/dbsta_test.cc"
+      ]
+    },
+    "pd.finish": {
+      "modules": [
+        "finish",
+        "floorplan",
+        "odb",
+        "place",
+        "route"
+      ],
+      "sources": [
+        "tests/unit/pd/finish/finish_test.cc"
       ]
     },
     "pd.floorplan": {

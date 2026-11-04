@@ -275,7 +275,19 @@ modules:
     layer: L4
     path: src/pd/finish
     target: eda_pd_finish
-    adopted: false
+    adopted: true
+  - name: fin
+    layer: L4
+    path: src/pd/fin
+    target: eda_pd_fin
+    adopted: true
+    upstream: OpenROAD fin (Finale density fill) at ead3236, P7
+  - name: pdn
+    layer: L4
+    path: src/pd/pdn
+    target: eda_pd_pdn
+    adopted: true
+    upstream: OpenROAD pdn (PdnGen) at ead3236, P7 support import for finish
   - name: drc
     layer: L4
     path: src/pv/drc
