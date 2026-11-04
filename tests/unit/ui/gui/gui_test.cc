@@ -1397,4 +1397,59 @@ TEST(GuiSessionView, CheckpointNameIgnoresFailures) {
   EXPECT_EQ(view.CheckpointName(), "/tmp/a.ckpt");
 }
 
+TEST(ConsoleHistory, EmptyHistoryNavigatesNowhere) {
+  eos::ui::ConsoleHistory history;
+  EXPECT_FALSE(history.Up("draft").has_value());
+  EXPECT_FALSE(history.Down().has_value());
+}
+
+TEST(ConsoleHistory, UpDownCyclesAndRestoresDraft) {
+  eos::ui::ConsoleHistory history;
+  history.Add("create_scenario func_tt func tt estimate");
+  history.Add("elaborate");
+  EXPECT_EQ(history.Up("draft").value_or(""), "elaborate");
+  EXPECT_EQ(history.Up("draft").value_or(""), "create_scenario func_tt func tt estimate");
+  EXPECT_EQ(history.Up("draft").value_or(""), "create_scenario func_tt func tt estimate");
+  EXPECT_EQ(history.Down().value_or(""), "elaborate");
+  EXPECT_EQ(history.Down().value_or(""), "draft");
+  EXPECT_FALSE(history.Down().has_value());
+}
+
+TEST(ConsoleHistory, AddIgnoresEmptyAndConsecutiveDuplicates) {
+  eos::ui::ConsoleHistory history;
+  history.Add("");
+  history.Add("elaborate");
+  history.Add("elaborate");
+  EXPECT_EQ(history.Up("draft").value_or(""), "elaborate");
+  EXPECT_EQ(history.Up("draft").value_or(""), "elaborate");
+  history.Add("synth_generic");
+  EXPECT_EQ(history.Up("draft").value_or(""), "synth_generic");
+  EXPECT_EQ(history.Up("draft").value_or(""), "elaborate");
+}
+
+TEST(ConsoleCompletion, MatchesBarePrefix) {
+  const std::vector<std::string> names = {"create_scenario", "elaborate",
+                                          "read_verilog", "synth_generic"};
+  const std::vector<std::string> got =
+      eos::ui::CompleteConsoleCommand(names, "ela");
+  ASSERT_EQ(got.size(), 1u);
+  EXPECT_EQ(got[0], "elaborate");
+}
+
+TEST(ConsoleCompletion, KeepsEosPrefix) {
+  const std::vector<std::string> names = {"create_scenario", "elaborate",
+                                          "read_verilog", "synth_generic"};
+  const std::vector<std::string> got =
+      eos::ui::CompleteConsoleCommand(names, "eos::syn");
+  ASSERT_EQ(got.size(), 1u);
+  EXPECT_EQ(got[0], "eos::synth_generic");
+}
+
+TEST(ConsoleCompletion, EmptyWordMatchesAllAndArgumentsMatchNone) {
+  const std::vector<std::string> names = {"elaborate", "read_verilog"};
+  EXPECT_EQ(eos::ui::CompleteConsoleCommand(names, "").size(), 2u);
+  EXPECT_TRUE(eos::ui::CompleteConsoleCommand(names, "elaborate foo").empty());
+  EXPECT_TRUE(eos::ui::CompleteConsoleCommand(names, "zzz").empty());
+}
+
 }  // namespace

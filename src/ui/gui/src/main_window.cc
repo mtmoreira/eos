@@ -2,17 +2,23 @@
 #include "main_window.h"
 
 #include <QApplication>
+#include <QAbstractItemView>
 #include <QCloseEvent>
+#include <QCompleter>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSplitter>
+#include <QStringListModel>
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "eos/ui/gui.h"
 #include "block_diagram.h"
@@ -109,14 +115,34 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   // registry command per Return, dispatches it through the
   // session, and refreshes the window, so each effect is visible
   // live. The entry takes registry commands only, not Tcl; the
-  // terminal REPL keeps full Tcl.
+  // terminal REPL keeps full Tcl. Up and down cycle the entry's
+  // own command history; Tab completes the registry command
+  // name, with a popup when several names match.
   console_ = new QPlainTextEdit(root);
   console_->setReadOnly(true);
   layout->addWidget(console_);
   entry_ = new QLineEdit(root);
   entry_->setPlaceholderText("eos::elaborate");
+  entry_completer_ = new QCompleter(entry_);
+  entry_completion_model_ = new QStringListModel(entry_completer_);
+  entry_completer_->setModel(entry_completion_model_);
+  entry_completer_->setCompletionMode(QCompleter::UnfilteredPopupCompletion);
+  entry_completer_->setWidget(entry_);
+  connect(entry_completer_,
+          QOverload<const QString&>::of(&QCompleter::activated),
+          [this](const QString& text) { entry_->setText(text); });
+  entry_->installEventFilter(this);
+  connect(entry_, &QLineEdit::textChanged, [this]() {
+    // A typed character invalidates the list Tab computed, so
+    // the popup never offers stale candidates.
+    if (entry_completer_->popup()->isVisible()) {
+      entry_completer_->popup()->hide();
+    }
+  });
   connect(entry_, &QLineEdit::returnPressed, [this]() {
-    view_.DispatchEntry(entry_->text().toStdString());
+    const std::string text = entry_->text().toStdString();
+    entry_history_.Add(text);
+    view_.DispatchEntry(text);
     entry_->clear();
     Refresh();
   });
@@ -146,6 +172,46 @@ void MainWindow::closeEvent(QCloseEvent* event) {
   }
   hide();
   event->ignore();
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+  if (watched != entry_ || event->type() != QEvent::KeyPress) {
+    return QMainWindow::eventFilter(watched, event);
+  }
+  // While the completion popup is open, its own keys navigate
+  // and accept; this filter stays out of the way.
+  if (entry_completer_->popup()->isVisible()) {
+    return QMainWindow::eventFilter(watched, event);
+  }
+  const auto* key = static_cast<QKeyEvent*>(event);
+  if (key->key() == Qt::Key_Up) {
+    std::optional<std::string> older =
+        entry_history_.Up(entry_->text().toStdString());
+    if (older.has_value()) entry_->setText(QString::fromStdString(*older));
+    return true;
+  }
+  if (key->key() == Qt::Key_Down) {
+    std::optional<std::string> newer = entry_history_.Down();
+    if (newer.has_value()) entry_->setText(QString::fromStdString(*newer));
+    return true;
+  }
+  if (key->key() == Qt::Key_Tab) {
+    const std::vector<std::string> candidates = CompleteConsoleCommand(
+        view_.CommandNames(), entry_->text().toStdString());
+    if (candidates.empty()) return true;
+    if (candidates.size() == 1) {
+      entry_->setText(QString::fromStdString(candidates[0]));
+      return true;
+    }
+    QStringList list;
+    for (const std::string& candidate : candidates) {
+      list << QString::fromStdString(candidate);
+    }
+    entry_completion_model_->setStringList(list);
+    entry_completer_->complete();
+    return true;
+  }
+  return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::Refresh() {

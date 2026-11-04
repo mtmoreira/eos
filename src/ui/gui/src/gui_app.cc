@@ -9,9 +9,10 @@
 // order and no two commands ever run at once. Closing the
 // window hides it (quit-on-last-window-closed is off); typing
 // show in the terminal shows it again on the same session. The
-// terminal REPL uses plain line input: line editing, history,
-// and tab completion stay in the eos CLI, whose linenoise reader
-// is private to the tcl module.
+// terminal REPL reads through the Tcl shell's interactive line
+// reader, so it has the same linenoise editing, history, and
+// tab completion as the plain eos CLI, sharing .eos_history in
+// the launch directory.
 #include <QApplication>
 #include <QIcon>
 #include <QMetaObject>
@@ -19,12 +20,10 @@
 
 #include <cstdio>
 #include <future>
-#include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
-
-#include <unistd.h>
 
 #include "eos/ui/gui.h"
 #include "eos/ui/tcl_shell.h"
@@ -67,14 +66,15 @@ int RunGui(int argc, char** argv, CommandRegistry& registry,
   std::thread repl;
   if (shell != nullptr) {
     repl = std::thread([shell, &window]() {
-      const bool tty = isatty(STDIN_FILENO) != 0;
-      std::string line;
+      shell->InitInteractiveHistory();
       for (;;) {
-        if (tty) {
-          std::fputs("eos> ", stdout);
-          std::fflush(stdout);
-        }
-        if (!std::getline(std::cin, line)) break;
+        // Linenoise prints the prompt on a terminal and reads
+        // plainly with no prompt on a pipe, so piped runs keep
+        // working exactly as before.
+        std::optional<std::string> maybe_line =
+            shell->ReadInteractiveLine("eos> ");
+        if (!maybe_line.has_value()) break;
+        const std::string line = *maybe_line;
         const std::string trimmed = Trim(line);
         if (trimmed == "show") {
           QMetaObject::invokeMethod(
