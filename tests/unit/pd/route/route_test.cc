@@ -443,6 +443,101 @@ TEST(Route, ExplicitFullLayerRangeRoutes) {
   ASSERT_EQ(report.per_layer.size(), 2u);
 }
 
+// P8: a single-layer global range (min equals max) is accepted
+// by the runner's range checks but fails in the global router:
+// metal1 is horizontal only, so a net needing a vertical edge
+// hits GRT-0229 (vertical edge usage over a zero limit) and the
+// runner surfaces it as an engine failure. A routable range must
+// span both directions; this test pins the single-direction
+// failure mode rather than a success the engine cannot deliver.
+TEST(Route, SingleLayerRangeFailsInEngine) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.min_routing_layer = 1;
+  options.max_routing_layer = 1;
+  options.liberty_path = dir.Write("test.lib", kLiberty);
+  RouteReport report;
+  const foundation::Status status =
+      RunRoute(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+}
+
+// P8: a minimum layer with the default maximum fails the same
+// way in the other direction: with min 2 only the vertical layer
+// is available, so a net needing a horizontal edge hits GRT-0228
+// (horizontal edge usage over a zero limit).
+TEST(Route, MinLayerOnlyFailsInEngine) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.min_routing_layer = 2;
+  options.liberty_path = dir.Write("test.lib", kLiberty);
+  RouteReport report;
+  const foundation::Status status =
+      RunRoute(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+}
+
+// P8: a bottom detailed layer with the default top is a valid
+// combination distinct from the explicit both-ends range.
+TEST(Route, BottomLayerOnlyRoutes) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.bottom_routing_layer = "metal1";
+  options.liberty_path = dir.Write("test.lib", kLiberty);
+  RouteReport report;
+  ASSERT_TRUE(RunRoute(db.RawDatabase(), options, &report).ok())
+      << "bottom-only detailed range must route";
+  EXPECT_EQ(report.net_routed_count, 3);
+  EXPECT_GE(report.violation_count, 0);
+}
+
+// P8: an unreadable Liberty path is a distinct failure from an
+// empty path (NoLibertyFailsFast). As in cts, the STA reader
+// throws on a missing file, so the run fails fast through the
+// runner's engine-failure path; the test pins the fail-fast and
+// the code, not a message substring.
+TEST(Route, UnreadableLibertyFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.liberty_path = "/nonexistent/eos-route.lib";
+  RouteReport report;
+  const foundation::Status status =
+      RunRoute(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+}
+
+// P8: a negative maximum layer fails fast on the same range
+// branch as a negative minimum (NegativeLayerFailsFast covers
+// the minimum side only).
+TEST(Route, NegativeMaxLayerFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  RouteOptions options;
+  options.max_routing_layer = -1;
+  RouteReport report;
+  const foundation::Status status =
+      RunRoute(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+}
+
 TEST(Route, NoDatabaseFailsFast) {
   RouteOptions options;
   RouteReport report;

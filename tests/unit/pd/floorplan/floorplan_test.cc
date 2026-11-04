@@ -258,5 +258,55 @@ TEST(Floorplan, EmptyDieAreaFailsFast) {
   EXPECT_EQ(status.code(), ErrorCode::kInvalidArgument);
 }
 
+// P8: an inverted die area (upper below lower) is empty by the
+// same IsEmpty rule as a zero-size area, but it is a distinct
+// input shape from the zero-size case above.
+TEST(Floorplan, InvertedDieAreaFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanOptions options;
+  options.has_die_area = true;
+  options.die_area = {10000, 10000, 0, 0};
+  FloorplanReport report;
+  const foundation::Status status =
+      RunFloorplan(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidArgument);
+}
+
+// P8: an explicit empty core area fails fast even when the die
+// area is valid; the core check is a separate branch from the
+// die check.
+TEST(Floorplan, EmptyCoreAreaFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanOptions options;
+  options.has_die_area = true;
+  options.die_area = {0, 0, 10000, 10000};
+  options.has_core_area = true;
+  options.core_area = {0, 0, 0, 0};
+  FloorplanReport report;
+  const foundation::Status status =
+      RunFloorplan(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidArgument);
+}
+
+// P8: with no explicit core area the report's core area is the
+// die area (the default-areas test above asserts the die area
+// only, not this defaulting rule).
+TEST(Floorplan, DefaultCoreAreaEqualsDieArea) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanOptions options;
+  FloorplanReport report;
+  ASSERT_TRUE(RunFloorplan(db.RawDatabase(), options, &report).ok());
+  EXPECT_EQ(report.core_area, report.die_area);
+  EXPECT_EQ(report.core_area, (std::array<int, 4>{0, 0, 10000, 10000}));
+}
+
 }  // namespace
 }  // namespace eos::pd
