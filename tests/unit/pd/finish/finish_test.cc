@@ -720,6 +720,96 @@ TEST(WriteGds, BeforeFinishFailsFast) {
   EXPECT_NE(status.message().find("finish"), std::string::npos);
 }
 
+// P8: finish with both options together is a valid combination
+// distinct from each option alone: the grid builds and the fill
+// runs in the same run.
+TEST(Finish, PdnAndMetalFillTogether) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, kLef, kDef);
+  FloorplanPlaceRoute(db, dir);
+  FinishOptions options;
+  options.with_pdn = true;
+  options.fill_config_path = dir.Write("fill.json", FillConfigText());
+  FinishReport report;
+  const foundation::Status status =
+      RunFinish(db.RawDatabase(), options, &report);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_GT(report.filler_count, 0);
+  EXPECT_GT(report.grid_shape_count, 0);
+  EXPECT_GT(report.metal_fill_count, 0);
+  EXPECT_TRUE(report.with_pdn);
+}
+
+// P8: a design with guides but no wires is still unrouted for
+// finish, mirroring the extraction runner's guides-only rule:
+// strip the detailed wires the route run wrote, leaving guides
+// behind, and finish must refuse with a message saying to run
+// eos::route first.
+TEST(Finish, GuidesOnlyDesignFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, kLef, kDef);
+  FloorplanPlaceRoute(db, dir);
+  odb::dbBlock* block = db.RawDatabase()->getChip()->getBlock();
+  for (odb::dbNet* net : block->getNets()) {
+    if (net->getSigType().isSupply() || net->isSpecial()) {
+      continue;
+    }
+    odb::dbWire* wire = net->getWire();
+    if (wire != nullptr) {
+      odb::dbWire::destroy(wire);
+    }
+    EXPECT_GT(static_cast<int>(net->getGuides().size()), 0);
+  }
+  FinishOptions options;
+  FinishReport report;
+  const foundation::Status status =
+      RunFinish(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+  EXPECT_NE(status.message().find("route"), std::string::npos);
+}
+
+// P8: stream-out after a finish without -pdn is a valid
+// combination: the finish marker, not the grid, is what WriteGds
+// judges (WritesGdsAfterFinish above finishes with -pdn).
+TEST(WriteGds, WritesGdsAfterFinishWithoutPdn) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, kLef, kDef);
+  FloorplanPlaceRoute(db, dir);
+  FinishOptions foptions;
+  FinishReport freport;
+  ASSERT_TRUE(RunFinish(db.RawDatabase(), foptions, &freport).ok());
+  EXPECT_FALSE(freport.with_pdn);
+  const std::string path = dir.Write("out.gds", "");
+  WriteGdsOptions options;
+  options.path = path;
+  WriteGdsReport report;
+  const foundation::Status status =
+      WriteGds(db.RawDatabase(), options, &report);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_GT(report.size_bytes, 0);
+  EXPECT_EQ(report.path, path);
+  EXPECT_GT(report.instance_count, 2);
+}
+
+// P8: WriteGds on a database with no technology is a distinct
+// CheckDb branch from no-database and no-mapped-design (both
+// tested above); a fresh database fails it before any marker
+// check.
+TEST(WriteGds, NoTechnologyFailsFast) {
+  odb::dbDatabase* raw = odb::dbDatabase::create();
+  WriteGdsOptions options;
+  options.path = "out.gds";
+  WriteGdsReport report;
+  const foundation::Status status = WriteGds(raw, options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+  odb::dbDatabase::destroy(raw);
+}
+
 TEST(WriteGds, NoDatabaseFailsFast) {
   WriteGdsOptions options;
   options.path = "out.gds";

@@ -433,6 +433,132 @@ TEST(Cts, NoClockFailsFast) {
   EXPECT_NE(status.message().find("clock"), std::string::npos);
 }
 
+// P8: an empty buffer list is a valid option combination, not a
+// missing option: the engine infers the buffer list from Liberty
+// (BUFX2 matches the engine's BUF name pattern), so the run must
+// succeed and build the same single-root tree as the explicit
+// buffer list case.
+TEST(Cts, EmptyBufferListInfersFromLiberty) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  CtsOptions options;
+  options.clock_nets = {"clk"};
+  options.liberty_path = dir.Write("test.lib", kLiberty);
+  CtsReport report;
+  const foundation::Status status =
+      RunCts(db.RawDatabase(), options, &report);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(report.clock_root_count, 1);
+  EXPECT_GT(report.buffers_inserted, 0);
+  EXPECT_GE(report.sink_count, 6);
+}
+
+// P8: explicitly pinned root and sink buffers are a valid option
+// combination; the run must succeed with the pinned cells.
+TEST(Cts, ExplicitRootAndSinkBuffers) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  CtsOptions options = ClockOptions(dir.Write("test.lib", kLiberty));
+  options.root_buffer = "BUFX2";
+  options.sink_buffer = "BUFX2";
+  CtsReport report;
+  const foundation::Status status =
+      RunCts(db.RawDatabase(), options, &report);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(report.clock_root_count, 1);
+  EXPECT_GT(report.buffers_inserted, 0);
+}
+
+// P8: a clock named by instance pin (u1/CLK, the DEF divider
+// form) resolves to the same net as the net name, per the
+// runner's clock selection contract.
+TEST(Cts, ClockByInstancePinName) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  CtsOptions options = ClockOptions(dir.Write("test.lib", kLiberty));
+  options.clock_nets = {"u1/CLK"};
+  CtsReport report;
+  const foundation::Status status =
+      RunCts(db.RawDatabase(), options, &report);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(report.clock_root_count, 1);
+}
+
+// P8: a clock net with no sinks builds no tree, so the runner's
+// post-run zero-roots check must fail fast instead of reporting
+// an empty tree. The variant design keeps the placed instances
+// (the placed precondition) but connects the clock net to the
+// top-level pin only.
+const char kDefNoClockSinks[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 6 ;
+- u1 DFFX1 + PLACED ( 1000 1000 ) N ;
+- u2 DFFX1 + PLACED ( 8000 1000 ) N ;
+- u3 DFFX1 + PLACED ( 1000 8000 ) N ;
+- u4 DFFX1 + PLACED ( 8000 8000 ) N ;
+- u5 DFFX1 + PLACED ( 4500 4500 ) N ;
+- u6 DFFX1 + PLACED ( 5500 5500 ) N ;
+END COMPONENTS
+PINS 1 ;
+- clk_in + NET clk + DIRECTION INPUT + USE SIGNAL
+  + PORT
+  + LAYER metal1 ( -50 -50 ) ( 50 50 )
+  + PLACED ( 0 5000 ) N ;
+END PINS
+NETS 1 ;
+- clk ( PIN clk_in ) ;
+END NETS
+END DESIGN
+)DEF";
+
+TEST(Cts, ClockNetWithoutSinksFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  const std::string lef = dir.Write("test.lef", kLef);
+  ASSERT_TRUE(db.ReadLef(lef).ok());
+  const std::string def = dir.Write("test.def", kDefNoClockSinks);
+  ASSERT_TRUE(db.ReadDef(def).ok());
+  FloorplanAndPlace(db);
+  CtsOptions options = ClockOptions(dir.Write("test.lib", kLiberty));
+  CtsReport report;
+  const foundation::Status status =
+      RunCts(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+  EXPECT_NE(status.message().find("clock"), std::string::npos);
+}
+
+// P8: an unreadable Liberty path is a distinct failure from an
+// empty path (NoLibertyFailsFast). The STA reader throws on a
+// missing file, so the run fails fast through the runner's
+// engine-failure path rather than its null-return message; the
+// test pins the fail-fast and the code, not a message substring.
+TEST(Cts, UnreadableLibertyFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanAndPlace(db);
+  CtsOptions options;
+  options.clock_nets = {"clk"};
+  options.buffer_list = {"BUFX2"};
+  options.liberty_path = "/nonexistent/eos-cts.lib";
+  CtsReport report;
+  const foundation::Status status =
+      RunCts(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+}
+
 TEST(Cts, UnknownClockNetFailsFast) {
   TempDir dir;
   db::OdbDatabase db;

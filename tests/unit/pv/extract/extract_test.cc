@@ -656,6 +656,24 @@ TEST(Extract, UnreadableModelFailsFast) {
   EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
 }
 
+// P8: a SPEF path that cannot be written is a distinct failure
+// from an empty path (MissingSpefPathFailsFast): the run must
+// fail fast instead of reporting a SPEF file that does not exist.
+TEST(Extract, UnwritableSpefPathFailsFast) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanPlaceRoute(db, dir);
+  ExtractOptions options;
+  options.spef_path = "/nonexistent/eos-out.spef";
+  options.model_path = dir.Write("fixture.rules", RulesText());
+  ExtractReport report;
+  const foundation::Status status =
+      ExtractParasitics(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+}
+
 TEST(Extract, MissingSpefPathFailsFast) {
   TempDir dir;
   db::OdbDatabase db;
