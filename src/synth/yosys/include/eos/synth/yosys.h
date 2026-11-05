@@ -311,11 +311,13 @@ class YosysEngine {
   // submodule instances, in a module that is not a leaf) is not
   // reported, mirroring the block diagram's rule. Nets are per
   // wire vector, never per bit: a multi-bit connection
-  // contributes one endpoint.
+  // contributes one endpoint, and width is the wire's bit
+  // width, so the schematic can label a bus with its width.
   struct SchematicNet {
     std::string name;
     std::vector<SchematicNetEndpoint> endpoints;
     std::vector<std::string> terminals;
+    int width = 1;
   };
 
   // A module's gate-level schematic: its parent ports in

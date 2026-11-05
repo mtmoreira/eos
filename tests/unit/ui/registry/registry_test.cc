@@ -2016,16 +2016,16 @@ TEST(CoreCommands, SynthSchematicFlatReportsGatesAndNets) {
             "gate instance=" + g4 + " type=$and ports=A:in,B:in,Y:out\n" +
             "gate instance=" + g5 + " type=$and ports=A:in,B:in,Y:out\n" +
             "gate instance=" + g6 + " type=$and ports=A:in,B:in,Y:out\n" +
-            "net name=" + g1 + "_Y gates=" + g1 + ":Y," + g2 + ":A terminals=\n" +
-            "net name=" + g2 + "_Y gates=" + g2 + ":Y," + g3 + ":A terminals=\n" +
-            "net name=" + g4 + "_Y gates=" + g4 + ":Y," + g5 + ":A terminals=\n" +
-            "net name=" + g5 + "_Y gates=" + g5 + ":Y," + g6 + ":A terminals=\n" +
-            "net name=a gates=" + g1 + ":A," + g4 + ":A terminals=a\n" +
-            "net name=b gates=" + g1 + ":B," + g5 + ":B terminals=b\n" +
-            "net name=c gates=" + g2 + ":B," + g4 + ":B terminals=c\n" +
-            "net name=d gates=" + g3 + ":B," + g6 + ":B terminals=d\n" +
-            "net name=y1 gates=" + g3 + ":Y terminals=y1\n" +
-            "net name=y2 gates=" + g6 + ":Y terminals=y2\n");
+            "net name=" + g1 + "_Y gates=" + g1 + ":Y," + g2 + ":A terminals= width=1\n" +
+            "net name=" + g2 + "_Y gates=" + g2 + ":Y," + g3 + ":A terminals= width=1\n" +
+            "net name=" + g4 + "_Y gates=" + g4 + ":Y," + g5 + ":A terminals= width=1\n" +
+            "net name=" + g5 + "_Y gates=" + g5 + ":Y," + g6 + ":A terminals= width=1\n" +
+            "net name=a gates=" + g1 + ":A," + g4 + ":A terminals=a width=1\n" +
+            "net name=b gates=" + g1 + ":B," + g5 + ":B terminals=b width=1\n" +
+            "net name=c gates=" + g2 + ":B," + g4 + ":B terminals=c width=1\n" +
+            "net name=d gates=" + g3 + ":B," + g6 + ":B terminals=d width=1\n" +
+            "net name=y1 gates=" + g3 + ":Y terminals=y1 width=1\n" +
+            "net name=y2 gates=" + g6 + ":Y terminals=y2 width=1\n");
 }
 
 // The schematic for a nested leaf, from the live elaborated
@@ -2063,9 +2063,9 @@ TEST(CoreCommands, SynthSchematicLeafReportsAdderGate) {
             "parent port=b direction=in\n"
             "parent port=y direction=out\n"
             "gate instance=" + gate + " type=$add ports=A:in,B:in,Y:out\n" +
-            "net name=a gates=" + gate + ":A terminals=a\n" +
-            "net name=b gates=" + gate + ":B terminals=b\n" +
-            "net name=y gates=" + gate + ":Y terminals=y\n");
+            "net name=a gates=" + gate + ":A terminals=a width=4\n" +
+            "net name=b gates=" + gate + ":B terminals=b width=4\n" +
+            "net name=y gates=" + gate + ":Y terminals=y width=4\n");
   const CommandResult mid = shell.Run("synth_schematic", {"mid"});
   ASSERT_TRUE(mid.ok) << mid.message;
   EXPECT_EQ(mid.payload,
@@ -2073,9 +2073,9 @@ TEST(CoreCommands, SynthSchematicLeafReportsAdderGate) {
             "parent port=a direction=in\n"
             "parent port=b direction=in\n"
             "parent port=y direction=out\n"
-            "net name=a gates= terminals=a\n"
-            "net name=b gates= terminals=b\n"
-            "net name=y gates= terminals=y\n");
+            "net name=a gates= terminals=a width=4\n"
+            "net name=b gates= terminals=b width=4\n"
+            "net name=y gates= terminals=y width=4\n");
 }
 
 // Why U4 reads the elaborated design, not the post-generic

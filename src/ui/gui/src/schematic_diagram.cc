@@ -12,6 +12,7 @@
 #include <QGraphicsView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPainterPath>
 #include <QPen>
 #include <QPushButton>
@@ -21,6 +22,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <utility>
 
 #include "eos/ui/diagram.h"
@@ -31,20 +33,9 @@ namespace eos::ui {
 
 namespace {
 
-// Layout: gates in one center column, input terminals left,
-// output terminals right. All positions derive from the model
-// order, so the same level always renders the same way. The
-// geometry matches the block diagram, so ascending from a
-// schematic to its parent diagram keeps the same frame.
-constexpr qreal kGateTop = 40;
-constexpr qreal kGateHeight = 64;
-constexpr qreal kGateGap = 48;
-constexpr qreal kGateX = 300;
-constexpr qreal kMinGateWidth = 180;
-constexpr qreal kInputX = 40;
-constexpr qreal kOutputX = 640;
-constexpr qreal kTerminalSize = 16;
-constexpr qreal kStubLength = 28;
+// Layout geometry comes from the model (schematic.h), so the
+// widget and the layout agree on positions. Only shape-only
+// constants live here.
 // Inversion bubble radius: NAND, NOR, XNOR, and NOT draw a
 // bubble of this radius past the output edge, and output
 // anchors shift by twice it so wires touch the bubble.
@@ -55,12 +46,6 @@ constexpr qreal kBubbleRadius = 6;
 // shifted kOrInset left, so it sits on the bounding edge.
 constexpr qreal kOrInset = 16;
 constexpr qreal kOrBulge = 14;
-
-struct Anchor {
-  QPointF point;
-  bool left_side;
-  bool is_output;
-};
 
 // True for the symbols that carry an inversion bubble.
 bool IsInverted(GateSymbol symbol) {
@@ -77,19 +62,20 @@ qreal LeftCurveX(qreal base, const QRectF& rect, qreal y) {
   return base + 4 * kOrBulge * (1 - t) * t;
 }
 
-// Draws one gate symbol inside rect, filled white with a black
-// outline. The rect is the gate's bounding box: anchors and
-// labels use it, and every shape stays inside it except the
-// inversion bubble, which sits past the output edge.
+// Draws one gate symbol inside rect. The rect is the gate's
+// bounding box: anchors and labels use it, and every shape
+// stays inside it except the inversion bubble, which sits past
+// the output edge. A dimmed gate (outside the selected cone)
+// fills light grey; a selected gate outlines in blue.
 void DrawGateShape(QGraphicsScene* scene, const QRectF& rect,
-                   GateSymbol symbol) {
+                   GateSymbol symbol, bool dimmed, bool selected) {
   const qreal left = rect.left();
   const qreal right = rect.right();
   const qreal top = rect.top();
   const qreal bottom = rect.bottom();
   const qreal middle = top + rect.height() / 2;
-  const QPen pen(Qt::black, 1);
-  const QBrush brush(Qt::white);
+  const QPen pen(selected ? Qt::blue : Qt::black, selected ? 2 : 1);
+  const QBrush brush(dimmed ? QColor(238, 238, 238) : Qt::white);
   auto add_shape = [&](const QPainterPath& path) {
     auto* item = scene->addPath(path, pen, brush);
     Q_UNUSED(item);
@@ -174,6 +160,10 @@ SchematicDiagram::SchematicDiagram(SessionView& view, QWidget* parent)
   view_widget_ = new QGraphicsView(scene_, this);
   view_widget_->setRenderHint(QPainter::Antialiasing);
   view_widget_->installEventFilter(this);
+  // Mouse presses land on the viewport, not the view, so the
+  // click filter lives there; the resize filter stays on the
+  // view, which is what gets resize events.
+  view_widget_->viewport()->installEventFilter(this);
   layout->addWidget(view_widget_, 1);
 }
 
@@ -195,6 +185,28 @@ void SchematicDiagram::showEvent(QShowEvent* event) {
 bool SchematicDiagram::eventFilter(QObject* watched, QEvent* event) {
   if (watched == view_widget_ && event->type() == QEvent::Resize) {
     FitView();
+  }
+  if (watched == view_widget_->viewport() &&
+      event->type() == QEvent::MouseButtonPress) {
+    const auto* mouse = static_cast<QMouseEvent*>(event);
+    if (mouse->button() == Qt::LeftButton) {
+      // Clicking a gate selects it and highlights its fanin
+      // and fanout cones; clicking empty space clears the
+      // highlight. The scene rebuilds only when the selection
+      // changes.
+      const QPointF scene_point = view_widget_->mapToScene(mouse->pos());
+      std::string hit;
+      for (const auto& entry : gate_rects_) {
+        if (entry.second.contains(scene_point)) {
+          hit = entry.first;
+          break;
+        }
+      }
+      if (hit != selected_) {
+        selected_ = hit;
+        RebuildScene();
+      }
+    }
   }
   return QWidget::eventFilter(watched, event);
 }
@@ -251,6 +263,13 @@ void SchematicDiagram::RebuildScene() {
     return;
   }
 
+  // A selection belongs to one schematic: a new module clears
+  // it, so a stale gate is never highlighted.
+  if (schematic.Module() != selected_module_) {
+    selected_.clear();
+    selected_module_ = schematic.Module();
+  }
+
   // Gate width fits the longest display label, so names never
   // overflow. Display labels only: the raw instance can hold
   // a synth temp path, which must never size or label a box.
@@ -259,7 +278,7 @@ void SchematicDiagram::RebuildScene() {
   QFontMetrics instance_metrics(instance_font);
   QFont type_font;
   QFontMetrics type_metrics(type_font);
-  qreal gate_width = kMinGateWidth;
+  qreal gate_width = kSchematicMinGateWidth;
   for (const SchematicGate& gate : schematic.Gates()) {
     const qreal instance_w = instance_metrics.horizontalAdvance(
         QString::fromStdString(DisplayInstance(gate.instance)));
@@ -268,20 +287,70 @@ void SchematicDiagram::RebuildScene() {
     gate_width = std::max(gate_width, std::max(instance_w, type_w) + 20);
   }
 
-  // Gate symbols, one row each, in model order. Gates are
-  // not clickable: the schematic is the bottom of the stack.
-  // Labels are display labels, centered in the bounding rect;
-  // a gate with no display instance shows its type alone.
-  std::map<std::string, QRectF> gate_rects;
-  for (std::size_t i = 0; i < schematic.Gates().size(); ++i) {
-    const SchematicGate& gate = schematic.Gates()[i];
-    const qreal y = kGateTop + static_cast<qreal>(i) *
-                                    (kGateHeight + kGateGap);
-    const QRectF rect(kGateX, y, gate_width, kGateHeight);
-    gate_rects[gate.instance] = rect;
-    DrawGateShape(scene_, rect, SymbolForType(gate.type));
-    const std::string instance_label = DisplayInstance(gate.instance);
-    const std::string type_label = DisplayType(gate.type);
+  const SchematicLayout layout =
+      ComputeSchematicLayout(schematic, gate_width);
+
+  // The cone highlight: the selected gate plus its transitive
+  // fanin and fanout cones. Empty when nothing is selected,
+  // and then every gate and net draws normally.
+  std::set<std::string> cone;
+  if (!selected_.empty()) {
+    cone.insert(selected_);
+    for (const std::string& gate : FaninCone(schematic, selected_)) {
+      cone.insert(gate);
+    }
+    for (const std::string& gate : FanoutCone(schematic, selected_)) {
+      cone.insert(gate);
+    }
+  }
+  const bool highlighting = !selected_.empty();
+
+  // Shape-aware endpoints: input wires touch the OR-family
+  // curves, not the bounding edge, and output wires touch the
+  // inversion bubble, not the shape edge. Routes end at the
+  // bounding edge; each path end moves to the drawn shape.
+  std::map<std::pair<double, double>, QPointF> shape_anchors;
+  for (const SchematicGatePlacement& placement : layout.gates) {
+    const SchematicGate* gate = schematic.FindGate(placement.instance);
+    if (gate == nullptr) continue;
+    const GateSymbol symbol = SymbolForType(gate->type);
+    const QRectF rect(placement.x, placement.y, placement.width,
+                      placement.height);
+    for (const SchematicPortAnchor& anchor : placement.ports) {
+      QPointF point(anchor.x, anchor.y);
+      if (anchor.left_side) {
+        if (symbol == GateSymbol::kOr ||
+            symbol == GateSymbol::kNor) {
+          point.setX(
+              LeftCurveX(placement.x + kOrInset, rect, anchor.y));
+        } else if (symbol == GateSymbol::kXor ||
+                   symbol == GateSymbol::kXnor) {
+          point.setX(LeftCurveX(placement.x, rect, anchor.y));
+        }
+      } else if (IsInverted(symbol)) {
+        point.setX(placement.x + placement.width + 2 * kBubbleRadius);
+      }
+      shape_anchors[{anchor.x, anchor.y}] = point;
+    }
+  }
+
+  // Gate symbols, one per layout placement: columns by logic
+  // level, inputs left, outputs right. Labels are display
+  // labels, centered in the bounding rect; a gate with no
+  // display instance shows its type alone.
+  gate_rects_.clear();
+  for (const SchematicGatePlacement& placement : layout.gates) {
+    const SchematicGate* gate = schematic.FindGate(placement.instance);
+    if (gate == nullptr) continue;
+    const QRectF rect(placement.x, placement.y, placement.width,
+                      placement.height);
+    gate_rects_[placement.instance] = rect;
+    const bool in_cone = cone.count(placement.instance) != 0;
+    DrawGateShape(scene_, rect, SymbolForType(gate->type),
+                  highlighting && !in_cone,
+                  placement.instance == selected_);
+    const std::string instance_label = DisplayInstance(gate->instance);
+    const std::string type_label = DisplayType(gate->type);
     const QString tooltip =
         instance_label.empty()
             ? QString::fromStdString(type_label)
@@ -296,162 +365,101 @@ void SchematicDiagram::RebuildScene() {
     hover->setToolTip(tooltip);
     auto center_x = [&](const QFontMetrics& metrics,
                         const std::string& text) {
-      return kGateX + (gate_width -
-                       metrics.horizontalAdvance(
-                           QString::fromStdString(text))) /
-                          2;
+      return placement.x + (placement.width -
+                            metrics.horizontalAdvance(
+                                QString::fromStdString(text))) /
+                               2;
     };
     if (!instance_label.empty()) {
       auto* instance_text = scene_->addSimpleText(
           QString::fromStdString(instance_label));
       instance_text->setFont(instance_font);
       instance_text->setPos(center_x(instance_metrics, instance_label),
-                            y + 8);
+                            placement.y + 8);
       auto* type_text = scene_->addSimpleText(
           QString::fromStdString(type_label));
       type_text->setFont(type_font);
-      type_text->setPos(center_x(type_metrics, type_label), y + 34);
+      type_text->setPos(center_x(type_metrics, type_label),
+                        placement.y + 34);
     } else {
       auto* type_text = scene_->addSimpleText(
           QString::fromStdString(type_label));
       type_text->setFont(type_font);
-      type_text->setPos(center_x(type_metrics, type_label), y + 22);
+      type_text->setPos(center_x(type_metrics, type_label),
+                        placement.y + 22);
     }
   }
 
   // Terminals: input ports left, output and inout ports right,
-  // each list in declaration order.
-  std::map<std::string, Anchor> terminal_anchors;
-  std::size_t input_row = 0;
-  std::size_t output_row = 0;
-  for (const SchematicPort& port : schematic.ParentPorts()) {
-    const bool input_side =
-        port.direction == "in" || port.direction == "inout";
-    const std::size_t row = input_side ? input_row++ : output_row++;
-    const qreal y = kGateTop + static_cast<qreal>(row) *
-                                    (kGateHeight + kGateGap);
-    const qreal x = input_side ? kInputX : kOutputX;
+  // stacked in declaration order on their side. The layout
+  // gives the anchor point on the square's outer edge; the
+  // square sits on the inner side of it.
+  for (const SchematicTerminalPlacement& terminal : layout.terminals) {
+    const qreal x = terminal.input_side
+                        ? terminal.x - kSchematicTerminalSize
+                        : terminal.x;
+    const qreal y = terminal.y - kSchematicTerminalSize / 2;
     auto* square = scene_->addRect(
-        QRectF(x, y, kTerminalSize, kTerminalSize));
+        QRectF(x, y, kSchematicTerminalSize, kSchematicTerminalSize));
     square->setPen(QPen(Qt::black, 1));
     square->setBrush(QBrush(Qt::white));
-    auto* label = scene_->addSimpleText(QString::fromStdString(port.name));
-    if (input_side) {
-      label->setPos(x + kTerminalSize + 8, y);
+    auto* label =
+        scene_->addSimpleText(QString::fromStdString(terminal.name));
+    if (terminal.input_side) {
+      label->setPos(x + kSchematicTerminalSize + 8, y);
     } else {
       const qreal width = type_metrics.horizontalAdvance(
-          QString::fromStdString(port.name));
+          QString::fromStdString(terminal.name));
       label->setPos(x - 8 - width, y);
     }
-    terminal_anchors[port.name] = Anchor{
-        QPointF(x + kTerminalSize / 2, y + kTerminalSize / 2),
-        input_side, port.direction == "out"};
   }
 
-  // Port anchors along gate edges: input and inout ports on the
-  // left edge, output ports on the right, spread by port index
-  // among the ports on the same side.
-  auto gate_anchor = [&](const std::string& instance,
-                         const std::string& port_name) -> Anchor {
-    const SchematicGate* gate = schematic.FindGate(instance);
-    const QRectF rect = gate_rects[instance];
-    bool left_side = true;
-    bool is_output = false;
-    if (gate != nullptr) {
-      for (const SchematicPort& port : gate->ports) {
-        if (port.name == port_name) {
-          left_side = port.direction == "in" ||
-                      port.direction == "inout";
-          is_output = port.direction == "out";
+  // Nets: the layout's orthogonal polylines, one per load,
+  // with a dot at every true branch point. Labels carry the
+  // net name and, for a bus, its width. A net in the selected
+  // cone draws blue; with a selection active, the rest draw
+  // grey. Structural only: no timing annotation is drawn.
+  for (const SchematicNetRoute& route : layout.nets) {
+    bool in_cone = false;
+    if (highlighting) {
+      for (const SchematicNet& net : schematic.Nets()) {
+        if (net.name != route.name) continue;
+        for (const SchematicNetEndpoint& endpoint : net.endpoints) {
+          if (cone.count(endpoint.gate) != 0) in_cone = true;
         }
       }
     }
-    std::vector<const SchematicPort*> side_ports;
-    if (gate != nullptr) {
-      for (const SchematicPort& port : gate->ports) {
-        const bool input_side =
-            port.direction == "in" || port.direction == "inout";
-        if (input_side == left_side) side_ports.push_back(&port);
+    const QPen pen = !highlighting
+                         ? QPen(Qt::black, 1)
+                         : (in_cone ? QPen(Qt::blue, 2)
+                                    : QPen(Qt::lightGray, 1));
+    auto adjust = [&](const QPointF& point) {
+      const auto found = shape_anchors.find(
+          {point.x(), point.y()});
+      return found == shape_anchors.end() ? point : found->second;
+    };
+    for (const std::vector<SchematicPoint>& path : route.paths) {
+      for (std::size_t i = 1; i < path.size(); ++i) {
+        QPointF a(path[i - 1].x, path[i - 1].y);
+        QPointF b(path[i].x, path[i].y);
+        if (i == 1) a = adjust(a);
+        if (i + 1 == path.size()) b = adjust(b);
+        scene_->addLine(QLineF(a, b), pen);
       }
     }
-    std::size_t index = 0;
-    for (std::size_t i = 0; i < side_ports.size(); ++i) {
-      if (side_ports[i]->name == port_name) {
-        index = i;
-        break;
-      }
+    for (const SchematicPoint& dot : route.branch_dots) {
+      auto* item = scene_->addEllipse(
+          QRectF(dot.x - 3, dot.y - 3, 6, 6), pen, QBrush(pen.color()));
+      Q_UNUSED(item);
     }
-    const qreal n = static_cast<qreal>(side_ports.size());
-    const qreal y = rect.top() +
-                    (static_cast<qreal>(index) + 1) * rect.height() /
-                        (n + 1);
-    qreal x = left_side ? rect.left() : rect.right();
-    // Shape-aware endpoints: input wires touch the OR-family
-    // curves, not the bounding edge, and output wires touch
-    // the inversion bubble, not the shape edge.
-    if (gate != nullptr) {
-      const GateSymbol symbol = SymbolForType(gate->type);
-      if (left_side) {
-        if (symbol == GateSymbol::kOr ||
-            symbol == GateSymbol::kNor) {
-          x = LeftCurveX(rect.left() + kOrInset, rect, y);
-        } else if (symbol == GateSymbol::kXor ||
-                   symbol == GateSymbol::kXnor) {
-          x = LeftCurveX(rect.left(), rect, y);
-        }
-      } else if (IsInverted(symbol)) {
-        x = rect.right() + 2 * kBubbleRadius;
-      }
-    }
-    return Anchor{QPointF(x, y), left_side, is_output};
-  };
-
-  // Nets: a star from the driving output endpoint when one
-  // exists, else from the first anchor; a lone anchor gets a
-  // short stub outward. Labels sit on the first segment.
-  // Structural only: no timing annotation is drawn.
-  for (const SchematicNet& net : schematic.Nets()) {
-    std::vector<Anchor> anchors;
-    for (const SchematicNetEndpoint& endpoint : net.endpoints) {
-      anchors.push_back(gate_anchor(endpoint.gate, endpoint.port));
-    }
-    for (const std::string& terminal : net.terminals) {
-      const auto found = terminal_anchors.find(terminal);
-      if (found != terminal_anchors.end()) anchors.push_back(found->second);
-    }
-    if (anchors.empty()) continue;
-    if (anchors.size() == 1) {
-      const Anchor& anchor = anchors[0];
-      const QPointF end(anchor.point.x() +
-                            (anchor.left_side ? -kStubLength : kStubLength),
-                        anchor.point.y());
-      scene_->addLine(QLineF(anchor.point, end));
+    if (!route.paths.empty() && route.paths[0].size() >= 2) {
+      const std::vector<SchematicPoint>& first = route.paths[0];
+      const QPointF mid((first[0].x + first[1].x) / 2,
+                        (first[0].y + first[1].y) / 2);
       auto* label = scene_->addSimpleText(
-          QString::fromStdString(net.name));
-      label->setPos(end.x() + (anchor.left_side ? -4 : 4) -
-                        (anchor.left_side
-                             ? type_metrics.horizontalAdvance(
-                                   QString::fromStdString(net.name))
-                             : 0),
-                    end.y() - 18);
-      continue;
+          QString::fromStdString(route.label));
+      label->setPos(mid.x() + 4, mid.y() - 18);
     }
-    std::size_t center = 0;
-    for (std::size_t i = 0; i < anchors.size(); ++i) {
-      if (anchors[i].is_output) {
-        center = i;
-        break;
-      }
-    }
-    for (std::size_t i = 0; i < anchors.size(); ++i) {
-      if (i == center) continue;
-      scene_->addLine(QLineF(anchors[center].point, anchors[i].point));
-    }
-    std::size_t other = center == 0 ? 1 : 0;
-    const QPointF mid((anchors[center].point.x() + anchors[other].point.x()) / 2,
-                      (anchors[center].point.y() + anchors[other].point.y()) / 2);
-    auto* label = scene_->addSimpleText(QString::fromStdString(net.name));
-    label->setPos(mid.x() + 4, mid.y() - 18);
   }
 
   scene_->setSceneRect(scene_->itemsBoundingRect().adjusted(-20, -20, 20, 20));

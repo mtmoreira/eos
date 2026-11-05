@@ -471,6 +471,11 @@ TEST(YosysFacade, SchematicAdderReportsOneAddGate) {
   EXPECT_EQ(schematic.value().nets[0].name, "a");
   EXPECT_EQ(schematic.value().nets[1].name, "b");
   EXPECT_EQ(schematic.value().nets[2].name, "y");
+  // The adder ports are 4-bit buses, so every net carries
+  // width 4 from the wire, not the single-bit default.
+  for (const auto& net : schematic.value().nets) {
+    EXPECT_EQ(net.width, 4);
+  }
   EXPECT_EQ(schematic.value().nets[2].endpoints[0].gate, gate.instance);
   EXPECT_EQ(schematic.value().nets[2].endpoints[0].port, "Y");
 }
