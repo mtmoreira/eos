@@ -280,3 +280,10 @@ add_executable(eda_ui_gui_unit_test ui/gui/gui_test.cc)
 target_link_libraries(eda_ui_gui_unit_test
   PRIVATE eda_ui_gui GTest::gtest GTest::gtest_main)
 add_test(NAME ui.gui COMMAND eda_ui_gui_unit_test)
+
+# Icon assets: the committed iconset PNGs, the .icns, and the
+# Info.plist naming the icon. Pure file checks, no image tool.
+add_test(NAME ui.gui.icon
+  COMMAND ${CMAKE_COMMAND}
+    -DEOS_GUI_ICON_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../../src/ui/gui/icons
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/../../src/ui/gui/icons/check_icon.cmake)

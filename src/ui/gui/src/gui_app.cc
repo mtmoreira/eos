@@ -13,7 +13,9 @@
 // and tab completion stay in the eos CLI, whose linenoise reader
 // is private to the tcl module.
 #include <QApplication>
+#include <QIcon>
 #include <QMetaObject>
+#include <QPixmap>
 
 #include <cstdio>
 #include <future>
@@ -26,6 +28,7 @@
 
 #include "eos/ui/gui.h"
 #include "eos/ui/tcl_shell.h"
+#include "eos_icon_png.h"
 #include "main_window.h"
 
 namespace eos::ui {
@@ -47,6 +50,16 @@ int RunGui(int argc, char** argv, CommandRegistry& registry,
            CommandContext& context, TclShell* shell) {
   QApplication app(argc, argv);
   app.setQuitOnLastWindowClosed(false);
+  // Window icon: the EOS logo, embedded at configure time from
+  // the committed iconset PNG. This sets the window and task
+  // switcher icon on every platform. It does NOT set the macOS
+  // Dock icon for a bare binary launched from a terminal: the
+  // Dock icon comes from the .app bundle (see apps/eos-gui),
+  // which is why the bundle target exists.
+  QPixmap icon_pixmap;
+  if (icon_pixmap.loadFromData(kEosIconPng, kEosIconPngSize, "PNG")) {
+    app.setWindowIcon(QIcon(icon_pixmap));
+  }
   SessionView view(registry, context);
   MainWindow window(view);
   window.show();
