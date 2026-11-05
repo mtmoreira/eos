@@ -147,5 +147,52 @@ TEST(Constraints, StateRoundTripPreservesBindingsAndCoverage) {
   EXPECT_EQ(back.Find(open)->status, BindingStatus::kUnresolved);
 }
 
+TEST(Constraints, ParamsAreStoredAndReadBackByKey) {
+  Fixture f;
+  ConstraintSet set;
+  const ConstraintId id = set.Add(
+      ConstraintKind::kClock, "sys", "clk", f.design,
+      {{"period_ns", "10"},
+       {"waveform_rise_ns", "0"},
+       {"waveform_fall_ns", "5"}});
+  const Constraint* c = set.Find(id);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->Param("period_ns").value_or(""), "10");
+  EXPECT_EQ(c->Param("waveform_fall_ns").value_or(""), "5");
+  EXPECT_FALSE(c->Param("no_such_key").has_value());
+  // Params never affect binding.
+  EXPECT_EQ(c->status, BindingStatus::kBound);
+}
+
+TEST(Constraints, RemoveDropsOnlyTheNamedRow) {
+  Fixture f;
+  ConstraintSet set;
+  const ConstraintId keep =
+      set.Add(ConstraintKind::kClock, "a", "clk", f.design);
+  const ConstraintId drop =
+      set.Add(ConstraintKind::kClock, "b", "clk", f.design);
+  EXPECT_TRUE(set.Remove(drop));
+  EXPECT_EQ(set.Find(drop), nullptr);
+  EXPECT_NE(set.Find(keep), nullptr);
+  EXPECT_FALSE(set.Remove(drop));
+  EXPECT_EQ(set.all().size(), 1u);
+}
+
+TEST(Constraints, StateRoundTripPreservesParams) {
+  Fixture f;
+  ConstraintSet set;
+  const ConstraintId id = set.Add(
+      ConstraintKind::kGroupPath, "grp", "clk", f.design,
+      {{"group", "grp"}, {"from", "a b"}});
+  const ConstraintState state = set.ExportState();
+  foundation::Result<ConstraintSet> restored =
+      ConstraintSet::FromState(state);
+  ASSERT_TRUE(restored.ok()) << restored.status().message();
+  const Constraint* c = restored.value().Find(id);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->Param("group").value_or(""), "grp");
+  EXPECT_EQ(c->Param("from").value_or(""), "a b");
+}
+
 }  // namespace
 }  // namespace eos::db

@@ -144,6 +144,16 @@ const char* ConstraintKindWord(db::ConstraintKind kind) {
     case db::ConstraintKind::kMaxDelay: return "max_delay";
     case db::ConstraintKind::kMinDelay: return "min_delay";
     case db::ConstraintKind::kCaseAnalysis: return "case_analysis";
+    case db::ConstraintKind::kClockGatingCheck: return "clock_gating_check";
+    case db::ConstraintKind::kDataCheck: return "data_check";
+    case db::ConstraintKind::kMinPulseWidth: return "min_pulse_width";
+    case db::ConstraintKind::kSense: return "sense";
+    case db::ConstraintKind::kIdealNetwork: return "ideal_network";
+    case db::ConstraintKind::kIdealLatency: return "ideal_latency";
+    case db::ConstraintKind::kIdealTransition: return "ideal_transition";
+    case db::ConstraintKind::kGroupPath: return "group_path";
+    case db::ConstraintKind::kMaxTimeBorrow: return "max_time_borrow";
+    case db::ConstraintKind::kGeneratedClock: return "generated_clock";
   }
   return "clock";
 }
@@ -158,6 +168,20 @@ std::optional<db::ConstraintKind> ParseConstraintKind(
   if (word == "max_delay") return db::ConstraintKind::kMaxDelay;
   if (word == "min_delay") return db::ConstraintKind::kMinDelay;
   if (word == "case_analysis") return db::ConstraintKind::kCaseAnalysis;
+  if (word == "clock_gating_check") {
+    return db::ConstraintKind::kClockGatingCheck;
+  }
+  if (word == "data_check") return db::ConstraintKind::kDataCheck;
+  if (word == "min_pulse_width") return db::ConstraintKind::kMinPulseWidth;
+  if (word == "sense") return db::ConstraintKind::kSense;
+  if (word == "ideal_network") return db::ConstraintKind::kIdealNetwork;
+  if (word == "ideal_latency") return db::ConstraintKind::kIdealLatency;
+  if (word == "ideal_transition") {
+    return db::ConstraintKind::kIdealTransition;
+  }
+  if (word == "group_path") return db::ConstraintKind::kGroupPath;
+  if (word == "max_time_borrow") return db::ConstraintKind::kMaxTimeBorrow;
+  if (word == "generated_clock") return db::ConstraintKind::kGeneratedClock;
   return std::nullopt;
 }
 
@@ -1015,6 +1039,237 @@ void DeriveClosureCandidates(
             });
 }
 
+// ---- SDC command family (Immediate unit 3) -------------------------
+// Shared parsing for the SDC commands. Flags are exact tokens; a
+// value is the next token unless it exactly matches a known flag,
+// so negative numbers like -0.5 parse as values while a missing
+// value before the next flag is an error. Unknown dash-led tokens
+// are reported, never ignored, matching the core discipline above.
+
+bool ParseDouble(const std::string& token, double& out) {
+  const char* first = token.data();
+  const char* last = first + token.size();
+  const auto result = std::from_chars(first, last, out);
+  return result.ec == std::errc() && result.ptr == last &&
+         std::isfinite(out);
+}
+
+bool ParseInt(const std::string& token, long& out) {
+  const char* first = token.data();
+  const char* last = first + token.size();
+  const auto result = std::from_chars(first, last, out);
+  return result.ec == std::errc() && result.ptr == last;
+}
+
+// Formats a double for storage and display: std::to_string's six
+// decimals with trailing zeros trimmed, so 10.5 stores as "10.5"
+// and 0.853 as "0.853". Values with at most six decimals round-trip
+// through ParseDouble exactly, which covers SDC magnitudes.
+std::string FormatNum(double value) {
+  std::string text = std::to_string(value);
+  while (!text.empty() && text.back() == '0') text.pop_back();
+  if (!text.empty() && text.back() == '.') text.pop_back();
+  return text;
+}
+
+struct SdcFlagSpec {
+  std::string name;
+  int values;       // 0 = boolean, 1 = single value, 2 = pair
+  bool repeatable;  // list flags accumulate across occurrences
+};
+
+class SdcOptions {
+ public:
+  // Parses args against specs. On success returns nullopt and the
+  // parsed form is readable through Has/Value/Values/Positionals.
+  // On failure returns the diagnostic to fail with.
+  static std::optional<CommandResult> Parse(
+      const std::vector<std::string>& args,
+      const std::vector<SdcFlagSpec>& specs, const std::string& cmd,
+      SdcOptions& out) {
+    std::map<std::string, const SdcFlagSpec*> by_name;
+    for (const SdcFlagSpec& spec : specs) by_name[spec.name] = &spec;
+    const auto fail = [&cmd](const std::string& message) {
+      return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                 cmd + ": " + message);
+    };
+    std::size_t i = 0;
+    while (i < args.size()) {
+      const std::string& tok = args[i];
+      auto it = by_name.find(tok);
+      if (it == by_name.end()) {
+        if (!tok.empty() && tok[0] == '-') {
+          return fail("unknown option: " + tok);
+        }
+        out.positionals_.push_back(tok);
+        ++i;
+        continue;
+      }
+      const SdcFlagSpec* spec = it->second;
+      if (!spec->repeatable && out.seen_.count(spec->name) != 0) {
+        return fail("option " + spec->name + " given twice");
+      }
+      out.seen_.insert(spec->name);
+      if (spec->values == 0) {
+        out.flags_.insert(spec->name);
+        ++i;
+        continue;
+      }
+      for (int k = 0; k < spec->values; ++k) {
+        if (i + 1 + k >= args.size() ||
+            by_name.count(args[i + 1 + k]) != 0) {
+          return fail("option " + spec->name + " needs " +
+                      std::to_string(spec->values) + " value(s)");
+        }
+        out.values_[spec->name].push_back(args[i + 1 + k]);
+      }
+      i += 1 + static_cast<std::size_t>(spec->values);
+    }
+    return std::nullopt;
+  }
+
+  bool Has(const std::string& flag) const {
+    return flags_.count(flag) != 0;
+  }
+  bool Seen(const std::string& flag) const {
+    return seen_.count(flag) != 0;
+  }
+  std::optional<std::string> Value(const std::string& flag) const {
+    auto it = values_.find(flag);
+    if (it == values_.end() || it->second.empty()) return std::nullopt;
+    return it->second.front();
+  }
+  std::vector<std::string> Values(const std::string& flag) const {
+    auto it = values_.find(flag);
+    if (it == values_.end()) return {};
+    return it->second;
+  }
+  const std::vector<std::string>& Positionals() const {
+    return positionals_;
+  }
+
+ private:
+  std::set<std::string> seen_;
+  std::set<std::string> flags_;
+  std::map<std::string, std::vector<std::string>> values_;
+  std::vector<std::string> positionals_;
+};
+
+// Parses one option value as a double, failing with a message that
+// names the option.
+std::optional<CommandResult> ParseOptDouble(
+    const SdcOptions& opts, const std::string& flag, const std::string& cmd,
+    double& out) {
+  const std::optional<std::string> text = opts.Value(flag);
+  if (!text.has_value()) return std::nullopt;
+  if (!ParseDouble(*text, out)) {
+    return CommandResult::Fail(
+        Diag::kInvalidConfiguration,
+        cmd + ": option " + flag + " needs a number, got: " + *text);
+  }
+  return std::nullopt;
+}
+
+// Trims surrounding whitespace.
+std::string TrimStr(const std::string& s) {
+  const std::size_t first = s.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return "";
+  const std::size_t last = s.find_last_not_of(" \t\r\n");
+  return s.substr(first, last - first + 1);
+}
+
+// Normalizes one target address to the object name the constraint
+// store resolves: a bare name, a pin path "<instance>/<pin>", or a
+// single-object get_ports/get_pins/get_nets/get_cells wrapper passed
+// as one quoted argument. A wrapper naming several objects fails:
+// one stored target per wrapper, so each binding stays honest.
+std::optional<CommandResult> NormalizeTarget(const std::string& raw,
+                                             const std::string& cmd,
+                                             std::string& out) {
+  std::string s = TrimStr(raw);
+  if (s.size() >= 2 && s.front() == '[' && s.back() == ']') {
+    s = TrimStr(s.substr(1, s.size() - 2));
+  }
+  static const char* kGets[] = {"get_ports ", "get_pins ", "get_nets ",
+                                "get_cells "};
+  for (const char* get : kGets) {
+    const std::string prefix(get);
+    if (s.rfind(prefix, 0) == 0) {
+      s = TrimStr(s.substr(prefix.size()));
+      break;
+    }
+  }
+  if (s.empty()) {
+    return CommandResult::Fail(Diag::kInvalidConfiguration,
+                               cmd + ": empty target");
+  }
+  if (s.find_first_of(" \t{}") != std::string::npos) {
+    return CommandResult::Fail(
+        Diag::kInvalidConfiguration,
+        cmd + ": one object per target; a list names several objects, "
+              "pass them as separate arguments");
+  }
+  out = s;
+  return std::nullopt;
+}
+
+// Normalizes every positional into target names, failing on the
+// first bad one.
+std::optional<CommandResult> NormalizeTargets(
+    const std::vector<std::string>& raw, const std::string& cmd,
+    std::vector<std::string>& out) {
+  for (const std::string& token : raw) {
+    std::string target;
+    if (auto bad = NormalizeTarget(token, cmd, target)) return bad;
+    out.push_back(target);
+  }
+  return std::nullopt;
+}
+
+// Stores one constraint per target, all sharing kind, names, and
+// params, and renders one payload line per constraint in the
+// established "constraint=<id> status=<word> target=<target>"
+// shape, with bound objects and stored params appended.
+std::string StoreTargets(
+    CommandContext& ctx, db::ConstraintKind kind,
+    const std::vector<std::string>& targets,
+    const std::vector<std::string>& names,
+    const std::vector<std::pair<std::string, std::string>>& params) {
+  std::string payload;
+  for (std::size_t i = 0; i < targets.size(); ++i) {
+    const db::ConstraintId id = ctx.project.constraints.Add(
+        kind, names[i], targets[i], *ctx.project.design, params);
+    const db::Constraint* c = ctx.project.constraints.Find(id);
+    if (!payload.empty()) payload += "\n";
+    payload += "constraint=" + std::to_string(id) +
+               " status=" + StatusWord(c->status) +
+               " target=" + targets[i];
+    if (c->status == db::BindingStatus::kBound) {
+      payload += " object=" + IdStr(c->bound_object);
+    }
+    if (!params.empty()) {
+      payload += " params=";
+      for (std::size_t k = 0; k < params.size(); ++k) {
+        if (k != 0) payload += ";";
+        payload += params[k].first + "=" + params[k].second;
+      }
+    }
+  }
+  return payload;
+}
+
+// Drops every stored constraint of one kind carrying one name.
+// Used by the clock commands' replace-by-default semantics and by
+// group_path, where the name is the group's identity.
+void ReplaceNamed(CommandContext& ctx, db::ConstraintKind kind,
+                  const std::string& name) {
+  std::vector<db::ConstraintId> dead;
+  for (const db::Constraint& c : ctx.project.constraints.all()) {
+    if (c.kind == kind && c.name == name) dead.push_back(c.id);
+  }
+  for (db::ConstraintId id : dead) ctx.project.constraints.Remove(id);
+}
+
 }  // namespace
 
 void RegisterCoreCommands(CommandRegistry& registry) {
@@ -1225,11 +1480,16 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(out);
       });
 
-  add("create_clock", "create_clock <name> <target>",
+  // The design-construction clock record. It binds a clock name to
+  // a design target and carries no timing semantics: no period, no
+  // waveform. It used to be called create_clock; that name is now
+  // the SDC command below, so scripts using the old form must move
+  // to bind_clock (see docs/sdc-commands.md).
+  add("bind_clock", "bind_clock <name> <target>",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
         if (auto bad =
-                ExpectCount(args, 2, "create_clock <name> <target>")) {
+                ExpectCount(args, 2, "bind_clock <name> <target>")) {
           return *bad;
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
@@ -1297,9 +1557,847 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (c.status == db::BindingStatus::kBound) {
             out += " object=" + IdStr(c.bound_object);
           }
+          if (!c.params.empty()) {
+            out += " params=";
+            for (std::size_t k = 0; k < c.params.size(); ++k) {
+              if (k != 0) out += ";";
+              out += c.params[k].first + "=" + c.params[k].second;
+            }
+          }
         }
         if (out.empty()) out = "constraints=0";
         return CommandResult::Ok(out);
+      });
+
+  // ---- SDC command family (Immediate unit 3) -----------------------
+  // Each command stores real constraints in the session's constraint
+  // set, with its semantics as parameters, so list_constraints,
+  // constraint_coverage, checkpoints, and later check commands see
+  // them. Nothing here is an accept-and-ignore stub: a semantic the
+  // session model cannot represent fails fast with the gap named.
+  // Boundary, stated plainly: run_timing still reads its SDC from
+  // the file recorded by read_sdc; these registry constraints are
+  // session state, not STA input, until a later unit wires session
+  // constraints into the timing service (see docs/sdc-commands.md).
+
+  add("create_clock",
+      "create_clock -period <ns> [-waveform <rise> <fall>] "
+      "[-name <name>] [-add] <target>...",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-period", 1, false},
+                 {"-waveform", 2, false},
+                 {"-name", 1, false},
+                 {"-add", 0, false}},
+                "create_clock", opts)) {
+          return *bad;
+        }
+        // The old construction form carried no flags and exactly
+        // two positionals. It no longer parses as anything else, so
+        // name the migration instead of reporting a bare arity error.
+        if (!opts.Seen("-period") && !opts.Seen("-waveform") &&
+            !opts.Seen("-name") && !opts.Seen("-add") &&
+            opts.Positionals().size() == 2) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_clock is now the SDC command; the "
+              "design-construction record moved to bind_clock "
+              "<name> <target>");
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        if (!opts.Seen("-period")) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "create_clock: option -period is "
+                                     "required");
+        }
+        double period = 0.0;
+        if (auto bad = ParseOptDouble(opts, "-period", "create_clock",
+                                      period)) {
+          return *bad;
+        }
+        if (period <= 0.0) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_clock: -period must be positive, got: " +
+                  FormatNum(period));
+        }
+        std::vector<std::pair<std::string, std::string>> params;
+        params.emplace_back("period_ns", FormatNum(period));
+        if (opts.Seen("-waveform")) {
+          const std::vector<std::string> wave = opts.Values("-waveform");
+          double rise = 0.0;
+          double fall = 0.0;
+          if (!ParseDouble(wave[0], rise) ||
+              !ParseDouble(wave[1], fall)) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "create_clock: -waveform needs two numbers, got: " +
+                    wave[0] + " " + wave[1]);
+          }
+          if (rise < 0.0 || fall < 0.0 || rise >= fall ||
+              fall > period) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "create_clock: -waveform needs 0 <= rise < fall <= "
+                "period, got: " +
+                    FormatNum(rise) + " " + FormatNum(fall) +
+                    " with period " + FormatNum(period));
+          }
+          params.emplace_back("waveform_rise_ns", FormatNum(rise));
+          params.emplace_back("waveform_fall_ns", FormatNum(fall));
+        }
+        std::vector<std::string> targets;
+        if (auto bad = NormalizeTargets(opts.Positionals(), "create_clock",
+                                        targets)) {
+          return *bad;
+        }
+        if (targets.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_clock: at least one target is required");
+        }
+        std::string name;
+        if (opts.Value("-name").has_value()) {
+          name = *opts.Value("-name");
+        } else if (targets.size() == 1) {
+          name = targets[0];
+        } else {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_clock: -name is required for several targets");
+        }
+        if (name.empty()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "create_clock: -name must not be "
+                                     "empty");
+        }
+        // Replace-by-default, scoped to SDC clock rows: construction
+        // records (bind_clock) sharing the name are untouched.
+        if (!opts.Has("-add")) {
+          std::vector<db::ConstraintId> dead;
+          for (const db::Constraint& c :
+               ctx.project.constraints.all()) {
+            if (c.kind == db::ConstraintKind::kClock &&
+                c.name == name &&
+                c.Param("period_ns").has_value()) {
+              dead.push_back(c.id);
+            }
+          }
+          for (db::ConstraintId id : dead) {
+            ctx.project.constraints.Remove(id);
+          }
+        }
+        return CommandResult::Ok(StoreTargets(
+            ctx, db::ConstraintKind::kClock, targets,
+            std::vector<std::string>(targets.size(), name), params));
+      });
+
+  add("create_generated_clock",
+      "create_generated_clock -source <pin> [-master_clock <name>] "
+      "[-divide_by <n>] [-multiply_by <n>] [-invert] [-add] "
+      "[-combinational] [-name <name>] <target>...",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-source", 1, false},
+                 {"-master_clock", 1, false},
+                 {"-divide_by", 1, false},
+                 {"-multiply_by", 1, false},
+                 {"-invert", 0, false},
+                 {"-add", 0, false},
+                 {"-combinational", 0, false},
+                 {"-name", 1, false}},
+                "create_generated_clock", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        if (!opts.Seen("-source")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_generated_clock: option -source is required");
+        }
+        std::string source;
+        if (auto bad = NormalizeTarget(*opts.Value("-source"),
+                                       "create_generated_clock", source)) {
+          return *bad;
+        }
+        const bool combinational = opts.Has("-combinational");
+        if (!combinational && !opts.Seen("-master_clock")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_generated_clock: -master_clock or "
+              "-combinational is required");
+        }
+        long divide_by = 0;
+        long multiply_by = 0;
+        if (opts.Seen("-divide_by")) {
+          if (!ParseInt(*opts.Value("-divide_by"), divide_by) ||
+              divide_by <= 0) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "create_generated_clock: -divide_by needs a positive "
+                "integer, got: " +
+                    *opts.Value("-divide_by"));
+          }
+        }
+        if (opts.Seen("-multiply_by")) {
+          if (!ParseInt(*opts.Value("-multiply_by"), multiply_by) ||
+              multiply_by <= 0) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "create_generated_clock: -multiply_by needs a "
+                "positive integer, got: " +
+                    *opts.Value("-multiply_by"));
+          }
+        }
+        if (!combinational && divide_by == 0 && multiply_by == 0) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_generated_clock: at least one of -divide_by, "
+              "-multiply_by is required (without -combinational)");
+        }
+        std::vector<std::string> targets;
+        if (auto bad = NormalizeTargets(opts.Positionals(),
+                                        "create_generated_clock",
+                                        targets)) {
+          return *bad;
+        }
+        if (targets.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_generated_clock: at least one target is "
+              "required");
+        }
+        std::string name;
+        if (opts.Value("-name").has_value()) {
+          name = *opts.Value("-name");
+        } else if (targets.size() == 1) {
+          name = targets[0];
+        } else {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_generated_clock: -name is required for "
+              "several targets");
+        }
+        if (name.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_generated_clock: -name must not be empty");
+        }
+        std::vector<std::pair<std::string, std::string>> params;
+        params.emplace_back("source", source);
+        if (opts.Seen("-master_clock")) {
+          params.emplace_back("master_clock",
+                              *opts.Value("-master_clock"));
+        }
+        if (divide_by != 0) {
+          params.emplace_back("divide_by", std::to_string(divide_by));
+        }
+        if (multiply_by != 0) {
+          params.emplace_back("multiply_by",
+                              std::to_string(multiply_by));
+        }
+        if (opts.Has("-invert")) params.emplace_back("invert", "1");
+        if (combinational) params.emplace_back("combinational", "1");
+        if (!opts.Has("-add")) {
+          ReplaceNamed(ctx, db::ConstraintKind::kGeneratedClock, name);
+        }
+        return CommandResult::Ok(StoreTargets(
+            ctx, db::ConstraintKind::kGeneratedClock, targets,
+            std::vector<std::string>(targets.size(), name), params));
+      });
+
+  add("set_clock_gating_check",
+      "set_clock_gating_check [-setup <ns>] [-hold <ns>] "
+      "[-high | -low] <target>...",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-setup", 1, false},
+                 {"-hold", 1, false},
+                 {"-high", 0, false},
+                 {"-low", 0, false}},
+                "set_clock_gating_check", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        if (!opts.Seen("-setup") && !opts.Seen("-hold")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_clock_gating_check: at least one of -setup, "
+              "-hold is required");
+        }
+        if (opts.Has("-high") && opts.Has("-low")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_clock_gating_check: -high and -low conflict");
+        }
+        std::vector<std::pair<std::string, std::string>> params;
+        double value = 0.0;
+        if (opts.Seen("-setup")) {
+          if (auto bad = ParseOptDouble(opts, "-setup",
+                                        "set_clock_gating_check",
+                                        value)) {
+            return *bad;
+          }
+          params.emplace_back("setup_ns", FormatNum(value));
+        }
+        if (opts.Seen("-hold")) {
+          if (auto bad = ParseOptDouble(opts, "-hold",
+                                        "set_clock_gating_check",
+                                        value)) {
+            return *bad;
+          }
+          params.emplace_back("hold_ns", FormatNum(value));
+        }
+        params.emplace_back(
+            "edge",
+            opts.Has("-high") ? "high" : (opts.Has("-low") ? "low" : "both"));
+        std::vector<std::string> targets;
+        if (auto bad = NormalizeTargets(opts.Positionals(),
+                                        "set_clock_gating_check",
+                                        targets)) {
+          return *bad;
+        }
+        if (targets.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_clock_gating_check: at least one target is "
+              "required");
+        }
+        std::vector<std::string> names;
+        for (const std::string& t : targets) {
+          names.push_back("clock_gating_check_" + t);
+        }
+        return CommandResult::Ok(StoreTargets(
+            ctx, db::ConstraintKind::kClockGatingCheck, targets, names,
+            params));
+      });
+
+  add("set_data_check",
+      "set_data_check -from <obj> [-from <obj>...] -to <obj> "
+      "[-to <obj>...] [-setup <ns>] [-hold <ns>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-from", 1, true},
+                 {"-to", 1, true},
+                 {"-setup", 1, false},
+                 {"-hold", 1, false}},
+                "set_data_check", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        if (!opts.Seen("-from") || !opts.Seen("-to")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_data_check: -from and -to are both required");
+        }
+        if (!opts.Seen("-setup") && !opts.Seen("-hold")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_data_check: at least one of -setup, -hold is "
+              "required");
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_data_check: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        std::vector<std::pair<std::string, std::string>> base;
+        double value = 0.0;
+        if (opts.Seen("-setup")) {
+          if (auto bad = ParseOptDouble(opts, "-setup", "set_data_check",
+                                        value)) {
+            return *bad;
+          }
+          base.emplace_back("setup_ns", FormatNum(value));
+        }
+        if (opts.Seen("-hold")) {
+          if (auto bad = ParseOptDouble(opts, "-hold", "set_data_check",
+                                        value)) {
+            return *bad;
+          }
+          base.emplace_back("hold_ns", FormatNum(value));
+        }
+        std::vector<std::string> froms;
+        std::vector<std::string> tos;
+        if (auto bad = NormalizeTargets(opts.Values("-from"),
+                                        "set_data_check", froms)) {
+          return *bad;
+        }
+        if (auto bad = NormalizeTargets(opts.Values("-to"),
+                                        "set_data_check", tos)) {
+          return *bad;
+        }
+        // One row per (from, to) pair, bound to the constrained
+        // endpoint. The from endpoint is recorded, not bound, in
+        // this increment; a later unit can bind it.
+        std::string payload;
+        for (const std::string& to : tos) {
+          for (const std::string& from : froms) {
+            std::vector<std::pair<std::string, std::string>> params =
+                base;
+            params.emplace_back("from", from);
+            const db::ConstraintId id = ctx.project.constraints.Add(
+                db::ConstraintKind::kDataCheck,
+                "data_check_" + from + "_to_" + to, to,
+                *ctx.project.design, params);
+            const db::Constraint* c =
+                ctx.project.constraints.Find(id);
+            if (!payload.empty()) payload += "\n";
+            payload += "constraint=" + std::to_string(id) +
+                       " status=" + StatusWord(c->status) +
+                       " target=" + to;
+            if (c->status == db::BindingStatus::kBound) {
+              payload += " object=" + IdStr(c->bound_object);
+            }
+            payload += " params=";
+            for (std::size_t k = 0; k < params.size(); ++k) {
+              if (k != 0) payload += ";";
+              payload += params[k].first + "=" + params[k].second;
+            }
+          }
+        }
+        return CommandResult::Ok(payload);
+      });
+
+  add("set_min_pulse_width",
+      "set_min_pulse_width <ns> [-high | -low] <target>...",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-high", 0, false}, {"-low", 0, false}},
+                "set_min_pulse_width", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        if (opts.Has("-high") && opts.Has("-low")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_min_pulse_width: -high and -low conflict");
+        }
+        if (opts.Positionals().size() < 2) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::set_min_pulse_width <ns> [-high | -low] "
+              "<target>...");
+        }
+        double value = 0.0;
+        if (!ParseDouble(opts.Positionals()[0], value)) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_min_pulse_width: width needs a number, got: " +
+                  opts.Positionals()[0]);
+        }
+        if (value <= 0.0) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_min_pulse_width: width must be positive, got: " +
+                  FormatNum(value));
+        }
+        std::vector<std::string> raw_targets(
+            opts.Positionals().begin() + 1, opts.Positionals().end());
+        std::vector<std::string> targets;
+        if (auto bad = NormalizeTargets(raw_targets, "set_min_pulse_width",
+                                        targets)) {
+          return *bad;
+        }
+        std::vector<std::pair<std::string, std::string>> params;
+        params.emplace_back("value_ns", FormatNum(value));
+        params.emplace_back(
+            "edge",
+            opts.Has("-high") ? "high" : (opts.Has("-low") ? "low" : "both"));
+        std::vector<std::string> names;
+        for (const std::string& t : targets) {
+          names.push_back("min_pulse_width_" + t);
+        }
+        return CommandResult::Ok(StoreTargets(
+            ctx, db::ConstraintKind::kMinPulseWidth, targets, names,
+            params));
+      });
+
+  add("set_sense",
+      "set_sense (-positive | -negative | -stop_propagation) "
+      "[-clock <name>...] <pin>...",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-positive", 0, false},
+                 {"-negative", 0, false},
+                 {"-stop_propagation", 0, false},
+                 {"-clock", 1, true}},
+                "set_sense", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        const int types = (opts.Has("-positive") ? 1 : 0) +
+                          (opts.Has("-negative") ? 1 : 0) +
+                          (opts.Has("-stop_propagation") ? 1 : 0);
+        if (types != 1) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_sense: exactly one of -positive, -negative, "
+              "-stop_propagation is required");
+        }
+        std::vector<std::string> targets;
+        if (auto bad = NormalizeTargets(opts.Positionals(), "set_sense",
+                                        targets)) {
+          return *bad;
+        }
+        if (targets.empty()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "set_sense: at least one pin is "
+                                     "required");
+        }
+        std::vector<std::pair<std::string, std::string>> params;
+        params.emplace_back("sense",
+                            opts.Has("-positive")
+                                ? "positive"
+                                : (opts.Has("-negative")
+                                       ? "negative"
+                                       : "stop_propagation"));
+        // Clock names are recorded, not bound, in this increment.
+        if (opts.Seen("-clock")) {
+          std::string clocks;
+          for (const std::string& clock : opts.Values("-clock")) {
+            if (!clocks.empty()) clocks += " ";
+            clocks += clock;
+          }
+          params.emplace_back("sense_clocks", clocks);
+        }
+        std::vector<std::string> names;
+        for (const std::string& t : targets) {
+          names.push_back("sense_" + t);
+        }
+        return CommandResult::Ok(StoreTargets(
+            ctx, db::ConstraintKind::kSense, targets, names, params));
+      });
+
+  add("set_ideal_network", "set_ideal_network [-no_propagate] <target>...",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(args, {{"-no_propagate", 0, false}},
+                                         "set_ideal_network", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        std::vector<std::string> targets;
+        if (auto bad = NormalizeTargets(opts.Positionals(),
+                                        "set_ideal_network", targets)) {
+          return *bad;
+        }
+        if (targets.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_ideal_network: at least one target is required");
+        }
+        std::vector<std::pair<std::string, std::string>> params;
+        if (opts.Has("-no_propagate")) {
+          params.emplace_back("no_propagate", "1");
+        }
+        std::vector<std::string> names;
+        for (const std::string& t : targets) {
+          names.push_back("ideal_network_" + t);
+        }
+        return CommandResult::Ok(StoreTargets(
+            ctx, db::ConstraintKind::kIdealNetwork, targets, names,
+            params));
+      });
+
+  add("set_ideal_latency",
+      "set_ideal_latency <ns> [-rise | -fall] [-min | -max] "
+      "<target>...",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-rise", 0, false},
+                 {"-fall", 0, false},
+                 {"-min", 0, false},
+                 {"-max", 0, false}},
+                "set_ideal_latency", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        if (opts.Positionals().size() < 2) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::set_ideal_latency <ns> [-rise | -fall] "
+              "[-min | -max] <target>...");
+        }
+        double value = 0.0;
+        if (!ParseDouble(opts.Positionals()[0], value)) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_ideal_latency: latency needs a number, got: " +
+                  opts.Positionals()[0]);
+        }
+        if (value < 0.0) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_ideal_latency: latency must not be negative, "
+              "got: " +
+                  FormatNum(value));
+        }
+        std::vector<std::string> raw_targets(
+            opts.Positionals().begin() + 1, opts.Positionals().end());
+        std::vector<std::string> targets;
+        if (auto bad = NormalizeTargets(raw_targets, "set_ideal_latency",
+                                        targets)) {
+          return *bad;
+        }
+        std::vector<std::pair<std::string, std::string>> params;
+        params.emplace_back("value_ns", FormatNum(value));
+        params.emplace_back(
+            "edge",
+            opts.Has("-rise") && !opts.Has("-fall")
+                ? "rise"
+                : (!opts.Has("-rise") && opts.Has("-fall") ? "fall"
+                                                            : "both"));
+        params.emplace_back(
+            "delay",
+            opts.Has("-min") && !opts.Has("-max")
+                ? "min"
+                : (!opts.Has("-min") && opts.Has("-max") ? "max" : "both"));
+        std::vector<std::string> names;
+        for (const std::string& t : targets) {
+          names.push_back("ideal_latency_" + t);
+        }
+        return CommandResult::Ok(StoreTargets(
+            ctx, db::ConstraintKind::kIdealLatency, targets, names,
+            params));
+      });
+
+  add("set_ideal_transition",
+      "set_ideal_transition <ns> [-rise | -fall] [-min | -max] "
+      "<target>...",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-rise", 0, false},
+                 {"-fall", 0, false},
+                 {"-min", 0, false},
+                 {"-max", 0, false}},
+                "set_ideal_transition", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        if (opts.Positionals().size() < 2) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::set_ideal_transition <ns> [-rise | -fall] "
+              "[-min | -max] <target>...");
+        }
+        double value = 0.0;
+        if (!ParseDouble(opts.Positionals()[0], value)) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_ideal_transition: transition needs a number, "
+              "got: " +
+                  opts.Positionals()[0]);
+        }
+        if (value < 0.0) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_ideal_transition: transition must not be "
+              "negative, got: " +
+                  FormatNum(value));
+        }
+        std::vector<std::string> raw_targets(
+            opts.Positionals().begin() + 1, opts.Positionals().end());
+        std::vector<std::string> targets;
+        if (auto bad = NormalizeTargets(raw_targets, "set_ideal_transition",
+                                        targets)) {
+          return *bad;
+        }
+        std::vector<std::pair<std::string, std::string>> params;
+        params.emplace_back("value_ns", FormatNum(value));
+        params.emplace_back(
+            "edge",
+            opts.Has("-rise") && !opts.Has("-fall")
+                ? "rise"
+                : (!opts.Has("-rise") && opts.Has("-fall") ? "fall"
+                                                            : "both"));
+        params.emplace_back(
+            "delay",
+            opts.Has("-min") && !opts.Has("-max")
+                ? "min"
+                : (!opts.Has("-min") && opts.Has("-max") ? "max" : "both"));
+        std::vector<std::string> names;
+        for (const std::string& t : targets) {
+          names.push_back("ideal_transition_" + t);
+        }
+        return CommandResult::Ok(StoreTargets(
+            ctx, db::ConstraintKind::kIdealTransition, targets, names,
+            params));
+      });
+
+  add("group_path",
+      "group_path -name <group> [-from <obj>...] [-to <obj>...] "
+      "[-through <obj>...] [-weight <w>] [-critical_range <ns>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-name", 1, false},
+                 {"-from", 1, true},
+                 {"-to", 1, true},
+                 {"-through", 1, true},
+                 {"-weight", 1, false},
+                 {"-critical_range", 1, false}},
+                "group_path", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        if (!opts.Seen("-name") || opts.Value("-name")->empty()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "group_path: option -name is "
+                                     "required");
+        }
+        if (!opts.Seen("-from") && !opts.Seen("-to") &&
+            !opts.Seen("-through")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "group_path: at least one of -from, -to, -through is "
+              "required");
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "group_path: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        double weight = 0.0;
+        double critical_range = 0.0;
+        if (opts.Seen("-weight")) {
+          if (auto bad = ParseOptDouble(opts, "-weight", "group_path",
+                                        weight)) {
+            return *bad;
+          }
+        }
+        if (opts.Seen("-critical_range")) {
+          if (auto bad = ParseOptDouble(opts, "-critical_range",
+                                        "group_path", critical_range)) {
+            return *bad;
+          }
+          if (critical_range < 0.0) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "group_path: -critical_range must not be negative, "
+                "got: " +
+                    FormatNum(critical_range));
+          }
+        }
+        std::vector<std::string> froms;
+        std::vector<std::string> tos;
+        std::vector<std::string> throughs;
+        if (auto bad = NormalizeTargets(opts.Values("-from"), "group_path",
+                                        froms)) {
+          return *bad;
+        }
+        if (auto bad = NormalizeTargets(opts.Values("-to"), "group_path",
+                                        tos)) {
+          return *bad;
+        }
+        if (auto bad = NormalizeTargets(opts.Values("-through"),
+                                        "group_path", throughs)) {
+          return *bad;
+        }
+        const auto join = [](const std::vector<std::string>& items) {
+          std::string out;
+          for (const std::string& item : items) {
+            if (!out.empty()) out += " ";
+            out += item;
+          }
+          return out;
+        };
+        std::vector<std::pair<std::string, std::string>> params;
+        params.emplace_back("group", *opts.Value("-name"));
+        if (!froms.empty()) params.emplace_back("from", join(froms));
+        if (!throughs.empty()) {
+          params.emplace_back("through", join(throughs));
+        }
+        if (opts.Seen("-weight")) {
+          params.emplace_back("weight", FormatNum(weight));
+        }
+        if (opts.Seen("-critical_range")) {
+          params.emplace_back("critical_range", FormatNum(critical_range));
+        }
+        // Rows bind to the endpoints: -to first, else -through,
+        // else -from. The other lists are recorded, not bound.
+        const std::vector<std::string>& endpoints =
+            !tos.empty() ? tos : (!throughs.empty() ? throughs : froms);
+        const std::string group = *opts.Value("-name");
+        ReplaceNamed(ctx, db::ConstraintKind::kGroupPath, group);
+        return CommandResult::Ok(StoreTargets(
+            ctx, db::ConstraintKind::kGroupPath, endpoints,
+            std::vector<std::string>(endpoints.size(), group), params));
+      });
+
+  add("set_max_time_borrow", "set_max_time_borrow <ns> <target>...",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(args, {}, "set_max_time_borrow",
+                                         opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        if (opts.Positionals().size() < 2) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::set_max_time_borrow <ns> <target>...");
+        }
+        double value = 0.0;
+        if (!ParseDouble(opts.Positionals()[0], value)) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_max_time_borrow: borrow needs a number, got: " +
+                  opts.Positionals()[0]);
+        }
+        if (value < 0.0) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_max_time_borrow: borrow must not be negative, "
+              "got: " +
+                  FormatNum(value));
+        }
+        std::vector<std::string> raw_targets(
+            opts.Positionals().begin() + 1, opts.Positionals().end());
+        std::vector<std::string> targets;
+        if (auto bad = NormalizeTargets(raw_targets, "set_max_time_borrow",
+                                        targets)) {
+          return *bad;
+        }
+        std::vector<std::pair<std::string, std::string>> params;
+        params.emplace_back("value_ns", FormatNum(value));
+        std::vector<std::string> names;
+        for (const std::string& t : targets) {
+          names.push_back("max_time_borrow_" + t);
+        }
+        return CommandResult::Ok(StoreTargets(
+            ctx, db::ConstraintKind::kMaxTimeBorrow, targets, names,
+            params));
       });
 
   add("rebind_constraints", "rebind_constraints",

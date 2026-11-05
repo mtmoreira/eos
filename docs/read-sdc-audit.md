@@ -264,6 +264,15 @@ single uniform rule; it is per proc.
 
 ## 5. `create_clock` collision: no misinterpretation at the STA level, two disjoint systems
 
+Note, 2026-11-02 (Immediate unit 3): the collision described below
+is resolved in the tree from this date. The registry command
+`create_clock` is now the SDC command documented in
+`docs/sdc-commands.md`, and the design-construction record moved to
+`bind_clock <name> <target>`. The old two-argument
+`create_clock <name> <target>` form fails fast and names
+`bind_clock`. The paragraphs below remain a true record of the tree
+this audit audited; they describe the pre-unit-3 state.
+
 SDC-file `create_clock` is fully accepted with SDC semantics
 (`Sdc.tcl:1088-1184`: `-name -period -waveform -add -comment`,
 `make_clock`; `-period` mandatory, waveform default `{0 period/2}`).

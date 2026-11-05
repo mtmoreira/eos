@@ -307,5 +307,68 @@ TEST(Checkpoint, SerializeRefusesTheSameStatesSaveRefuses) {
   EXPECT_FALSE(Checkpoint::Serialize(data).ok());
 }
 
+TEST(Checkpoint, OldSevenTokenConstraintLinesStillLoad) {
+  Fixture f;
+  const Result<std::string> text = Checkpoint::Serialize(f.Data());
+  ASSERT_TRUE(text.ok());
+  // The fixture carries no parameters, so every constraint line
+  // keeps the old seven-token shape. Pin that shape explicitly,
+  // then prove the parser still accepts it.
+  std::size_t lines = 0;
+  std::istringstream in(text.value());
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.rfind("constraint ", 0) != 0) continue;
+    ++lines;
+    std::size_t tokens = 1;
+    for (const char c : line) {
+      if (c == ' ') ++tokens;
+    }
+    EXPECT_EQ(tokens, 7u) << line;
+  }
+  EXPECT_EQ(lines, 3u);
+  const Result<CheckpointData> parsed =
+      Checkpoint::FromString(text.value(), nullptr);
+  ASSERT_TRUE(parsed.ok());
+  const Result<ConstraintSet> constraints =
+      ConstraintSet::FromState(parsed.value().constraints);
+  ASSERT_TRUE(constraints.ok());
+  EXPECT_EQ(constraints.value().all().size(), 3u);
+  for (const Constraint& c : constraints.value().all()) {
+    EXPECT_TRUE(c.params.empty());
+  }
+}
+
+TEST(Checkpoint, ParametrizedConstraintsRoundTripWithEscaping) {
+  Fixture f;
+  f.constraints.Add(ConstraintKind::kClock, "sys", "clk", f.design,
+                    {{"period_ns", "10"}, {"waveform_rise_ns", "0"}});
+  f.constraints.Add(ConstraintKind::kGroupPath, "grp", "clk", f.design,
+                    {{"group", "grp"}, {"from", "a b"}});
+  const Result<std::string> text = Checkpoint::Serialize(f.Data());
+  ASSERT_TRUE(text.ok());
+  EXPECT_NE(text.value().find("param period_ns 10"), std::string::npos);
+  // The space in "a b" is escaped, never a bare separator.
+  EXPECT_NE(text.value().find("param from a%20b"), std::string::npos);
+  const Result<CheckpointData> parsed =
+      Checkpoint::FromString(text.value(), nullptr);
+  ASSERT_TRUE(parsed.ok());
+  const Result<ConstraintSet> constraints =
+      ConstraintSet::FromState(parsed.value().constraints);
+  ASSERT_TRUE(constraints.ok());
+  const Constraint* sys = nullptr;
+  const Constraint* grp = nullptr;
+  for (const Constraint& c : constraints.value().all()) {
+    if (c.name == "sys") sys = &c;
+    if (c.name == "grp") grp = &c;
+  }
+  ASSERT_NE(sys, nullptr);
+  EXPECT_EQ(sys->Param("period_ns").value_or(""), "10");
+  EXPECT_EQ(sys->Param("waveform_rise_ns").value_or(""), "0");
+  ASSERT_NE(grp, nullptr);
+  EXPECT_EQ(grp->Param("group").value_or(""), "grp");
+  EXPECT_EQ(grp->Param("from").value_or(""), "a b");
+}
+
 }  // namespace
 }  // namespace eos::db

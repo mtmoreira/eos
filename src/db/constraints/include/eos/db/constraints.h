@@ -31,7 +31,9 @@
 #define EOS_DB_CONSTRAINTS_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "eos/db/design.h"
@@ -51,6 +53,16 @@ enum class ConstraintKind : std::int32_t {
   kMaxDelay = 5,
   kMinDelay = 6,
   kCaseAnalysis = 7,
+  kClockGatingCheck = 8,
+  kDataCheck = 9,
+  kMinPulseWidth = 10,
+  kSense = 11,
+  kIdealNetwork = 12,
+  kIdealLatency = 13,
+  kIdealTransition = 14,
+  kGroupPath = 15,
+  kMaxTimeBorrow = 16,
+  kGeneratedClock = 17,
 };
 
 enum class BindingStatus : std::int32_t {
@@ -65,9 +77,24 @@ struct Constraint {
   ConstraintId id = 0;
   ConstraintKind kind = ConstraintKind::kClock;
   std::string name;
-  std::string target_spec;  // exactly as written by the user
+  std::string target_spec;  // exactly as written by the user, except
+  // that handlers normalize get_* address expressions to the object
+  // name before storing, so a wrapped address binds.
   ObjectId bound_object;    // null unless status is kBound
   BindingStatus status = BindingStatus::kUnresolved;
+  // Ordered key/value parameters carrying the command's semantics
+  // (period_ns, waveform_rise_ns, setup_ns, ...). Empty for the
+  // plain construction record. Later checks read these through
+  // Param; the checkpoint format carries them as trailing
+  // "param <key> <value>" triples on the constraint line.
+  std::vector<std::pair<std::string, std::string>> params;
+  // First value for key, or nullopt when the key is absent.
+  std::optional<std::string> Param(const std::string& key) const {
+    for (const auto& pair : params) {
+      if (pair.first == key) return pair.second;
+    }
+    return std::nullopt;
+  }
 };
 
 struct CoverageReport {
@@ -95,6 +122,18 @@ class ConstraintSet {
   // with its status and returned id either way.
   ConstraintId Add(ConstraintKind kind, const std::string& name,
                    const std::string& target_spec, const Design& design);
+
+  // Adds a constraint with semantic parameters (see Constraint::
+  // params). Parameters do not affect binding: resolution still
+  // runs on target_spec alone.
+  ConstraintId Add(ConstraintKind kind, const std::string& name,
+                   const std::string& target_spec, const Design& design,
+                   std::vector<std::pair<std::string, std::string>> params);
+
+  // Removes the constraint with this id, if present. Used by the
+  // clock commands' replace-by-default semantics: redefining a named
+  // clock replaces the old rows rather than stacking duplicates.
+  bool Remove(ConstraintId id);
 
   // Re-runs resolution for every constraint, in place. Statuses move
   // in both directions: an unresolved target that now exists binds,

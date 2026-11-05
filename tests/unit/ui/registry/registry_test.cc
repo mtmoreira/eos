@@ -62,11 +62,17 @@ TEST(Registry, CoreSetIsComplete) {
   // floorplan; U3 adds synth_blocks; U4 adds synth_schematic;
   // U5 adds synth_stats; PR4 adds repair_timing and set_wire_rc;
   // P2 adds place; P3 adds cts; P4 adds route; P6 adds
-  // extract_parasitics; P7 adds finish and write_gds.
-  EXPECT_EQ(shell.registry.Names().size(), 59u);
+  // extract_parasitics; P7 adds finish and write_gds; Immediate
+  // unit 3 renames create_clock to bind_clock (same slot) and
+  // adds create_clock (SDC), create_generated_clock, and the
+  // nine M27 commands.
+  EXPECT_EQ(shell.registry.Names().size(), 70u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
+  EXPECT_NE(shell.registry.Find("bind_clock"), nullptr);
+  EXPECT_NE(shell.registry.Find("create_clock"), nullptr);
+  EXPECT_NE(shell.registry.Find("create_generated_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -137,12 +143,12 @@ TEST(CoreCommands, ConstraintsReportTheirBindingHonestly) {
   Shell shell;
   ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
   ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
-  const CommandResult bound = shell.Run("create_clock", {"c1", "clk"});
+  const CommandResult bound = shell.Run("bind_clock", {"c1", "clk"});
   ASSERT_TRUE(bound.ok);
   EXPECT_NE(bound.payload.find("status=bound"), std::string::npos);
 
   const CommandResult unresolved =
-      shell.Run("create_clock", {"c2", "missing_clk"});
+      shell.Run("bind_clock", {"c2", "missing_clk"});
   ASSERT_TRUE(unresolved.ok);  // the command succeeded...
   EXPECT_NE(unresolved.payload.find("status=unresolved"),
             std::string::npos);  // ...and says so, loudly.
@@ -209,7 +215,7 @@ TEST(CoreCommands, CheckpointAndRestoreRoundTripTheWholeProject) {
   Shell shell;
   ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
   ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
-  ASSERT_TRUE(shell.Run("create_clock", {"c1", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("bind_clock", {"c1", "clk"}).ok);
   ASSERT_TRUE(
       shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
           .ok);
@@ -280,7 +286,7 @@ TEST(CoreCommands, ExportCheckPassesAndNamesEveryBlockerKind) {
   Shell shell;
   ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
   ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
-  ASSERT_TRUE(shell.Run("create_clock", {"c1", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("bind_clock", {"c1", "clk"}).ok);
   ASSERT_TRUE(
       shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
           .ok);
@@ -309,7 +315,7 @@ TEST(CoreCommands, ExportCheckPassesAndNamesEveryBlockerKind) {
   // Coverage: an unresolved constraint blocks even a fresh report.
   Shell uncovered;
   ASSERT_TRUE(uncovered.Run("create_design", {"top"}).ok);
-  ASSERT_TRUE(uncovered.Run("create_clock", {"c1", "missing_clk"}).ok);
+  ASSERT_TRUE(uncovered.Run("bind_clock", {"c1", "missing_clk"}).ok);
   ASSERT_TRUE(uncovered.Run("register_report", {"timing", "pass"}).ok);
   const CommandResult blocked = uncovered.Run("export_check", {"timing"});
   ASSERT_FALSE(blocked.ok);
@@ -320,7 +326,7 @@ TEST(CoreCommands, ExportCheckPassesAndNamesEveryBlockerKind) {
   Shell unproven;
   ASSERT_TRUE(unproven.Run("create_design", {"top"}).ok);
   ASSERT_TRUE(unproven.Run("create_port", {"clk", "in"}).ok);
-  ASSERT_TRUE(unproven.Run("create_clock", {"c1", "clk"}).ok);
+  ASSERT_TRUE(unproven.Run("bind_clock", {"c1", "clk"}).ok);
   ASSERT_TRUE(unproven.Run("register_report", {"timing"}).ok);
   const CommandResult proof = unproven.Run("export_check", {"timing"});
   ASSERT_FALSE(proof.ok);
@@ -3955,6 +3961,423 @@ TEST(RepairCommands, RepairTimingFailsFastWithoutWireRcData) {
   EXPECT_EQ(no_layer_data.diag, Diag::kInvalidConfiguration);
   EXPECT_NE(no_layer_data.message.find("no wire RC data for layer metal1"),
             std::string::npos);
+}
+
+// ---- SDC command family (Immediate unit 3) -----------------------
+// Every new or renamed command gets valid-option and failure-mode
+// coverage, not just the happy path.
+
+TEST(SdcCommands, OldCreateClockFormFailsFastNamingBindClock) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  const CommandResult old = shell.Run("create_clock", {"c1", "clk"});
+  ASSERT_FALSE(old.ok) << old.payload;
+  EXPECT_EQ(old.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(old.message.find("bind_clock"), std::string::npos);
+  // The old form created nothing.
+  EXPECT_NE(shell.Run("list_constraints").payload.find("constraints=0"),
+            std::string::npos);
+  // A bare non-flag call that is not the old two-arg form still
+  // fails, on the missing period rather than the migration note.
+  const CommandResult bare = shell.Run("create_clock", {"clk"});
+  ASSERT_FALSE(bare.ok);
+  EXPECT_NE(bare.message.find("-period"), std::string::npos);
+}
+
+TEST(SdcCommands, CreateClockStoresPeriodWaveformAndName) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk2", "in"}).ok);
+  // Period only, single target: the name defaults to the target.
+  const CommandResult period_only =
+      shell.Run("create_clock", {"-period", "10", "clk"});
+  ASSERT_TRUE(period_only.ok) << period_only.message;
+  EXPECT_NE(period_only.payload.find("target=clk"), std::string::npos);
+  EXPECT_NE(period_only.payload.find("status=bound"), std::string::npos);
+  const CommandResult listed = shell.Run("list_constraints");
+  EXPECT_NE(listed.payload.find("kind=clock name=clk"),
+            std::string::npos);
+  EXPECT_NE(listed.payload.find("params=period_ns=10"),
+            std::string::npos);
+  // Waveform plus an explicit name.
+  const CommandResult waved = shell.Run(
+      "create_clock",
+      {"-period", "10", "-waveform", "0", "5", "-name", "sys", "clk"});
+  ASSERT_TRUE(waved.ok) << waved.message;
+  EXPECT_NE(waved.payload.find("params=period_ns=10;waveform_rise_ns=0;"
+                               "waveform_fall_ns=5"),
+            std::string::npos);
+  // Several targets need an explicit name and share it.
+  const CommandResult multi = shell.Run(
+      "create_clock",
+      {"-period", "8", "-name", "bus", "clk", "clk2"});
+  ASSERT_TRUE(multi.ok) << multi.message;
+  EXPECT_EQ(std::count(multi.payload.begin(), multi.payload.end(), '\n'),
+            1);
+  EXPECT_NE(multi.payload.find("target=clk"), std::string::npos);
+  EXPECT_NE(multi.payload.find("target=clk2"), std::string::npos);
+  // Payloads carry no name field; the shared name shows in the list.
+  const CommandResult multi_listed = shell.Run("list_constraints");
+  EXPECT_NE(multi_listed.payload.find("kind=clock name=bus target=clk "),
+            std::string::npos);
+  EXPECT_NE(multi_listed.payload.find("kind=clock name=bus target=clk2 "),
+            std::string::npos);
+  // A single-object get_ports wrapper unwraps to the port.
+  const CommandResult wrapped = shell.Run(
+      "create_clock", {"-period", "4", "[get_ports clk]"});
+  ASSERT_TRUE(wrapped.ok) << wrapped.message;
+  EXPECT_NE(wrapped.payload.find("target=clk"), std::string::npos);
+}
+
+TEST(SdcCommands, CreateClockReplaceByDefaultAndAddKeepsBoth) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_clock", {"-period", "10", "-name", "sys", "clk"})
+          .ok);
+  ASSERT_TRUE(
+      shell.Run("create_clock", {"-period", "20", "-name", "sys", "clk"})
+          .ok);
+  const CommandResult replaced = shell.Run("list_constraints");
+  EXPECT_EQ(std::count(replaced.payload.begin(), replaced.payload.end(),
+                       '\n'),
+            0);
+  EXPECT_NE(replaced.payload.find("period_ns=20"), std::string::npos);
+  EXPECT_EQ(replaced.payload.find("period_ns=10"), std::string::npos);
+  // With -add, the redefinition stacks instead of replacing.
+  ASSERT_TRUE(shell.Run("create_clock", {"-period", "30", "-name", "sys",
+                                         "-add", "clk"})
+                  .ok);
+  const CommandResult stacked = shell.Run("list_constraints");
+  EXPECT_EQ(std::count(stacked.payload.begin(), stacked.payload.end(),
+                       '\n'),
+            1);
+  EXPECT_NE(stacked.payload.find("period_ns=30"), std::string::npos);
+  // A construction record sharing the name survives replacement.
+  Shell mixed;
+  ASSERT_TRUE(mixed.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(mixed.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(mixed.Run("bind_clock", {"sys", "clk"}).ok);
+  ASSERT_TRUE(mixed.Run("create_clock", {"-period", "10", "-name", "sys",
+                                         "clk"})
+                  .ok);
+  const CommandResult kept = mixed.Run("list_constraints");
+  EXPECT_EQ(std::count(kept.payload.begin(), kept.payload.end(), '\n'), 1);
+  EXPECT_NE(kept.payload.find("params=period_ns=10"), std::string::npos);
+}
+
+TEST(SdcCommands, CreateClockFailureModes) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk2", "in"}).ok);
+  const std::vector<std::vector<std::string>> bad = {
+      {"clk"},                                        // no -period
+      {"-period", "0", "clk"},                        // not positive
+      {"-period", "-5", "clk"},                       // not positive
+      {"-period", "abc", "clk"},                      // not a number
+      {"-period", "10", "-waveform", "0", "clk"},     // one edge
+      {"-period", "10", "-waveform", "0", "5", "7",
+       "clk"},  // extra number becomes a positional, multi-target
+      {"-period", "10", "-waveform", "5", "5", "clk"},  // rise == fall
+      {"-period", "10", "-waveform", "7", "2", "clk"},  // rise > fall
+      {"-period", "10", "-waveform", "-1", "5", "clk"},  // negative rise
+      {"-period", "10", "-waveform", "0", "11", "clk"},  // fall > period
+      {"-period", "10", "clk", "clk2"},               // multi, no -name
+      {"-period", "10", "-bogus", "1", "clk"},        // unknown option
+      {"-period", "10", "-period", "20", "clk"},      // duplicate option
+      {"-period", "10"},                              // no target
+      {"-period"},                                    // missing value
+      {"-period", "10", "-name", "", "clk"},          // empty name
+      {"-period", "10", "[get_ports clk clk2]"},      // multi wrapper
+  };
+  for (const std::vector<std::string>& args : bad) {
+    const CommandResult result = shell.Run("create_clock", args);
+    ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
+    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  }
+}
+
+TEST(SdcCommands, CreateGeneratedClockStoresDivisionAndMultiply) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"out", "out"}).ok);
+  const CommandResult divided = shell.Run(
+      "create_generated_clock",
+      {"-source", "clk", "-master_clock", "sys", "-divide_by", "2",
+       "out"});
+  ASSERT_TRUE(divided.ok) << divided.message;
+  EXPECT_NE(divided.payload.find("target=out"), std::string::npos);
+  EXPECT_NE(divided.payload.find("source=clk"), std::string::npos);
+  EXPECT_NE(divided.payload.find("master_clock=sys"), std::string::npos);
+  EXPECT_NE(divided.payload.find("divide_by=2"), std::string::npos);
+  const CommandResult multiplied = shell.Run(
+      "create_generated_clock",
+      {"-source", "clk", "-master_clock", "sys", "-multiply_by", "3",
+       "-invert", "-name", "fast", "out"});
+  ASSERT_TRUE(multiplied.ok) << multiplied.message;
+  EXPECT_NE(multiplied.payload.find("multiply_by=3"), std::string::npos);
+  EXPECT_NE(multiplied.payload.find("invert=1"), std::string::npos);
+  const CommandResult combinational = shell.Run(
+      "create_generated_clock",
+      {"-source", "clk", "-combinational", "-name", "comb", "out"});
+  ASSERT_TRUE(combinational.ok) << combinational.message;
+  EXPECT_NE(combinational.payload.find("combinational=1"),
+            std::string::npos);
+}
+
+TEST(SdcCommands, CreateGeneratedClockFailureModes) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"out", "out"}).ok);
+  const std::vector<std::vector<std::string>> bad = {
+      {"-master_clock", "sys", "-divide_by", "2", "out"},  // no -source
+      {"-source", "clk", "-divide_by", "2", "out"},  // no master, not comb
+      {"-source", "clk", "-master_clock", "sys", "out"},  // no ratio
+      {"-source", "clk", "-master_clock", "sys", "-divide_by", "0",
+       "out"},
+      {"-source", "clk", "-master_clock", "sys", "-multiply_by", "-2",
+       "out"},
+      {"-source", "clk", "-master_clock", "sys", "-divide_by", "1.5",
+       "out"},
+      {"-source", "clk", "-master_clock", "sys", "-divide_by", "2"},
+      {"-source", "clk", "-combinational", "-divide_by", "2", "-divide_by",
+       "4", "out"},  // duplicate option
+  };
+  for (const std::vector<std::string>& args : bad) {
+    const CommandResult result =
+        shell.Run("create_generated_clock", args);
+    ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
+    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  }
+}
+
+TEST(SdcCommands, ClockGatingCheckStoresSetupHoldAndEdge) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  const CommandResult both = shell.Run(
+      "set_clock_gating_check", {"-setup", "0.5", "-hold", "0.2", "clk"});
+  ASSERT_TRUE(both.ok) << both.message;
+  EXPECT_NE(both.payload.find("setup_ns=0.5"), std::string::npos);
+  EXPECT_NE(both.payload.find("hold_ns=0.2"), std::string::npos);
+  EXPECT_NE(both.payload.find("edge=both"), std::string::npos);
+  const CommandResult high = shell.Run("set_clock_gating_check",
+                                       {"-setup", "0.5", "-high", "clk"});
+  ASSERT_TRUE(high.ok) << high.message;
+  EXPECT_NE(high.payload.find("edge=high"), std::string::npos);
+  const std::vector<std::vector<std::string>> bad = {
+      {"clk"},                                  // neither setup nor hold
+      {"-setup", "0.5", "-high", "-low", "clk"},  // conflicting edges
+      {"-setup", "abc", "clk"},                // bad number
+      {"-setup", "0.5", "-bogus", "clk"},      // unknown option
+      {"-setup", "0.5"},                       // no target
+  };
+  for (const std::vector<std::string>& args : bad) {
+    const CommandResult result = shell.Run("set_clock_gating_check", args);
+    ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
+    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  }
+}
+
+TEST(SdcCommands, DataCheckStoresCrossProductWithFromParam) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"a", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"b", "out"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"c", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"d", "out"}).ok);
+  const CommandResult single = shell.Run(
+      "set_data_check", {"-from", "a", "-to", "b", "-setup", "1"});
+  ASSERT_TRUE(single.ok) << single.message;
+  EXPECT_NE(single.payload.find("target=b"), std::string::npos);
+  EXPECT_NE(single.payload.find("from=a"), std::string::npos);
+  EXPECT_NE(single.payload.find("setup_ns=1"), std::string::npos);
+  const CommandResult cross = shell.Run(
+      "set_data_check",
+      {"-from", "a", "-from", "c", "-to", "b", "-to", "d", "-hold",
+       "0.25"});
+  ASSERT_TRUE(cross.ok) << cross.message;
+  EXPECT_EQ(std::count(cross.payload.begin(), cross.payload.end(), '\n'),
+            3);
+  EXPECT_NE(cross.payload.find("target=d"), std::string::npos);
+  EXPECT_NE(cross.payload.find("from=c"), std::string::npos);
+  const std::vector<std::vector<std::string>> bad = {
+      {"-to", "b", "-setup", "1"},        // no -from
+      {"-from", "a", "-setup", "1"},      // no -to
+      {"-from", "a", "-to", "b"},         // neither setup nor hold
+      {"-from", "a", "-to", "b", "-setup", "1", "stray"},  // positional
+  };
+  for (const std::vector<std::string>& args : bad) {
+    const CommandResult result = shell.Run("set_data_check", args);
+    ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
+    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  }
+}
+
+TEST(SdcCommands, MinPulseWidthStoresValueAndEdge) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  const CommandResult both =
+      shell.Run("set_min_pulse_width", {"0.3", "clk"});
+  ASSERT_TRUE(both.ok) << both.message;
+  EXPECT_NE(both.payload.find("value_ns=0.3"), std::string::npos);
+  EXPECT_NE(both.payload.find("edge=both"), std::string::npos);
+  const CommandResult low =
+      shell.Run("set_min_pulse_width", {"0.3", "-low", "clk"});
+  ASSERT_TRUE(low.ok) << low.message;
+  EXPECT_NE(low.payload.find("edge=low"), std::string::npos);
+  const std::vector<std::vector<std::string>> bad = {
+      {"clk"},                          // value missing (arity)
+      {"0.3"},                          // target missing (arity)
+      {"0", "clk"},                     // not positive
+      {"-1", "clk"},                    // not positive
+      {"abc", "clk"},                   // not a number
+      {"0.3", "-high", "-low", "clk"},  // conflicting edges
+  };
+  for (const std::vector<std::string>& args : bad) {
+    const CommandResult result = shell.Run("set_min_pulse_width", args);
+    ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
+    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  }
+}
+
+TEST(SdcCommands, SenseStoresTypeAndClockNames) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  const CommandResult positive =
+      shell.Run("set_sense", {"-positive", "clk"});
+  ASSERT_TRUE(positive.ok) << positive.message;
+  EXPECT_NE(positive.payload.find("sense=positive"), std::string::npos);
+  const CommandResult stopped = shell.Run(
+      "set_sense", {"-stop_propagation", "-clock", "sys", "clk"});
+  ASSERT_TRUE(stopped.ok) << stopped.message;
+  EXPECT_NE(stopped.payload.find("sense=stop_propagation"),
+            std::string::npos);
+  EXPECT_NE(stopped.payload.find("sense_clocks=sys"), std::string::npos);
+  const std::vector<std::vector<std::string>> bad = {
+      {"clk"},                             // no type flag
+      {"-positive", "-negative", "clk"},  // two type flags
+      {"-positive"},                       // no pin
+  };
+  for (const std::vector<std::string>& args : bad) {
+    const CommandResult result = shell.Run("set_sense", args);
+    ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
+    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  }
+}
+
+TEST(SdcCommands, IdealNetworkStoresNoPropagateFlag) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  const CommandResult plain = shell.Run("set_ideal_network", {"clk"});
+  ASSERT_TRUE(plain.ok) << plain.message;
+  EXPECT_NE(plain.payload.find("target=clk"), std::string::npos);
+  EXPECT_EQ(plain.payload.find("params="), std::string::npos);
+  const CommandResult held = shell.Run("set_ideal_network",
+                                       {"-no_propagate", "clk"});
+  ASSERT_TRUE(held.ok) << held.message;
+  EXPECT_NE(held.payload.find("no_propagate=1"), std::string::npos);
+  const CommandResult none = shell.Run("set_ideal_network", {});
+  ASSERT_FALSE(none.ok);
+  EXPECT_EQ(none.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(SdcCommands, IdealLatencyAndTransitionStoreValueEdgeDelay) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  const CommandResult latency = shell.Run(
+      "set_ideal_latency", {"1.5", "-rise", "-min", "clk"});
+  ASSERT_TRUE(latency.ok) << latency.message;
+  EXPECT_NE(latency.payload.find("value_ns=1.5"), std::string::npos);
+  EXPECT_NE(latency.payload.find("edge=rise"), std::string::npos);
+  EXPECT_NE(latency.payload.find("delay=min"), std::string::npos);
+  const CommandResult transition = shell.Run(
+      "set_ideal_transition", {"0.25", "clk"});
+  ASSERT_TRUE(transition.ok) << transition.message;
+  EXPECT_NE(transition.payload.find("value_ns=0.25"), std::string::npos);
+  EXPECT_NE(transition.payload.find("edge=both"), std::string::npos);
+  EXPECT_NE(transition.payload.find("delay=both"), std::string::npos);
+  const std::vector<std::vector<std::string>> bad = {
+      {"-1", "clk"},   // negative latency
+      {"abc", "clk"},  // not a number
+      {"1.5"},         // no target
+  };
+  for (const std::vector<std::string>& args : bad) {
+    ASSERT_FALSE(shell.Run("set_ideal_latency", args).ok);
+    ASSERT_FALSE(shell.Run("set_ideal_transition", args).ok);
+  }
+}
+
+TEST(SdcCommands, GroupPathStoresEndpointsAndRedefinitionReplaces) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"a", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"b", "out"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"c", "out"}).ok);
+  const CommandResult grouped = shell.Run(
+      "group_path",
+      {"-name", "grp", "-from", "a", "-to", "b", "-weight", "2",
+       "-critical_range", "0.5"});
+  ASSERT_TRUE(grouped.ok) << grouped.message;
+  EXPECT_NE(grouped.payload.find("target=b"), std::string::npos);
+  EXPECT_NE(grouped.payload.find("group=grp"), std::string::npos);
+  EXPECT_NE(grouped.payload.find("from=a"), std::string::npos);
+  EXPECT_NE(grouped.payload.find("weight=2"), std::string::npos);
+  EXPECT_NE(grouped.payload.find("critical_range=0.5"),
+            std::string::npos);
+  // Redefining the same group replaces its rows.
+  const CommandResult redefined = shell.Run(
+      "group_path", {"-name", "grp", "-to", "c"});
+  ASSERT_TRUE(redefined.ok) << redefined.message;
+  EXPECT_NE(redefined.payload.find("target=c"), std::string::npos);
+  const CommandResult listed = shell.Run("list_constraints");
+  EXPECT_EQ(std::count(listed.payload.begin(), listed.payload.end(),
+                       '\n'),
+            0);
+  EXPECT_NE(listed.payload.find("target=c"), std::string::npos);
+  const std::vector<std::vector<std::string>> bad = {
+      {"-from", "a", "-to", "b"},                    // no -name
+      {"-name", "grp"},                              // no endpoints
+      {"-name", "grp", "-to", "b", "-critical_range", "-0.5"},
+      {"-name", "grp", "-to", "b", "-weight", "abc"},
+      {"-name", "grp", "-to", "b", "stray"},          // positional
+  };
+  for (const std::vector<std::string>& args : bad) {
+    const CommandResult result = shell.Run("group_path", args);
+    ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
+    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  }
+}
+
+TEST(SdcCommands, MaxTimeBorrowStoresValue) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  const CommandResult borrowed =
+      shell.Run("set_max_time_borrow", {"0.4", "clk"});
+  ASSERT_TRUE(borrowed.ok) << borrowed.message;
+  EXPECT_NE(borrowed.payload.find("value_ns=0.4"), std::string::npos);
+  const std::vector<std::vector<std::string>> bad = {
+      {"clk"},         // value missing (arity)
+      {"0.4"},         // target missing (arity)
+      {"-0.1", "clk"}, // negative borrow
+      {"abc", "clk"},  // not a number
+  };
+  for (const std::vector<std::string>& args : bad) {
+    const CommandResult result = shell.Run("set_max_time_borrow", args);
+    ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
+    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  }
 }
 
 }  // namespace
