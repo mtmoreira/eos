@@ -102,7 +102,9 @@ Util.h gains explicit `fmt::formatter<cts::Point<T>>` and
 `fmt::formatter<cts::Box<T>>` specializations delegating to
 `ostream_formatter`, the same class of fix as the pdr and grt
 precedents. No log call is reworded and no computed value
-changes.
+changes. See section 10: the `using utl::format_as;` declaration
+that used to sit above these formatters had to be removed, since
+under fmt 10 it makes them ambiguous.
 
 ## 6. Resizer/dbSta forward declarations (TechChar.h)
 
@@ -195,3 +197,35 @@ before. The unused min values are dropped, not approximated.
   unit compiles at gnu++17 (LEMON 1.3.1 predates the C++20
   removal of std::allocator::construct/destroy). Same reason
   as the eda_pd_stt precedent; no imported file is patched.
+
+## 10. fmt 10: no format_as in namespace cts (Util.h)
+
+CI moved to Ubuntu 26.04 (unpinned ubuntu-latest), whose libfmt
+is 10.1.1, and the CMake build failed in HTreeBuilder.cpp: fmt
+10 reports "ambiguous template instantiation" for
+`formatter<cts::Point<double>, char, void>`. The two candidates
+are fmt's format_as-based formatter (format.h) and the explicit
+`formatter<cts::Point<T>>` / `formatter<cts::Box<T>>`
+ostream_formatter specializations from section 5. The
+format_as candidate exists only because Util.h carried
+`using utl::format_as;` in namespace cts: under fmt 10,
+utl::format_as (utl/Logger.h) is a function template for every
+streamable type, so ADL finds it for Point and Box.
+
+The fix removes that using-declaration (and records here that it
+must not come back). Nothing in this module calls format_as
+directly, and no Logger call formats a cts type other than Point
+and Box, so nothing loses a formatter: the section 5
+specializations stay as the only formatter candidate on every
+fmt version, and log output is byte-identical (verified locally
+by formatting Point and Box under fmt 9.1 and fmt 10.2.1 headers
+and diffing the output).
+
+Relying on format_as instead would have been wrong at runtime,
+not just ambiguous at compile time: utl::format_as takes its
+argument by value and returns fmt::streamed, which holds a
+reference to that dead copy, so the sink-region log lines would
+print garbage (observed in the same local repro before this fix
+was chosen). fmt 9 has no format_as-based formatter and fmt 11
+removed it, so this only bites fmt 10, which is also why the Mac
+build (Homebrew fmt 11) never saw it.
