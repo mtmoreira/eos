@@ -216,7 +216,16 @@ class Box
   bool centerSet_ = false;
 };
 
-using utl::format_as;
+// Do NOT bring utl::format_as into namespace cts. Under fmt 10
+// it makes format_as viable for every streamable cts type, and
+// fmt 10's format_as-based formatter then becomes ambiguous with
+// the explicit formatters below (fmt 10.2 reports "ambiguous
+// template instantiation" for
+// formatter<cts::Point<double>, char, void>). Nothing in this
+// module calls format_as directly, and no Logger call formats a
+// cts type other than Point and Box, so nothing loses a formatter
+// by this. (fmt 9 has no format_as-based formatter and fmt 11
+// removed it, which is why this only bites fmt 10.)
 
 }  // namespace cts
 
@@ -228,6 +237,18 @@ using utl::format_as;
 // They live in this port copy only. A formatter specialization
 // must live in namespace fmt, not inside namespace cts, and the
 // <fmt/ostream.h> include must also sit outside cts.
+//
+// These specializations must be the ONLY formatter candidate for
+// Point and Box. In particular, do not bring utl::format_as into
+// namespace cts (see the note above): under fmt 10 it makes
+// format_as viable for these types, and fmt 10's format_as-based
+// formatter is then ambiguous with these specializations. That
+// path would also be wrong at runtime: utl::format_as takes its
+// argument by value and returns fmt::streamed, which holds a
+// reference to that dead copy, so log lines would print garbage.
+// fmt 9 has no format_as-based formatter and fmt 11 removed it,
+// so this only bites fmt 10, which is also why the Mac build
+// (Homebrew fmt 11) never saw it.
 #if defined(__has_include)
 #if __has_include(<fmt/ostream.h>)
 #include <fmt/ostream.h>
