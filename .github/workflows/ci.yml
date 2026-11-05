@@ -28,6 +28,10 @@ jobs:
   build:
     name: CMake build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,7 +49,9 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -DEOS_BUILD_TESTS=ON -DCMAKE_PREFIX_PATH="$HOME/or-tools"
       - name: Build
-        run: cmake --build build
+        run: |
+          set -o pipefail
+          cmake --build build 2>&1 | tee build.log
       - name: Select affected tests
         id: select
         if: github.event_name == 'pull_request'
@@ -63,3 +69,58 @@ jobs:
           else
             ctest --test-dir build --no-tests=ignore --output-on-failure
           fi
+      - name: Post build failure to the pull request
+        if: failure()
+        run: |
+          set +e
+          # Resolve the pull request for this run; skip quietly when there is none.
+          PR="${{ github.event.pull_request.number }}"
+          if [ -z "$PR" ] && command -v gh >/dev/null 2>&1; then
+            PR=$(gh pr list --head "$GITHUB_SHA" --state open --json number --jq '.[0].number' 2>/dev/null)
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "No associated pull request; skipping failure comment."
+            exit 0
+          fi
+          # Skip if a comment for this run was already posted (job re-runs share the run id).
+          if command -v gh >/dev/null 2>&1; then
+            if gh pr view "$PR" --json comments --jq '.comments[].body' 2>/dev/null | grep -q "$GITHUB_RUN_ID"; then
+              echo "Failure comment already posted for this run; skipping."
+              exit 0
+            fi
+          fi
+          # Failing step name, from the run's job list when available.
+          FAIL_STEP="Build"
+          if command -v gh >/dev/null 2>&1; then
+            FAIL_STEP=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '[.jobs[] | select(.name == "CMake build") | .steps[] | select(.conclusion == "failure") | .name] | first // "Build"' 2>/dev/null)
+            [ -z "$FAIL_STEP" ] && FAIL_STEP="Build"
+          elif [ ! -s build.log ]; then
+            FAIL_STEP="before Build"
+          fi
+          # Tail of the build log, capped so the comment stays well under the limit.
+          if [ -s build.log ]; then
+            TAIL=$(tail -n 150 build.log | tail -c 30000)
+          else
+            TAIL="(no build log was produced; the failure happened before the Build step finished)"
+          fi
+          {
+            echo "## CI build failure"
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Job: CMake build"
+            echo "Failing step: $FAIL_STEP"
+            echo
+            echo "Tail of build.log (last 150 lines, capped):"
+            echo '```'
+            echo "$TAIL"
+            echo '```'
+          } > /tmp/eos-failure-comment.md
+          if command -v gh >/dev/null 2>&1; then
+            echo "Posting failure comment via gh."
+            gh pr comment "$PR" --body-file /tmp/eos-failure-comment.md
+          else
+            echo "gh unavailable; posting failure comment via the API."
+            BODY=$(python3 -c 'import json; print(json.dumps({"body": open("/tmp/eos-failure-comment.md").read()}))')
+            curl -s -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR/comments" -d "$BODY" > /dev/null
+          fi
+          exit 0
