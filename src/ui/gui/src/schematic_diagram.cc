@@ -6,11 +6,13 @@
 #include <QFont>
 #include <QFontMetrics>
 #include <QGraphicsLineItem>
+#include <QGraphicsPathItem>
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPainterPath>
 #include <QPen>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -43,12 +45,115 @@ constexpr qreal kInputX = 40;
 constexpr qreal kOutputX = 640;
 constexpr qreal kTerminalSize = 16;
 constexpr qreal kStubLength = 28;
+// Inversion bubble radius: NAND, NOR, XNOR, and NOT draw a
+// bubble of this radius past the output edge, and output
+// anchors shift by twice it so wires touch the bubble.
+constexpr qreal kBubbleRadius = 6;
+// OR-family geometry: the input-side curve sits kOrInset
+// inside the bounding rect and bulges kOrBulge toward the
+// output at mid-height. The XOR extra curve is the same curve
+// shifted kOrInset left, so it sits on the bounding edge.
+constexpr qreal kOrInset = 16;
+constexpr qreal kOrBulge = 14;
 
 struct Anchor {
   QPointF point;
   bool left_side;
   bool is_output;
 };
+
+// True for the symbols that carry an inversion bubble.
+bool IsInverted(GateSymbol symbol) {
+  return symbol == GateSymbol::kNand || symbol == GateSymbol::kNor ||
+         symbol == GateSymbol::kXnor || symbol == GateSymbol::kNot;
+}
+
+// X of the OR-family input-side curve at height y within rect:
+// the quadratic Bezier from (base, top) to (base, bottom)
+// with control (base + 2*bulge, middle). Base is left + inset
+// for OR/NOR and left for the XOR/XNOR extra curve.
+qreal LeftCurveX(qreal base, const QRectF& rect, qreal y) {
+  const qreal t = (y - rect.top()) / rect.height();
+  return base + 4 * kOrBulge * (1 - t) * t;
+}
+
+// Draws one gate symbol inside rect, filled white with a black
+// outline. The rect is the gate's bounding box: anchors and
+// labels use it, and every shape stays inside it except the
+// inversion bubble, which sits past the output edge.
+void DrawGateShape(QGraphicsScene* scene, const QRectF& rect,
+                   GateSymbol symbol) {
+  const qreal left = rect.left();
+  const qreal right = rect.right();
+  const qreal top = rect.top();
+  const qreal bottom = rect.bottom();
+  const qreal middle = top + rect.height() / 2;
+  const QPen pen(Qt::black, 1);
+  const QBrush brush(Qt::white);
+  auto add_shape = [&](const QPainterPath& path) {
+    auto* item = scene->addPath(path, pen, brush);
+    Q_UNUSED(item);
+  };
+  switch (symbol) {
+    case GateSymbol::kGeneric: {
+      auto* item = scene->addRect(rect);
+      item->setPen(pen);
+      item->setBrush(brush);
+      break;
+    }
+    case GateSymbol::kAnd:
+    case GateSymbol::kNand: {
+      QPainterPath path;
+      path.moveTo(left, top);
+      path.lineTo(right - rect.height() / 2, top);
+      path.arcTo(right - rect.height(), top, rect.height(),
+                 rect.height(), 90, -180);
+      path.lineTo(left, bottom);
+      path.closeSubpath();
+      add_shape(path);
+      break;
+    }
+    case GateSymbol::kOr:
+    case GateSymbol::kNor:
+    case GateSymbol::kXor:
+    case GateSymbol::kXnor: {
+      QPainterPath path;
+      path.moveTo(left + kOrInset, top);
+      path.quadTo(left + rect.width() * 0.55, top, right, middle);
+      path.quadTo(left + rect.width() * 0.55, bottom,
+                  left + kOrInset, bottom);
+      path.quadTo(left + kOrInset + 2 * kOrBulge, middle,
+                  left + kOrInset, top);
+      add_shape(path);
+      if (symbol == GateSymbol::kXor ||
+          symbol == GateSymbol::kXnor) {
+        QPainterPath extra;
+        extra.moveTo(left, top);
+        extra.quadTo(left + 2 * kOrBulge, middle, left, bottom);
+        auto* item = scene->addPath(extra, pen);
+        Q_UNUSED(item);
+      }
+      break;
+    }
+    case GateSymbol::kNot:
+    case GateSymbol::kBuf: {
+      QPainterPath path;
+      path.moveTo(left, top);
+      path.lineTo(left, bottom);
+      path.lineTo(right, middle);
+      path.closeSubpath();
+      add_shape(path);
+      break;
+    }
+  }
+  if (IsInverted(symbol)) {
+    auto* bubble = scene->addEllipse(
+        QRectF(right, middle - kBubbleRadius, 2 * kBubbleRadius,
+               2 * kBubbleRadius));
+    bubble->setPen(pen);
+    bubble->setBrush(brush);
+  }
+}
 
 std::string LastComponent(const std::string& path) {
   const std::size_t slash = path.rfind('/');
@@ -146,7 +251,9 @@ void SchematicDiagram::RebuildScene() {
     return;
   }
 
-  // Gate width fits the longest label, so names never overflow.
+  // Gate width fits the longest display label, so names never
+  // overflow. Display labels only: the raw instance can hold
+  // a synth temp path, which must never size or label a box.
   QFont instance_font;
   instance_font.setBold(true);
   QFontMetrics instance_metrics(instance_font);
@@ -155,14 +262,16 @@ void SchematicDiagram::RebuildScene() {
   qreal gate_width = kMinGateWidth;
   for (const SchematicGate& gate : schematic.Gates()) {
     const qreal instance_w = instance_metrics.horizontalAdvance(
-        QString::fromStdString(gate.instance));
+        QString::fromStdString(DisplayInstance(gate.instance)));
     const qreal type_w = type_metrics.horizontalAdvance(
-        QString::fromStdString(gate.type));
+        QString::fromStdString(DisplayType(gate.type)));
     gate_width = std::max(gate_width, std::max(instance_w, type_w) + 20);
   }
 
-  // Gate rectangles, one row each, in model order. Gates are
+  // Gate symbols, one row each, in model order. Gates are
   // not clickable: the schematic is the bottom of the stack.
+  // Labels are display labels, centered in the bounding rect;
+  // a gate with no display instance shows its type alone.
   std::map<std::string, QRectF> gate_rects;
   for (std::size_t i = 0; i < schematic.Gates().size(); ++i) {
     const SchematicGate& gate = schematic.Gates()[i];
@@ -170,19 +279,44 @@ void SchematicDiagram::RebuildScene() {
                                     (kGateHeight + kGateGap);
     const QRectF rect(kGateX, y, gate_width, kGateHeight);
     gate_rects[gate.instance] = rect;
-    auto* item = scene_->addRect(rect);
-    item->setPen(QPen(Qt::black, 1));
-    item->setBrush(QBrush(Qt::white));
-    item->setToolTip(QString::fromStdString(gate.instance + " (" +
-                                                  gate.type + ")"));
-    auto* instance_text = scene_->addSimpleText(
-        QString::fromStdString(gate.instance));
-    instance_text->setFont(instance_font);
-    instance_text->setPos(kGateX + 10, y + 8);
-    auto* type_text = scene_->addSimpleText(
-        QString::fromStdString(gate.type));
-    type_text->setFont(type_font);
-    type_text->setPos(kGateX + 10, y + 34);
+    DrawGateShape(scene_, rect, SymbolForType(gate.type));
+    const std::string instance_label = DisplayInstance(gate.instance);
+    const std::string type_label = DisplayType(gate.type);
+    const QString tooltip =
+        instance_label.empty()
+            ? QString::fromStdString(type_label)
+            : QString::fromStdString(instance_label + " (" +
+                                     type_label + ")");
+    // The tooltip belongs to the shape, but shapes are several
+    // items; attach it to a transparent rect over the bounds
+    // so hovering anywhere on the gate shows it.
+    auto* hover = scene_->addRect(rect);
+    hover->setPen(Qt::NoPen);
+    hover->setBrush(Qt::NoBrush);
+    hover->setToolTip(tooltip);
+    auto center_x = [&](const QFontMetrics& metrics,
+                        const std::string& text) {
+      return kGateX + (gate_width -
+                       metrics.horizontalAdvance(
+                           QString::fromStdString(text))) /
+                          2;
+    };
+    if (!instance_label.empty()) {
+      auto* instance_text = scene_->addSimpleText(
+          QString::fromStdString(instance_label));
+      instance_text->setFont(instance_font);
+      instance_text->setPos(center_x(instance_metrics, instance_label),
+                            y + 8);
+      auto* type_text = scene_->addSimpleText(
+          QString::fromStdString(type_label));
+      type_text->setFont(type_font);
+      type_text->setPos(center_x(type_metrics, type_label), y + 34);
+    } else {
+      auto* type_text = scene_->addSimpleText(
+          QString::fromStdString(type_label));
+      type_text->setFont(type_font);
+      type_text->setPos(center_x(type_metrics, type_label), y + 22);
+    }
   }
 
   // Terminals: input ports left, output and inout ports right,
@@ -251,7 +385,24 @@ void SchematicDiagram::RebuildScene() {
     const qreal y = rect.top() +
                     (static_cast<qreal>(index) + 1) * rect.height() /
                         (n + 1);
-    const qreal x = left_side ? rect.left() : rect.right();
+    qreal x = left_side ? rect.left() : rect.right();
+    // Shape-aware endpoints: input wires touch the OR-family
+    // curves, not the bounding edge, and output wires touch
+    // the inversion bubble, not the shape edge.
+    if (gate != nullptr) {
+      const GateSymbol symbol = SymbolForType(gate->type);
+      if (left_side) {
+        if (symbol == GateSymbol::kOr ||
+            symbol == GateSymbol::kNor) {
+          x = LeftCurveX(rect.left() + kOrInset, rect, y);
+        } else if (symbol == GateSymbol::kXor ||
+                   symbol == GateSymbol::kXnor) {
+          x = LeftCurveX(rect.left(), rect, y);
+        }
+      } else if (IsInverted(symbol)) {
+        x = rect.right() + 2 * kBubbleRadius;
+      }
+    }
     return Anchor{QPointF(x, y), left_side, is_output};
   };
 

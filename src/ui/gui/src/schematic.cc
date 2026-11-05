@@ -2,11 +2,100 @@
 // Qt-free).
 #include "eos/ui/schematic.h"
 
+#include <cctype>
 #include <set>
 #include <sstream>
 #include <utility>
 
 namespace eos::ui {
+
+namespace {
+
+// Normalizes a raw cell type for matching: strips one leading
+// '$' and lowercases, so $AND, $and, and and all match.
+std::string NormalizedType(const std::string& type) {
+  std::string out;
+  const std::size_t start = (!type.empty() && type[0] == '$') ? 1 : 0;
+  for (std::size_t i = start; i < type.size(); ++i) {
+    out += static_cast<char>(
+        std::tolower(static_cast<unsigned char>(type[i])));
+  }
+  return out;
+}
+
+bool IsDigits(const std::string& text) {
+  if (text.empty()) return false;
+  for (const char c : text) {
+    if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+GateSymbol SymbolForType(const std::string& type) {
+  const std::string normalized = NormalizedType(type);
+  if (normalized == "and") return GateSymbol::kAnd;
+  if (normalized == "nand") return GateSymbol::kNand;
+  if (normalized == "or") return GateSymbol::kOr;
+  if (normalized == "nor") return GateSymbol::kNor;
+  if (normalized == "xor") return GateSymbol::kXor;
+  if (normalized == "xnor") return GateSymbol::kXnor;
+  if (normalized == "not" || normalized == "inv") return GateSymbol::kNot;
+  if (normalized == "buf") return GateSymbol::kBuf;
+  return GateSymbol::kGeneric;
+}
+
+std::string DisplayType(const std::string& type) {
+  std::string out;
+  const std::size_t start = (!type.empty() && type[0] == '$') ? 1 : 0;
+  for (std::size_t i = start; i < type.size(); ++i) {
+    out += static_cast<char>(
+        std::toupper(static_cast<unsigned char>(type[i])));
+  }
+  return out;
+}
+
+std::string DisplayInstance(const std::string& instance) {
+  // Plain identifiers show as-is: no '$', no path.
+  if (instance.find('$') == std::string::npos &&
+      instance.find('/') == std::string::npos) {
+    return instance;
+  }
+  // Yosys auto names: $type$rest, where rest is file:line
+  // with an optional $counter suffix. The file:line middle
+  // is dropped in every case: it is a source location for a
+  // real file and a temp path for a synth temp file, and the
+  // widget shows neither. Only the counter survives, as
+  // #counter, so gates from one location stay distinct.
+  if (instance.size() >= 2 && instance[0] == '$') {
+    const std::size_t second = instance.find('$', 1);
+    if (second != std::string::npos) {
+      const std::string rest = instance.substr(second + 1);
+      const std::size_t counter = rest.rfind('$');
+      if (counter != std::string::npos &&
+          IsDigits(rest.substr(counter + 1))) {
+        return "#" + rest.substr(counter + 1);
+      }
+      return "";
+    }
+  }
+  // Any other path-bearing name: basename only, without a
+  // trailing :line suffix, and nothing for a temp basename.
+  // A leftover '$' means an unrecognized internal form, which
+  // shows nothing rather than leaking internals.
+  std::string base = instance;
+  const std::size_t slash = base.rfind('/');
+  if (slash != std::string::npos) base = base.substr(slash + 1);
+  const std::size_t colon = base.rfind(':');
+  if (colon != std::string::npos && IsDigits(base.substr(colon + 1))) {
+    base = base.substr(0, colon);
+  }
+  if (base.find("eos_synth") != std::string::npos) return "";
+  if (!base.empty() && base[0] == '$') base = base.substr(1);
+  if (base.find('$') != std::string::npos) return "";
+  return base;
+}
 
 namespace {
 

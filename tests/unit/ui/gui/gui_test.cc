@@ -20,6 +20,9 @@ using eos::ui::BreadcrumbPaths;
 using eos::ui::DiagramBlock;
 using eos::ui::DiagramModel;
 using eos::ui::DiagramNet;
+using eos::ui::DisplayInstance;
+using eos::ui::DisplayType;
+using eos::ui::GateSymbol;
 using eos::ui::HierarchyModel;
 using eos::ui::HierarchyNode;
 using eos::ui::LiveStatsModel;
@@ -29,6 +32,7 @@ using eos::ui::SchematicModel;
 using eos::ui::SchematicNet;
 using eos::ui::SessionView;
 using eos::ui::StepStatus;
+using eos::ui::SymbolForType;
 
 void RegisterPing(CommandRegistry& registry) {
   auto status = registry.Register(
@@ -687,6 +691,69 @@ TEST(SchematicModel, ParsesAutoNamedGatesWithColons) {
   EXPECT_EQ(n.endpoints[0].port, "Y");
   EXPECT_EQ(n.endpoints[1].gate, "$and$optloop.v:4$2");
   EXPECT_EQ(n.endpoints[1].port, "A");
+}
+
+TEST(SchematicDisplay, SymbolSelectionPerType) {
+  EXPECT_EQ(SymbolForType("$and"), GateSymbol::kAnd);
+  EXPECT_EQ(SymbolForType("$nand"), GateSymbol::kNand);
+  EXPECT_EQ(SymbolForType("$or"), GateSymbol::kOr);
+  EXPECT_EQ(SymbolForType("$nor"), GateSymbol::kNor);
+  EXPECT_EQ(SymbolForType("$xor"), GateSymbol::kXor);
+  EXPECT_EQ(SymbolForType("$xnor"), GateSymbol::kXnor);
+  EXPECT_EQ(SymbolForType("$not"), GateSymbol::kNot);
+  EXPECT_EQ(SymbolForType("$inv"), GateSymbol::kNot);
+  EXPECT_EQ(SymbolForType("$buf"), GateSymbol::kBuf);
+  EXPECT_EQ(SymbolForType("$AND"), GateSymbol::kAnd);
+  EXPECT_EQ(SymbolForType("and"), GateSymbol::kAnd);
+  EXPECT_EQ(SymbolForType("$add"), GateSymbol::kGeneric);
+  EXPECT_EQ(SymbolForType("$dff"), GateSymbol::kGeneric);
+  EXPECT_EQ(SymbolForType(""), GateSymbol::kGeneric);
+}
+
+TEST(SchematicDisplay, TypeLabelsDropDollarPrefix) {
+  EXPECT_EQ(DisplayType("$and"), "AND");
+  EXPECT_EQ(DisplayType("$not"), "NOT");
+  EXPECT_EQ(DisplayType("$add"), "ADD");
+  EXPECT_EQ(DisplayType("and"), "AND");
+  EXPECT_EQ(DisplayType("$xnor"), "XNOR");
+  EXPECT_EQ(DisplayType("$buf"), "BUF");
+}
+
+TEST(SchematicDisplay, InstanceLabelsKeepPlainNames) {
+  EXPECT_EQ(DisplayInstance("g1"), "g1");
+  EXPECT_EQ(DisplayInstance("g_abc"), "g_abc");
+  EXPECT_EQ(DisplayInstance("add"), "add");
+}
+
+TEST(SchematicDisplay, InstanceLabelsDropAutoNamePaths) {
+  // The owner's failing case: a synth temp path as the
+  // auto-name file. No path, temp name, or line survives.
+  EXPECT_EQ(
+      DisplayInstance(
+          "$and$/var/folders/kmj_qby98x6hv_n7918dfp7mcw000gn/T/"
+          "eos_synth_generic_49994_1v:1085"),
+      "");
+  EXPECT_EQ(
+      DisplayInstance(
+          "$and$/var/folders/kmj_qby98x6hv_n7918dfp7mcw000gn/T/"
+          "eos_synth_generic_49994_1v:1085$3"),
+      "#3");
+  // A real source file drops the same way: only the counter.
+  EXPECT_EQ(DisplayInstance("$and$optloop.v:4$1"), "#1");
+  EXPECT_EQ(DisplayInstance("$and$optloop.v:4"), "");
+  // A non-auto path shows its basename without the line.
+  EXPECT_EQ(DisplayInstance("a/b/c"), "c");
+  EXPECT_EQ(DisplayInstance("a/b/eos_synth_x:12"), "");
+  // No display label ever contains a path separator, a temp
+  // marker, or a dollar prefix.
+  for (const char* raw :
+       {"$and$/var/folders/x/eos_synth_generic_1v:9",
+        "$or$/tmp/y.v:2$7", "$xor$optloop.v:4$2"}) {
+    const std::string label = DisplayInstance(raw);
+    EXPECT_EQ(label.find('/'), std::string::npos);
+    EXPECT_EQ(label.find("eos_synth"), std::string::npos);
+    EXPECT_EQ(label.find('$'), std::string::npos);
+  }
 }
 
 TEST(SchematicModel, RejectsMalformedPayloads) {
