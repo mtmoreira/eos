@@ -36,6 +36,46 @@ struct SchematicGate {
   std::vector<SchematicPort> ports;
 };
 
+// The symbol the schematic widget draws for a gate type.
+// kGeneric is the fallback rectangle for any type with no
+// standard shape (adders, flip-flops, and anything else).
+enum class GateSymbol {
+  kAnd,
+  kNand,
+  kOr,
+  kNor,
+  kXor,
+  kXnor,
+  kNot,
+  kBuf,
+  kGeneric,
+};
+
+// Selects the symbol for a raw cell type such as $and or $not.
+// The match strips a leading '$' and ignores case, so $AND and
+// $and select the same symbol; $inv selects kNot like $not.
+// Any unrecognized type selects kGeneric.
+GateSymbol SymbolForType(const std::string& type);
+
+// The label the schematic widget shows for a raw cell type:
+// the type without its leading '$', uppercased, so $and shows
+// as AND and $not as NOT. The '$' internal prefix never
+// leaks into a label.
+std::string DisplayType(const std::string& type);
+
+// The label the schematic widget shows for a gate instance.
+// Plain identifiers show as-is. Yosys auto-generated names of
+// the form $type$file:line$counter show only the counter, as
+// #counter, and auto names without a counter show nothing, so
+// the widget shows the type alone: no file path, temp path, or
+// source location ever appears in a label. A non-auto name
+// that still contains a path shows only its basename without
+// a trailing :line suffix, and a temp-file basename shows
+// nothing. The model keeps the raw instance as the gate key;
+// this is display only, and net endpoints still match on the
+// raw name.
+std::string DisplayInstance(const std::string& instance);
+
 // One endpoint of a schematic net on a gate: the instance and
 // the port it touches.
 struct SchematicNetEndpoint {
