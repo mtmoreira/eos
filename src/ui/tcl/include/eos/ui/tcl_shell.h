@@ -15,6 +15,7 @@
 #define EOS_UI_TCL_SHELL_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,21 @@ class TclShell {
   // history. Returns 0 at EOF; Ctrl-C cancels the current line
   // without leaving the shell.
   int RunInteractive();
+
+  // One interactive line for callers that run their own loop,
+  // such as the GUI-mode terminal REPL (U6): the same linenoise
+  // editing, history, and tab completion as RunInteractive, on
+  // the same .eos_history file. Call InitInteractiveHistory
+  // once before the first read: it installs the completion
+  // callback and loads the history file when stdin is a
+  // terminal. ReadInteractiveLine returns nullopt at EOF
+  // (Ctrl-D on an empty line, or closed stdin); Ctrl-C cancels
+  // the current line and re-prompts instead of returning.
+  // Every non-empty line read is appended to history and saved.
+  // Piped stdin reads plainly with no prompt and touches no
+  // history.
+  void InitInteractiveHistory();
+  std::optional<std::string> ReadInteractiveLine(const char* prompt);
 
  private:
   TclShell() = default;

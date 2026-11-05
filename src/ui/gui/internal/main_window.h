@@ -10,11 +10,15 @@
 
 #include <string>
 
+#include "eos/ui/console_entry.h"
+
 class QCloseEvent;
+class QCompleter;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
+class QStringListModel;
 class QSplitter;
 
 namespace eos::ui {
@@ -52,6 +56,13 @@ class MainWindow : public QMainWindow {
   // accepted and the application quits.
   void closeEvent(QCloseEvent* event) override;
 
+  // Console entry keys: up and down cycle the entry's command
+  // history, Tab completes the registry command name (a popup
+  // lists multiple matches). While the completion popup is
+  // open, its own keys navigate and accept, and this filter
+  // stays out of the way.
+  bool eventFilter(QObject* watched, QEvent* event) override;
+
  private:
   void RefreshSteps();
   void RefreshConsole();
@@ -65,6 +76,9 @@ class MainWindow : public QMainWindow {
   PanelsView* panels_ = nullptr;
   QPlainTextEdit* console_ = nullptr;
   QLineEdit* entry_ = nullptr;
+  QCompleter* entry_completer_ = nullptr;
+  QStringListModel* entry_completion_model_ = nullptr;
+  ConsoleHistory entry_history_;
   bool stdin_closed_ = false;
 };
 

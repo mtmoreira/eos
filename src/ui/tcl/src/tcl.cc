@@ -156,34 +156,22 @@ int TclShell::RunFiles(const std::vector<std::string>& files) {
 }
 
 int TclShell::RunInteractive() {
-  // Line editing, history and completion come from linenoise. On a
-  // terminal it prints the prompt itself and handles arrow keys,
-  // Ctrl-C (cancel the line, errno EAGAIN) and Ctrl-D on an empty
-  // line (end of input, errno ENOENT); on a pipe it reads lines
-  // plainly and prints no prompt, so piped runs keep working.
-  // History is a terminal-only feature: piped runs neither read
-  // nor write the history file.
-  const bool tty = isatty(STDIN_FILENO) != 0;
-  linenoiseSetCompletionCallback(&CompleteCommand);
-  linenoiseHistorySetMaxLen(1000);
-  if (tty) {
-    linenoiseHistoryLoad(kHistoryFile);
-  }
-  g_completion_registry = impl_->registry;
+  // The loop shares the interactive reader with the GUI-mode
+  // terminal REPL, so both CLIs edit, complete, and remember
+  // identically. On a terminal the reader prints the prompt
+  // itself and handles arrow keys, Ctrl-C (cancel the line and
+  // re-prompt) and Ctrl-D on an empty line (end of input); on
+  // a pipe it reads lines plainly and prints no prompt, so
+  // piped runs keep working. History is a terminal-only
+  // feature: piped runs neither read nor write the history file.
+  InitInteractiveHistory();
   for (;;) {
-    errno = 0;
-    char* line = linenoise("eos> ");
-    if (line == nullptr) {
-      if (errno == EAGAIN) continue;
+    std::optional<std::string> line = ReadInteractiveLine("eos> ");
+    if (!line.has_value()) {
       std::printf("\n");
       break;
     }
-    if (tty && line[0] != '\0') {
-      linenoiseHistoryAdd(line);
-      linenoiseHistorySave(kHistoryFile);
-    }
-    const foundation::Result<std::string> result = Eval(line);
-    linenoiseFree(line);
+    const foundation::Result<std::string> result = Eval(*line);
     if (!result.ok()) {
       std::fprintf(stderr, "error: %s\n", result.status().message().c_str());
     } else if (!result.value().empty()) {
@@ -192,6 +180,35 @@ int TclShell::RunInteractive() {
   }
   g_completion_registry = nullptr;
   return 0;
+}
+
+void TclShell::InitInteractiveHistory() {
+  linenoiseSetCompletionCallback(&CompleteCommand);
+  linenoiseHistorySetMaxLen(1000);
+  if (isatty(STDIN_FILENO) != 0) {
+    linenoiseHistoryLoad(kHistoryFile);
+  }
+  g_completion_registry = impl_->registry;
+}
+
+std::optional<std::string> TclShell::ReadInteractiveLine(
+    const char* prompt) {
+  const bool tty = isatty(STDIN_FILENO) != 0;
+  for (;;) {
+    errno = 0;
+    char* line = linenoise(prompt);
+    if (line == nullptr) {
+      if (errno == EAGAIN) continue;
+      return std::nullopt;
+    }
+    std::string out(line);
+    linenoiseFree(line);
+    if (tty && !out.empty()) {
+      linenoiseHistoryAdd(out.c_str());
+      linenoiseHistorySave(kHistoryFile);
+    }
+    return out;
+  }
 }
 
 #else  // EOS_HAS_TCL
@@ -215,6 +232,12 @@ foundation::Result<std::string> TclShell::Eval(const std::string&) {
 int TclShell::RunFiles(const std::vector<std::string>&) { return 1; }
 
 int TclShell::RunInteractive() { return 1; }
+
+void TclShell::InitInteractiveHistory() {}
+
+std::optional<std::string> TclShell::ReadInteractiveLine(const char*) {
+  return std::nullopt;
+}
 
 #endif  // EOS_HAS_TCL
 

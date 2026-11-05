@@ -54,6 +54,12 @@ class SessionView {
   // message, exactly like a rejected dispatch.
   CommandResult DispatchEntry(const std::string& line);
 
+  // Registry command names in registry order, for the console
+  // entry's tab completion.
+  std::vector<std::string> CommandNames() const {
+    return registry_.Names();
+  }
+
   // Current checkpoint path (U6 indicator): the path of the last
   // successful checkpoint or restore dispatch, empty when no
   // checkpoint is current. A failed checkpoint or restore leaves
