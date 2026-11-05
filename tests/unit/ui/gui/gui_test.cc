@@ -1,4 +1,5 @@
 // gui: SessionView unit tests (Qt-free; no engines needed).
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -17,22 +18,34 @@ using eos::ui::CommandContext;
 using eos::ui::CommandRegistry;
 using eos::ui::CommandResult;
 using eos::ui::BreadcrumbPaths;
+using eos::ui::ComputeSchematicLayout;
 using eos::ui::DiagramBlock;
 using eos::ui::DiagramModel;
 using eos::ui::DiagramNet;
 using eos::ui::DisplayInstance;
 using eos::ui::DisplayType;
+using eos::ui::FaninCone;
+using eos::ui::FanoutCone;
 using eos::ui::GateSymbol;
 using eos::ui::HierarchyModel;
 using eos::ui::HierarchyNode;
 using eos::ui::LiveStatsModel;
+using eos::ui::NetLabel;
 using eos::ui::PanelsModel;
 using eos::ui::SchematicGate;
+using eos::ui::SchematicLayout;
+using eos::ui::SchematicLevels;
 using eos::ui::SchematicModel;
 using eos::ui::SchematicNet;
+using eos::ui::SchematicPoint;
 using eos::ui::SessionView;
 using eos::ui::StepStatus;
 using eos::ui::SymbolForType;
+using eos::ui::kSchematicColumnGap;
+using eos::ui::kSchematicGateHeight;
+using eos::ui::kSchematicGateTop;
+using eos::ui::kSchematicGateX;
+using eos::ui::kSchematicMinGateWidth;
 
 void RegisterPing(CommandRegistry& registry) {
   auto status = registry.Register(
@@ -615,6 +628,58 @@ const char kSchematicFlatPayload[] =
     "net name=y1 gates=g_y1:Y terminals=y1\n"
     "net name=y2 gates= terminals=y2\n";
 
+// A sequential source: a flip-flop whose Q feeds an AND, so
+// the flop is level 0 and the AND is level 1 even though the
+// flop's own data input comes from a parent terminal.
+const char kSchematicSeqPayload[] =
+    "module=seq\n"
+    "parent port=clk direction=in\n"
+    "parent port=d direction=in\n"
+    "parent port=q direction=out\n"
+    "gate instance=ff type=$adff ports=D:in,CLK:in,Q:out\n"
+    "gate instance=g1 type=$and ports=A:in,B:in,Y:out\n"
+    "net name=clk gates=ff:CLK terminals=clk\n"
+    "net name=d gates=ff:D terminals=d\n"
+    "net name=qff gates=ff:Q,g1:A terminals=\n"
+    "net name=y gates=g1:Y terminals=q\n";
+
+// A barycenter case: two level-0 gates feed two level-1 gates
+// crosswise in model order, so the level-1 order must flip to
+// line each gate up with its driver.
+const char kSchematicBaryPayload[] =
+    "module=bary\n"
+    "parent port=a direction=in\n"
+    "parent port=b direction=in\n"
+    "parent port=y direction=out\n"
+    "parent port=z direction=out\n"
+    "gate instance=g_top type=$and ports=A:in,B:in,Y:out\n"
+    "gate instance=g_bot type=$and ports=A:in,B:in,Y:out\n"
+    "gate instance=g_x type=$and ports=A:in,B:in,Y:out\n"
+    "gate instance=g_y type=$and ports=A:in,B:in,Y:out\n"
+    "net name=a gates=g_top:A terminals=a\n"
+    "net name=b gates=g_bot:A terminals=b\n"
+    "net name=t gates=g_top:Y,g_y:A terminals=\n"
+    "net name=u gates=g_bot:Y,g_x:A terminals=\n"
+    "net name=y gates=g_y:Y terminals=y\n"
+    "net name=z gates=g_x:Y terminals=z\n";
+
+// A fanout case: one AND drives two NOTs, so its output net
+// branches and needs exactly one branch dot.
+const char kSchematicFanoutPayload[] =
+    "module=fan\n"
+    "parent port=a direction=in\n"
+    "parent port=b direction=in\n"
+    "parent port=y direction=out\n"
+    "parent port=z direction=out\n"
+    "gate instance=g1 type=$and ports=A:in,B:in,Y:out\n"
+    "gate instance=g2 type=$not ports=A:in,Y:out\n"
+    "gate instance=g3 type=$not ports=A:in,Y:out\n"
+    "net name=a gates=g1:A terminals=a\n"
+    "net name=b gates=g1:B terminals=b\n"
+    "net name=n gates=g1:Y,g2:A,g3:A terminals=\n"
+    "net name=y gates=g2:Y terminals=y\n"
+    "net name=z gates=g3:Y terminals=z\n";
+
 TEST(SchematicModel, ParsesLeafPayload) {
   SchematicModel model;
   ASSERT_TRUE(model.LoadPayload(kSchematicLeafPayload));
@@ -754,6 +819,273 @@ TEST(SchematicDisplay, InstanceLabelsDropAutoNamePaths) {
     EXPECT_EQ(label.find("eos_synth"), std::string::npos);
     EXPECT_EQ(label.find('$'), std::string::npos);
   }
+}
+
+TEST(SchematicModel, ParsesNetWidth) {
+  SchematicModel model;
+  ASSERT_TRUE(model.LoadPayload(
+      "module=m\n"
+      "parent port=a direction=in\n"
+      "parent port=y direction=out\n"
+      "gate instance=g type=$and ports=A:in,Y:out\n"
+      "net name=a gates=g:A terminals=a width=8\n"
+      "net name=y gates=g:Y terminals=y\n"));
+  ASSERT_EQ(model.Nets().size(), 2u);
+  EXPECT_EQ(model.Nets()[0].width, 8);
+  EXPECT_EQ(model.Nets()[1].width, 1);
+  EXPECT_EQ(NetLabel(model.Nets()[0]), "a [8]");
+  EXPECT_EQ(NetLabel(model.Nets()[1]), "y");
+}
+
+TEST(SchematicModel, RejectsBadNetWidth) {
+  const char* bad[] = {
+      // Zero width.
+      "module=m\n"
+      "parent port=a direction=in\n"
+      "gate instance=g type=$and ports=A:in,Y:out\n"
+      "net name=a gates=g:A terminals=a width=0\n",
+      // Negative width.
+      "module=m\n"
+      "parent port=a direction=in\n"
+      "gate instance=g type=$and ports=A:in,Y:out\n"
+      "net name=a gates=g:A terminals=a width=-1\n",
+      // Non-numeric width.
+      "module=m\n"
+      "parent port=a direction=in\n"
+      "gate instance=g type=$and ports=A:in,Y:out\n"
+      "net name=a gates=g:A terminals=a width=abc\n",
+      // Fractional width.
+      "module=m\n"
+      "parent port=a direction=in\n"
+      "gate instance=g type=$and ports=A:in,Y:out\n"
+      "net name=a gates=g:A terminals=a width=1.5\n",
+      // Empty width.
+      "module=m\n"
+      "parent port=a direction=in\n"
+      "gate instance=g type=$and ports=A:in,Y:out\n"
+      "net name=a gates=g:A terminals=a width=\n",
+      // Unknown fourth field.
+      "module=m\n"
+      "parent port=a direction=in\n"
+      "gate instance=g type=$and ports=A:in,Y:out\n"
+      "net name=a gates=g:A terminals=a foo=1\n",
+  };
+  for (const char* payload : bad) {
+    SchematicModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_TRUE(model.Empty());
+  }
+}
+
+TEST(SchematicDisplay, NetLabelsCarryWidth) {
+  SchematicNet bus;
+  bus.name = "acc";
+  bus.width = 8;
+  EXPECT_EQ(NetLabel(bus), "acc [8]");
+  SchematicNet single;
+  single.name = "n";
+  single.width = 1;
+  EXPECT_EQ(NetLabel(single), "n");
+}
+
+TEST(SchematicLayout, LevelsChainOnOptloop) {
+  SchematicModel model;
+  ASSERT_TRUE(model.LoadPayload(kSchematicFlatPayload));
+  const std::map<std::string, int> levels = SchematicLevels(model);
+  ASSERT_EQ(levels.size(), 3u);
+  EXPECT_EQ(levels.at("g_ab"), 0);
+  EXPECT_EQ(levels.at("g_abc"), 1);
+  EXPECT_EQ(levels.at("g_y1"), 2);
+}
+
+TEST(SchematicLayout, SequentialOutputsAreSources) {
+  SchematicModel model;
+  ASSERT_TRUE(model.LoadPayload(kSchematicSeqPayload));
+  const std::map<std::string, int> levels = SchematicLevels(model);
+  ASSERT_EQ(levels.size(), 2u);
+  EXPECT_EQ(levels.at("ff"), 0);
+  EXPECT_EQ(levels.at("g1"), 1);
+  EXPECT_EQ(FaninCone(model, "g1"), std::set<std::string>({"ff"}));
+  EXPECT_EQ(FanoutCone(model, "ff"), std::set<std::string>({"g1"}));
+}
+
+TEST(SchematicLayout, BarycenterOrdersSharedDrivers) {
+  SchematicModel model;
+  ASSERT_TRUE(model.LoadPayload(kSchematicBaryPayload));
+  const SchematicLayout layout =
+      ComputeSchematicLayout(model, kSchematicMinGateWidth);
+  ASSERT_EQ(layout.gates.size(), 4u);
+  const auto* g_y = [&layout]() {
+    for (const auto& gate : layout.gates) {
+      if (gate.instance == "g_y") return &gate;
+    }
+    return static_cast<const decltype(&layout.gates[0])>(nullptr);
+  }();
+  const auto* g_x = [&layout]() {
+    for (const auto& gate : layout.gates) {
+      if (gate.instance == "g_x") return &gate;
+    }
+    return static_cast<const decltype(&layout.gates[0])>(nullptr);
+  }();
+  ASSERT_NE(g_y, nullptr);
+  ASSERT_NE(g_x, nullptr);
+  EXPECT_EQ(g_y->level, 1);
+  EXPECT_EQ(g_x->level, 1);
+  // g_y is driven by g_top (level-0 row 0) and g_x by g_bot
+  // (level-0 row 1), so g_y takes the upper row even though
+  // the payload lists g_x first.
+  EXPECT_EQ(g_y->row, 0);
+  EXPECT_EQ(g_x->row, 1);
+}
+
+TEST(SchematicLayout, ColumnsFollowLevels) {
+  SchematicModel model;
+  ASSERT_TRUE(model.LoadPayload(kSchematicFlatPayload));
+  const SchematicLayout layout =
+      ComputeSchematicLayout(model, kSchematicMinGateWidth);
+  ASSERT_EQ(layout.gates.size(), 3u);
+  // One gate per level, so model order is level order here.
+  EXPECT_EQ(layout.gates[0].instance, "g_ab");
+  EXPECT_EQ(layout.gates[0].level, 0);
+  EXPECT_EQ(layout.gates[0].x, kSchematicGateX);
+  EXPECT_EQ(layout.gates[1].instance, "g_abc");
+  EXPECT_EQ(layout.gates[1].level, 1);
+  EXPECT_EQ(layout.gates[1].x,
+            kSchematicGateX + kSchematicMinGateWidth +
+                kSchematicColumnGap);
+  EXPECT_EQ(layout.gates[2].instance, "g_y1");
+  EXPECT_EQ(layout.gates[2].level, 2);
+  EXPECT_EQ(layout.gates[2].x,
+            kSchematicGateX + 2 * (kSchematicMinGateWidth +
+                                   kSchematicColumnGap));
+  for (const auto& gate : layout.gates) {
+    EXPECT_EQ(gate.row, 0);
+    EXPECT_EQ(gate.height, kSchematicGateHeight);
+  }
+  // Output terminals sit one column gap past the last column.
+  EXPECT_EQ(layout.output_x, layout.gates[2].x + kSchematicMinGateWidth +
+                                  kSchematicColumnGap);
+  // Input terminals face right from the left edge, output
+  // terminals face left from the output column.
+  ASSERT_EQ(layout.terminals.size(), 6u);
+  EXPECT_EQ(layout.terminals[0].name, "a");
+  EXPECT_TRUE(layout.terminals[0].input_side);
+  EXPECT_EQ(layout.terminals[4].name, "y1");
+  EXPECT_FALSE(layout.terminals[4].input_side);
+  EXPECT_EQ(layout.terminals[4].x, layout.output_x);
+}
+
+namespace {
+
+// Whether two route segments cross: a proper perpendicular
+// crossing, or a collinear overlap with positive length.
+// Touching at a shared endpoint does not count.
+bool SegmentsCross(const SchematicPoint& a, const SchematicPoint& b,
+                   const SchematicPoint& c, const SchematicPoint& d) {
+  const bool ab_vertical = a.x == b.x;
+  const bool cd_vertical = c.x == d.x;
+  if (ab_vertical != cd_vertical) {
+    const double x = ab_vertical ? a.x : c.x;
+    const double y = ab_vertical ? c.y : a.y;
+    const double hx0 = std::min(ab_vertical ? c.x : a.x,
+                                ab_vertical ? d.x : b.x);
+    const double hx1 = std::max(ab_vertical ? c.x : a.x,
+                                ab_vertical ? d.x : b.x);
+    const double vy0 = std::min(ab_vertical ? a.y : c.y,
+                                ab_vertical ? b.y : d.y);
+    const double vy1 = std::max(ab_vertical ? a.y : c.y,
+                                ab_vertical ? b.y : d.y);
+    return x > hx0 && x < hx1 && y > vy0 && y < vy1;
+  }
+  if (ab_vertical) {
+    if (a.x != c.x) return false;
+    return std::max(std::min(a.y, b.y), std::min(c.y, d.y)) <
+           std::min(std::max(a.y, b.y), std::max(c.y, d.y));
+  }
+  if (a.y != c.y) return false;
+  return std::max(std::min(a.x, b.x), std::min(c.x, d.x)) <
+         std::min(std::max(a.x, b.x), std::max(c.x, d.x));
+}
+
+}  // namespace
+
+TEST(SchematicLayout, NoCrossingsOnOptloop) {
+  SchematicModel model;
+  ASSERT_TRUE(model.LoadPayload(kSchematicFlatPayload));
+  const SchematicLayout layout =
+      ComputeSchematicLayout(model, kSchematicMinGateWidth);
+  // Every routed segment is orthogonal, and no segment of one
+  // net crosses a segment of another: on the 3-gate optloop
+  // design the level layout has no avoidable crossings.
+  for (const auto& route : layout.nets) {
+    for (const auto& path : route.paths) {
+      for (std::size_t i = 1; i < path.size(); ++i) {
+        EXPECT_TRUE(path[i - 1].x == path[i].x ||
+                    path[i - 1].y == path[i].y)
+            << "route " << route.name << " has a diagonal segment";
+      }
+    }
+  }
+  for (std::size_t i = 0; i < layout.nets.size(); ++i) {
+    for (std::size_t j = i + 1; j < layout.nets.size(); ++j) {
+      for (const auto& first : layout.nets[i].paths) {
+        for (std::size_t a = 1; a < first.size(); ++a) {
+          for (const auto& second : layout.nets[j].paths) {
+            for (std::size_t b = 1; b < second.size(); ++b) {
+              EXPECT_FALSE(SegmentsCross(first[a - 1], first[a],
+                                         second[b - 1], second[b]))
+                  << "routes " << layout.nets[i].name << " and "
+                  << layout.nets[j].name << " cross";
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(SchematicLayout, BranchDotsMarkFanout) {
+  SchematicModel model;
+  ASSERT_TRUE(model.LoadPayload(kSchematicFanoutPayload));
+  const SchematicLayout layout =
+      ComputeSchematicLayout(model, kSchematicMinGateWidth);
+  const auto* fanout = [&layout]() {
+    for (const auto& route : layout.nets) {
+      if (route.name == "n") return &route;
+    }
+    return static_cast<const decltype(&layout.nets[0])>(nullptr);
+  }();
+  ASSERT_NE(fanout, nullptr);
+  ASSERT_EQ(fanout->paths.size(), 2u);
+  // One branch point: where the shared trunk meets the two
+  // load branches, at the trunk x and the driver output y.
+  ASSERT_EQ(fanout->branch_dots.size(), 1u);
+  EXPECT_EQ(fanout->branch_dots[0].x,
+            kSchematicGateX + kSchematicMinGateWidth +
+                kSchematicColumnGap / 2);
+  EXPECT_EQ(fanout->branch_dots[0].y,
+            kSchematicGateTop + kSchematicGateHeight / 2);
+  const auto* single = [&layout]() {
+    for (const auto& route : layout.nets) {
+      if (route.name == "a") return &route;
+    }
+    return static_cast<const decltype(&layout.nets[0])>(nullptr);
+  }();
+  ASSERT_NE(single, nullptr);
+  EXPECT_TRUE(single->branch_dots.empty());
+}
+
+TEST(SchematicLayout, FaninFanoutCones) {
+  SchematicModel model;
+  ASSERT_TRUE(model.LoadPayload(kSchematicFlatPayload));
+  EXPECT_EQ(FaninCone(model, "g_y1"),
+            std::set<std::string>({"g_ab", "g_abc"}));
+  EXPECT_EQ(FanoutCone(model, "g_ab"),
+            std::set<std::string>({"g_abc", "g_y1"}));
+  EXPECT_TRUE(FaninCone(model, "g_ab").empty());
+  EXPECT_TRUE(FanoutCone(model, "g_y1").empty());
+  EXPECT_TRUE(FaninCone(model, "nope").empty());
+  EXPECT_TRUE(FanoutCone(model, "nope").empty());
 }
 
 TEST(SchematicModel, RejectsMalformedPayloads) {

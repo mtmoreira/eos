@@ -463,7 +463,8 @@ std::string StatsText(const synth::YosysNetlistStats& stats) {
 // style as BlockDiagramText, so the GUI model parses it with the
 // same rules: names are plain Verilog identifiers, so comma
 // lists are unambiguous, and an empty list renders as an empty
-// value, never omitted.
+// value, never omitted. Each net line also carries width=<n>,
+// the wire's bit width, so the schematic can label a bus.
 std::string SchematicText(
     const synth::YosysEngine::SchematicData& schematic) {
   std::string out = "module=" + schematic.module + "\n";
@@ -492,7 +493,8 @@ std::string SchematicText(
       terminals += terminal;
     }
     out += "net name=" + net.name + " gates=" + gates +
-           " terminals=" + terminals + "\n";
+           " terminals=" + terminals +
+           " width=" + std::to_string(net.width) + "\n";
   }
   return out;
 }

@@ -6,14 +6,18 @@
 // clicks to SessionView, and keeps no design state of its own.
 // Like the rest of this module, the widget uses plain callbacks,
 // never Qt signals, so no Q_OBJECT here and no moc step is
-// needed. Gates are not navigable: the schematic is the bottom
-// of the navigation stack, so only the breadcrumb ascends.
+// needed. Gates are clickable: clicking one highlights its
+// fanin and fanout cones and dims the rest, clicking empty
+// space clears the highlight. The schematic is the bottom of
+// the navigation stack, so only the breadcrumb ascends.
 #ifndef EOS_UI_GUI_SCHEMATIC_DIAGRAM_H_
 #define EOS_UI_GUI_SCHEMATIC_DIAGRAM_H_
 
+#include <QRectF>
 #include <QWidget>
 
 #include <functional>
+#include <map>
 #include <string>
 
 class QGraphicsScene;
@@ -70,6 +74,12 @@ class SchematicDiagram : public QWidget {
   QGraphicsScene* scene_ = nullptr;
   QGraphicsView* view_widget_ = nullptr;
   std::function<void()> on_action_;
+  // Gate rects from the last rebuild, for click hit-testing,
+  // and the selected gate (empty when nothing is selected).
+  // The selection clears when the schematic module changes.
+  std::map<std::string, QRectF> gate_rects_;
+  std::string selected_;
+  std::string selected_module_;
 };
 
 }  // namespace eos::ui

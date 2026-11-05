@@ -683,6 +683,7 @@ Result<YosysEngine::SchematicData> YosysEngine::Schematic(
     Yosys::RTLIL::Wire* wire = entry.second;
     YosysEngine::SchematicNet net;
     net.name = wire->name.unescape();
+    net.width = wire->width;
     if (wire->port_id != 0) net.terminals.push_back(net.name);
     for (Yosys::RTLIL::Cell* cell : gate_cells) {
       for (const auto& connection : cell->connections()) {
