@@ -76,7 +76,12 @@ jobs:
           # Resolve the pull request for this run; skip quietly when there is none.
           PR="${{ github.event.pull_request.number }}"
           if [ -z "$PR" ] && command -v gh >/dev/null 2>&1; then
-            PR=$(gh pr list --head "$GITHUB_SHA" --state open --json number --jq '.[0].number' 2>/dev/null)
+            # Push runs carry no pull_request payload; resolve by branch name.
+            PR=$(gh pr list --head "$GITHUB_REF_NAME" --state open --json number --jq '.[0].number' 2>/dev/null)
+          fi
+          if [ -z "$PR" ]; then
+            OWNER="${GITHUB_REPOSITORY%%/*}"
+            PR=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls?head=$OWNER:$GITHUB_REF_NAME&state=open" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["number"] if d else "")' 2>/dev/null)
           fi
           if [ -z "$PR" ] || [ "$PR" = "null" ]; then
             echo "No associated pull request; skipping failure comment."
@@ -115,12 +120,30 @@ jobs:
             echo "$TAIL"
             echo '```'
           } > /tmp/eos-failure-comment.md
+          # Post exactly once; fail loudly if neither route works so a missing
+          # comment shows up in the job metadata instead of staying silent.
+          POSTED=0
           if command -v gh >/dev/null 2>&1; then
             echo "Posting failure comment via gh."
-            gh pr comment "$PR" --body-file /tmp/eos-failure-comment.md
-          else
-            echo "gh unavailable; posting failure comment via the API."
-            BODY=$(python3 -c 'import json; print(json.dumps({"body": open("/tmp/eos-failure-comment.md").read()}))')
-            curl -s -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR/comments" -d "$BODY" > /dev/null
+            if gh pr comment "$PR" --body-file /tmp/eos-failure-comment.md; then
+              POSTED=1
+            else
+              echo "gh post failed; falling back to the API."
+            fi
           fi
-          exit 0
+          if [ "$POSTED" -eq 0 ]; then
+            echo "Posting failure comment via the API."
+            BODY=$(python3 -c 'import json; print(json.dumps({"body": open("/tmp/eos-failure-comment.md").read()}))')
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR/comments" -d "$BODY")
+            if [ "$CODE" = "201" ]; then
+              POSTED=1
+            else
+              echo "API post failed with HTTP $CODE."
+            fi
+          fi
+          if [ "$POSTED" -eq 1 ]; then
+            echo "Failure comment posted."
+            exit 0
+          fi
+          echo "ERROR: could not post the failure comment by either route."
+          exit 1
