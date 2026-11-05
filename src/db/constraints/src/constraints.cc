@@ -40,14 +40,33 @@ void ConstraintSet::Resolve(Constraint& constraint, const Design& design) {
 ConstraintId ConstraintSet::Add(ConstraintKind kind, const std::string& name,
                                 const std::string& target_spec,
                                 const Design& design) {
+  return Add(kind, name, target_spec, design,
+             std::vector<std::pair<std::string, std::string>>());
+}
+
+ConstraintId ConstraintSet::Add(ConstraintKind kind, const std::string& name,
+                                const std::string& target_spec,
+                                const Design& design,
+                                std::vector<std::pair<std::string, std::string>> params) {
   Constraint constraint;
   constraint.id = next_id_++;
   constraint.kind = kind;
   constraint.name = name;
   constraint.target_spec = target_spec;
+  constraint.params = std::move(params);
   Resolve(constraint, design);
   constraints_.push_back(std::move(constraint));
   return constraints_.back().id;
+}
+
+bool ConstraintSet::Remove(ConstraintId id) {
+  for (auto it = constraints_.begin(); it != constraints_.end(); ++it) {
+    if (it->id == id) {
+      constraints_.erase(it);
+      return true;
+    }
+  }
+  return false;
 }
 
 void ConstraintSet::RebindAll(const Design& design) {

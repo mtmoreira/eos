@@ -467,7 +467,7 @@ TEST(Phase1Qualification, StaleOrUnprovenReportMakesExportCheckRefuse) {
   // clock constraint, a scenario, and a proven report.
   ASSERT_TRUE(run("create_design", {"top"}).ok);
   ASSERT_TRUE(run("create_port", {"clk", "in"}).ok);
-  ASSERT_TRUE(run("create_clock", {"c1", "clk"}).ok);
+  ASSERT_TRUE(run("bind_clock", {"c1", "clk"}).ok);
   ASSERT_TRUE(
       run("create_scenario", {"func_tt", "func", "tt", "estimate"}).ok);
   ASSERT_TRUE(run("register_report", {"timing", "pass"}).ok);

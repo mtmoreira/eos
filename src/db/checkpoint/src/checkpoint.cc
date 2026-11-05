@@ -174,12 +174,22 @@ void AppendScenarios(std::string& out, const ScenarioState& s) {
 void AppendConstraints(std::string& out, const ConstraintState& c) {
   out += "section constraints\n";
   out += "next " + std::to_string(c.next_id) + "\n";
+  // Constraint line: "constraint <id> <kind> <status> <bound>
+  // <name> <spec>" followed, when the constraint carries semantic
+  // parameters, by "param <key> <value>" triples, one per parameter
+  // in insertion order. Lines without parameters keep the old
+  // seven-token shape, so checkpoints written before parameters
+  // existed still load.
   for (const Constraint& r : c.constraints) {
     out += "constraint " + std::to_string(r.id) + " " +
            std::to_string(static_cast<std::int32_t>(r.kind)) + " " +
            std::to_string(static_cast<std::int32_t>(r.status)) + " " +
            std::to_string(r.bound_object.raw()) + " " + Escape(r.name) + " " +
-           Escape(r.target_spec) + "\n";
+           Escape(r.target_spec);
+    for (const auto& param : r.params) {
+      out += " param " + Escape(param.first) + " " + Escape(param.second);
+    }
+    out += "\n";
   }
 }
 
@@ -406,13 +416,14 @@ Status ParseConstraints(LineReader& reader, CheckpointData& data) {
         return BadFormat("bad constraints next line");
       }
       have_next = true;
-    } else if (t[0] == "constraint" && t.size() == 7) {
+    } else if (t[0] == "constraint" && t.size() >= 7 &&
+               (t.size() - 7) % 3 == 0) {
       Constraint r;
       std::int32_t kind = 0;
       std::int32_t status = 0;
       std::uint32_t bound = 0;
       if (!ParseNum(t[1], r.id) || !ParseNum(t[2], kind) || kind < 0 ||
-          kind > 7 || !ParseNum(t[3], status) || status < 0 || status > 2 ||
+          kind > 17 || !ParseNum(t[3], status) || status < 0 || status > 2 ||
           !ParseNum(t[4], bound)) {
         return BadFormat("bad constraint line");
       }
@@ -426,6 +437,17 @@ Status ParseConstraints(LineReader& reader, CheckpointData& data) {
       r.bound_object = ObjectId(bound);
       r.name = name.value();
       r.target_spec = spec.value();
+      for (std::size_t i = 7; i < t.size(); i += 3) {
+        if (t[i] != "param") {
+          return BadFormat("bad constraint param triple");
+        }
+        const Result<std::string> key = Unescape(t[i + 1]);
+        const Result<std::string> value = Unescape(t[i + 2]);
+        if (!key.ok() || !value.ok() || key.value().empty()) {
+          return BadFormat("bad constraint param field");
+        }
+        r.params.emplace_back(key.value(), value.value());
+      }
       data.constraints.constraints.push_back(std::move(r));
     } else {
       return BadFormat("unrecognized line in constraints section: " + t[0]);
