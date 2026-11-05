@@ -306,7 +306,8 @@ def test_real_repo_check_passes_and_rules_hold():
     # P4 adds pd.route, the 62nd ctest entry.
     # P6 adds pv.extract, the 63rd ctest entry.
     # P7 adds pd.finish, the 64th ctest entry.
-    assert len(all_tests) == 64
+    # The gui app-icon unit adds ui.gui.icon, the 65th ctest entry.
+    assert len(all_tests) == 65
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),

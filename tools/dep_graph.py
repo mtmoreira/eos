@@ -239,7 +239,9 @@ def test_map(root, reg):
     an add_test block mentioning rsz/tests maps to modules
     [rsz, registry] (the engine under test plus the command
     layer driving it), unioned with any exe-link modules
-    the entry already has.
+    the entry already has. The gui icon entry is the same
+    shape: an add_test block mentioning icons/check_icon.cmake
+    maps to modules [gui] (the module whose artwork it checks).
     """
     by_target = {m["target"]: m for m in reg.modules}
     tests = {}
@@ -268,11 +270,16 @@ def test_map(root, reg):
                 "sources": exe_sources.get(exe, []),
             }
         for name, block in add_test_blocks(text):
-            if "rsz/tests" not in block:
+            extra = set()
+            if "rsz/tests" in block:
+                extra |= {"registry", "rsz"}
+            if "icons/check_icon.cmake" in block:
+                extra |= {"gui"}
+            if not extra:
                 continue
             entry = tests.setdefault(name, {"modules": [], "sources": []})
             entry["modules"] = sorted(
-                set(entry["modules"]) | {"registry", "rsz"})
+                set(entry["modules"]) | extra)
     return tests
 
 
