@@ -54,7 +54,60 @@ Tcl; the terminal REPL keeps full Tcl, and exit there quits the
 process. If the terminal stdin closes while the window is hidden,
 the application quits instead of lingering headless, since a
 hidden window with no terminal left cannot be reopened.
-Packaging (U7) is the remaining unit, not this one.
+Packaging (U7) delivered the minimal install rule above. The
+app icon lives in src/ui/gui/icons/ and is covered below.
+
+## App icon
+
+The GUI shows the EOS logo as its icon, two mechanisms:
+
+- Window icon, every platform: gui_app.cc sets the
+  QApplication window icon from the 512 pixel iconset PNG,
+  embedded at configure time as a C array (no runtime file
+  lookup). This sets the window and task switcher icon.
+- macOS Dock icon: only the .app bundle sets it. A bare
+  binary launched from a terminal has no bundle, so macOS
+  shows the generic executable icon in the Dock no matter
+  what the window icon is. The eos-gui-bundle target
+  assembles build/apps/eos-gui/eos-gui.app around the
+  already-built binary, carrying eos-icon.icns in Resources
+  with an Info.plist naming it. Qt stays an external runtime
+  dependency and is never bundled, same as the install rule.
+
+The icon artwork derives from the approved dark logo
+(docs/logo/eos-logo-dark.webp, never modified): the full
+neon eos wordmark on black, with macOS-style rounded
+corners. The iconset (16, 32, 64, 128, 256, 512, 1024 pixels)
+and the .icns are committed under src/ui/gui/icons/ and are
+reproducible from the logo with:
+
+```
+python3 src/ui/gui/icons/generate_icon.py
+```
+
+That script needs Pillow and writes the iconset plus the
+.icns. On macOS the same iconset can be turned into an
+.icns with the system tool instead:
+`iconutil -c icns src/ui/gui/icons/eos-icon.iconset`.
+
+Build the bundle and launch it from a terminal (the direct
+binary path keeps the terminal REPL working, and the Dock
+still shows the bundle icon because the binary lives inside
+the .app):
+
+```
+cmake --build build --target eos-gui-bundle -j$(sysctl -n hw.ncpu)
+build/apps/eos-gui/eos-gui.app/Contents/MacOS/eos-gui
+```
+
+Launching with `open` also shows the icon but gives the app
+no terminal, so the terminal REPL is unavailable that way.
+The bare binary keeps working exactly as before and is the
+right launch when the Dock icon does not matter:
+
+```
+build/apps/eos-gui/eos-gui
+```
 
 ## Build
 

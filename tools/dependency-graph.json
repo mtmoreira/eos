@@ -1637,6 +1637,12 @@
         "tests/unit/ui/gui/gui_test.cc"
       ]
     },
+    "ui.gui.icon": {
+      "modules": [
+        "gui"
+      ],
+      "sources": []
+    },
     "ui.registry": {
       "modules": [
         "checkpoint",
