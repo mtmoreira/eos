@@ -91,12 +91,25 @@ struct SceneAnalysis {
 // electrical metrics named in the banner above), plus the
 // violating endpoints of each check kind for that scene, in the
 // STA facade's EndpointSlack shape, worst first. An empty list
-// means no endpoint violates that check in this scene.
+// means no endpoint violates that check in this scene. The three
+// electrical checks (Immediate unit 6) keep the full worst-check
+// record, not just the metrics, so a verdict-shaped report can
+// name the worst pin, its limit and its slack and can tell "no
+// limit defined" apart from "limit defined and clean"; the three
+// violator vectors list every violating pin per check, worst
+// slack first, so the report's cost is the exact sum of the
+// violations, not a worst-magnitude stand-in.
 struct SceneResult {
   db::Scenario scenario;
   TimingMetricMap metrics;
   std::vector<EndpointSlack> setup_violating_endpoints;
   std::vector<EndpointSlack> hold_violating_endpoints;
+  ElectricalCheck max_transition_check;
+  ElectricalCheck max_capacitance_check;
+  ElectricalCheck max_fanout_check;
+  std::vector<ElectricalViolation> max_transition_violators;
+  std::vector<ElectricalViolation> max_capacitance_violators;
+  std::vector<ElectricalViolation> max_fanout_violators;
 };
 
 // A design in Verilog form: the netlist, its top cell, and the SDC

@@ -482,6 +482,69 @@ TEST(StaFacade, ElectricalChecksWithoutLimitsReportNoLimit) {
   EXPECT_EQ(fanout.value().violation_count, 0u);
 }
 
+TEST(StaFacade, ElectricalViolatorsMatchWorstPinAndCount) {
+  // The violator enumeration (Immediate unit 6) must list exactly
+  // the pins the bulk check counts: u1/Y is the only violating
+  // pin of each check, so each list has one entry, the worst pin,
+  // with the check's own worst values, and each list size equals
+  // the check's violation count.
+  TempDir dir;
+  StaEngine engine;
+  LoadElectricalFixture(engine, dir);
+  const auto transition = engine.MaxTransitionViolators();
+  ASSERT_TRUE(transition.ok()) << transition.status().message();
+  ASSERT_EQ(transition.value().size(), 1u);
+  EXPECT_EQ(transition.value()[0].pin, "u1/Y");
+  EXPECT_NEAR(transition.value()[0].value, 0.05, 1e-6);
+  EXPECT_NEAR(transition.value()[0].limit, 0.04, 1e-6);
+  EXPECT_NEAR(transition.value()[0].slack, -0.01, 1e-6);
+  const auto transition_check = engine.MaxTransitionCheck();
+  ASSERT_TRUE(transition_check.ok())
+      << transition_check.status().message();
+  EXPECT_EQ(transition.value().size(),
+            transition_check.value().violation_count);
+  const auto capacitance = engine.MaxCapacitanceViolators();
+  ASSERT_TRUE(capacitance.ok()) << capacitance.status().message();
+  ASSERT_EQ(capacitance.value().size(), 1u);
+  EXPECT_EQ(capacitance.value()[0].pin, "u1/Y");
+  EXPECT_NEAR(capacitance.value()[0].value, 0.01, 1e-9);
+  EXPECT_NEAR(capacitance.value()[0].limit, 0.001, 1e-9);
+  EXPECT_NEAR(capacitance.value()[0].slack, -0.009, 1e-9);
+  const auto capacitance_check = engine.MaxCapacitanceCheck();
+  ASSERT_TRUE(capacitance_check.ok())
+      << capacitance_check.status().message();
+  EXPECT_EQ(capacitance.value().size(),
+            capacitance_check.value().violation_count);
+  const auto fanout = engine.MaxFanoutViolators();
+  ASSERT_TRUE(fanout.ok()) << fanout.status().message();
+  ASSERT_EQ(fanout.value().size(), 1u);
+  EXPECT_EQ(fanout.value()[0].pin, "u1/Y");
+  EXPECT_NEAR(fanout.value()[0].value, 2.0, 1e-9);
+  EXPECT_NEAR(fanout.value()[0].limit, 1.0, 1e-9);
+  EXPECT_NEAR(fanout.value()[0].slack, -1.0, 1e-9);
+  const auto fanout_check = engine.MaxFanoutCheck();
+  ASSERT_TRUE(fanout_check.ok()) << fanout_check.status().message();
+  EXPECT_EQ(fanout.value().size(), fanout_check.value().violation_count);
+}
+
+TEST(StaFacade, ElectricalViolatorsAreEmptyWithoutLimits) {
+  // The plain fixture library carries no electrical limit on
+  // any pin: every violator list is empty, not a fabricated
+  // clean worst value.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto transition = engine.MaxTransitionViolators();
+  ASSERT_TRUE(transition.ok()) << transition.status().message();
+  EXPECT_TRUE(transition.value().empty());
+  const auto capacitance = engine.MaxCapacitanceViolators();
+  ASSERT_TRUE(capacitance.ok()) << capacitance.status().message();
+  EXPECT_TRUE(capacitance.value().empty());
+  const auto fanout = engine.MaxFanoutViolators();
+  ASSERT_TRUE(fanout.ok()) << fanout.status().message();
+  EXPECT_TRUE(fanout.value().empty());
+}
+
 TEST(StaFacade, ElectricalQueriesBeforeLinkFail) {
   StaEngine engine;
   const auto transition = engine.MaxTransitionCheck();
@@ -493,6 +556,17 @@ TEST(StaFacade, ElectricalQueriesBeforeLinkFail) {
   const auto fanout = engine.MaxFanoutCheck();
   EXPECT_FALSE(fanout.ok());
   EXPECT_EQ(fanout.status().code(), ErrorCode::kInvalidState);
+  const auto transition_violators = engine.MaxTransitionViolators();
+  EXPECT_FALSE(transition_violators.ok());
+  EXPECT_EQ(transition_violators.status().code(),
+            ErrorCode::kInvalidState);
+  const auto capacitance_violators = engine.MaxCapacitanceViolators();
+  EXPECT_FALSE(capacitance_violators.ok());
+  EXPECT_EQ(capacitance_violators.status().code(),
+            ErrorCode::kInvalidState);
+  const auto fanout_violators = engine.MaxFanoutViolators();
+  EXPECT_FALSE(fanout_violators.ok());
+  EXPECT_EQ(fanout_violators.status().code(), ErrorCode::kInvalidState);
 }
 
 TEST(StaFacade, WorstPathToUnknownEndpointFails) {
