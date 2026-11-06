@@ -188,6 +188,58 @@ class YosysEngine {
   // WriteVerilog can run on it.
   Result<YosysNetlistStats> Elaborate(const std::string& top);
 
+  // One elaboration issue: a structured diagnostic about the
+  // live design, as the GUI's Issues panel consumes it. severity
+  // is "error", "warning", or "info". code names the check that
+  // produced it (unresolved_reference, multiple_drivers,
+  // undriven_net, combinational_loop, inferred_latch,
+  // unknown_cell_type, unconnected_port, top_no_ports,
+  // empty_module, blackbox_instantiation, init_attribute).
+  // module is the owning module; path is the hierarchy path of
+  // that module's instance (the top module's path for a
+  // top-level issue); target is the cell or wire name inside
+  // the module, empty for a module-level issue. file and line
+  // are the source location when the design records one, empty
+  // and 0 otherwise.
+  struct YosysIssue {
+    std::string severity;
+    std::string code;
+    std::string message;
+    std::string module;
+    std::string path;
+    std::string target;
+    std::string file;
+    int line = 0;
+  };
+
+  // Checks the live design for elaboration problems and returns
+  // them ordered by severity (error, warning, info), then by
+  // instance path, then by code: unresolved module references
+  // and black-box instantiations from a design walk, plus the
+  // Yosys check pass's own findings (multiple drivers, undriven
+  // nets, combinational loops, inferred latches, unknown cell
+  // types), unconnected ports, top ports, and empty modules.
+  // Read-only like Hierarchy: it runs the check pass, which
+  // only reads the design, and changes no session state. Fails
+  // with kInvalidArgument when the top module is not in the
+  // live design, and with kInvalidState when the engine does not
+  // own the Yosys session. A design with no problems returns an
+  // empty list, never a failure.
+  Result<std::vector<YosysIssue>> Issues(const std::string& top);
+
+  // Drains the Yosys log output captured since the last drain
+  // (or since the first setup) and returns it as one string,
+  // lines joined with '\n'. The facade installs a capturing
+  // sink at first setup alongside the console sink, so the
+  // console still shows the output and this call is the only
+  // way to read the captured copy. The capture is bounded
+  // (the oldest lines drop past the cap), so a caller that
+  // never drains stays bounded too. Static because the capture
+  // buffer is process-global: a command drains after its
+  // engine scope has closed, and a drain must never construct
+  // an engine (which would initialize Yosys) on its own.
+  static std::string TakeLog();
+
   // Recomputes the stats of the design currently live in the
   // session, for the named module, without running any pass.
   // Fails with kInvalidArgument when the module is not in the

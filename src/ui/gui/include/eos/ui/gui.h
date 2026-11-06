@@ -17,6 +17,7 @@
 #include "eos/ui/diagram.h"
 #include "eos/ui/console_entry.h"
 #include "eos/ui/hierarchy.h"
+#include "eos/ui/issues.h"
 #include "eos/ui/panels.h"
 #include "eos/ui/registry.h"
 #include "eos/ui/schematic.h"
@@ -146,10 +147,11 @@ class SessionView {
   void RefreshDiagram();
 
   // Gate-level schematic model, refreshed from the live session
-  // (see RefreshSchematic). The schematic is the bottom of the
-  // navigation stack, not a separate lens: it shows exactly
-  // when the diagram level is a leaf, and the block diagram
-  // shows otherwise.
+  // (see RefreshSchematic). The schematic is a tab in the right
+  // panel set, not the center: it shows the leaf level's
+  // schematic, and the model loads only when the diagram level
+  // is a leaf; otherwise the model is empty and the tab shows
+  // its placeholder.
   const SchematicModel& Schematic() const { return schematic_; }
 
   // Whether the diagram level is a leaf: its hierarchy node
@@ -195,6 +197,49 @@ class SessionView {
   // are diagnostics, and the echo log is the transcript.
   const std::vector<std::string>& Messages() const { return messages_; }
 
+  // Elaboration issues model, refreshed from the live session
+  // (see RefreshIssues). The issues panel reads this: real
+  // elaboration diagnostics, severity ordered, with the
+  // instance path and source location of each problem. Issues
+  // are design problems; dispatch history lives in Messages,
+  // never here.
+  const IssuesModel& Issues() const { return issues_; }
+
+  // Re-reads the elaboration issues from the live session:
+  // dispatches synth_issues WITHOUT an echo line (a model
+  // refresh is not a user action) and rebuilds the model when
+  // elaborated; clears it otherwise, or when the query or its
+  // payload fails, so stale issues never linger. The check
+  // pass runs only when the design changed (a new top, or a
+  // new generic state, or a design-changing dispatch since
+  // the last refresh), so a plain refresh never pays for a
+  // check it already ran.
+  void RefreshIssues();
+
+  // One engine log line for the log window: the local time the
+  // line was drained, its severity ("error" for a line
+  // carrying "ERROR:", "warning" for one carrying "Warning:",
+  // "info" otherwise), and the line itself. The log window
+  // colors lines by severity and filters on it.
+  struct LogEntry {
+    std::string timestamp;
+    std::string severity;
+    std::string text;
+  };
+
+  // Log window entries, in drain order. The window appends
+  // them as RefreshLog drains the context's engine lines; a
+  // refresh never re-reads lines already shown.
+  const std::vector<LogEntry>& Log() const { return log_; }
+
+  // Drains the context's engine log lines into log entries
+  // (see RefreshLog's note on the context field) and clears
+  // the context field, so the next refresh only shows new
+  // lines. The drain is the single choke point: Dispatch
+  // never drains, so a command's lines appear exactly once,
+  // on the next refresh after the command.
+  void RefreshLog();
+
   // Stepper state, read straight from the synthesis session record:
   // Read is done once a design is parsed, Elaborate once it is
   // elaborated, Generic synth once generic optimization ran. A
@@ -221,11 +266,19 @@ class SessionView {
   HistorySink history_sink_;
   std::vector<std::string> echo_;
   std::vector<std::string> messages_;
+  std::vector<LogEntry> log_;
   std::string checkpoint_;
   HierarchyModel hierarchy_;
   DiagramModel diagram_;
   SchematicModel schematic_;
   PanelsModel panels_;
+  IssuesModel issues_;
+  // The design the issues model was last built from: the top
+  // plus the generic state, as "top|elaborated" or
+  // "top|generic". Empty when no issues are loaded. Cleared
+  // by a design-changing dispatch (see Dispatch), so the next
+  // refresh re-runs the check on the new design.
+  std::string issues_key_;
   std::string diagram_level_;
 };
 

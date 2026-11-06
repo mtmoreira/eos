@@ -288,6 +288,39 @@ void ResetProject(CommandContext& ctx) {
   ctx.timing = CommandContext::TimingSession();
   ctx.synth = CommandContext::SynthSession();
   ctx.wire_rc_overrides.clear();
+  ctx.engine_log_lines.clear();
+}
+
+// Drains the engine's captured log output into the context's
+// engine_log_lines, so the GUI log window can show it on its
+// next refresh. The drain is the registry's only contact with
+// the capture buffer: a command that touches the engine calls
+// this once when it finishes, success or failure, so the log
+// window shows the engine's own lines for the command just
+// run, in order. The field is capped at 2000 lines, the oldest
+// dropping, matching the facade's cap. The drain is static, so
+// it is safe to call after the command's engine scope has
+// closed; it constructs no engine and never initializes Yosys
+// on its own.
+void AppendEngineLog(CommandContext& ctx) {
+  const std::string drained = synth::YosysEngine::TakeLog();
+  if (drained.empty()) return;
+  std::size_t start = 0;
+  while (start < drained.size()) {
+    const std::size_t newline = drained.find('\n', start);
+    const std::string line =
+        newline == std::string::npos
+            ? drained.substr(start)
+            : drained.substr(start, newline - start);
+    if (!line.empty()) {
+      ctx.engine_log_lines.push_back(line);
+      while (ctx.engine_log_lines.size() > 2000) {
+        ctx.engine_log_lines.erase(ctx.engine_log_lines.begin());
+      }
+    }
+    if (newline == std::string::npos) break;
+    start = newline + 1;
+  }
 }
 
 // A scratch path for a synthesis bridge file: the elaborated
@@ -560,6 +593,39 @@ std::string BlockDiagramText(
     }
     out += "net name=" + net.name + " blocks=" + blocks +
            " terminals=" + terminals + "\n";
+  }
+  return out;
+}
+
+// Renders the elaboration issues in the same key=value line
+// style as the other GUI payloads, so the GUI model parses it
+// with the same rules. The first line names what was checked,
+// so the empty state can state it; the second line names the
+// netlist the issues describe (elaborated or generic, from
+// whether synth_generic has run), because after synth_generic
+// the live design is the generic netlist, not the elaborated
+// one. Each issue is one line in a fixed field order with the
+// message last, so the message runs to end of line and may
+// contain spaces: "issue severity=<s> code=<c> module=<m>
+// path=<p> target=<t> file=<f> line=<n> message=<free text>".
+// An empty target or file renders as an empty value, never
+// omitted; a line of 0 means the design records no source
+// location for the issue. The issues arrive severity ordered
+// from the facade, and the renderer preserves that order.
+std::string IssuesText(
+    const std::vector<synth::YosysEngine::YosysIssue>& issues,
+    const std::string& netlist) {
+  std::string out =
+      "checked=hierarchy resolution, multiple drivers, undriven "
+      "nets, combinational loops, inferred latches, unknown cell "
+      "types, unconnected ports, top ports, empty modules\n";
+  out += "netlist=" + netlist + "\n";
+  for (const auto& issue : issues) {
+    out += "issue severity=" + issue.severity + " code=" + issue.code +
+           " module=" + issue.module + " path=" + issue.path +
+           " target=" + issue.target + " file=" + issue.file +
+           " line=" + std::to_string(issue.line) +
+           " message=" + issue.message + "\n";
   }
   return out;
 }
@@ -4503,6 +4569,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           // longer holds the design it claims: clear it, the
           // same rationale as a failed elaboration.
           ctx.synth = CommandContext::SynthSession();
+          AppendEngineLog(ctx);
           return FromStatus(parsed.status());
         }
         std::string modules;
@@ -4518,6 +4585,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           // session's claim is stale even though the parse
           // itself succeeded: clear it and record nothing.
           ctx.synth = CommandContext::SynthSession();
+          AppendEngineLog(ctx);
           return CommandResult::Fail(
               Diag::kInvalidConfiguration,
               "top module '" + top + "' not found in file list " +
@@ -4543,6 +4611,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (!defines_text.empty()) defines_text += ",";
           defines_text += define;
         }
+        AppendEngineLog(ctx);
         return CommandResult::Ok("filelist=" + list_path +
                                  " files=" +
                                  std::to_string(entries.size()) +
@@ -4574,7 +4643,10 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         synth::YosysEngine engine;
         const foundation::Result<synth::YosysDesignSummary> parsed =
             engine.ParseVerilog(args[0]);
-        if (!parsed.ok()) return FromStatus(parsed.status());
+        if (!parsed.ok()) {
+          AppendEngineLog(ctx);
+          return FromStatus(parsed.status());
+        }
         std::string modules;
         bool found = false;
         for (const synth::YosysModuleSummary& module :
@@ -4584,6 +4656,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (module.name == args[1]) found = true;
         }
         if (!found) {
+          AppendEngineLog(ctx);
           return CommandResult::Fail(
               Diag::kInvalidConfiguration,
               "top module '" + args[1] + "' not found in " + args[0] +
@@ -4595,6 +4668,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.synth.parsed = true;
         ctx.synth.verilog_path = args[0];
         ctx.synth.top_cell = args[1];
+        AppendEngineLog(ctx);
         return CommandResult::Ok("verilog=" + args[0] + " top=" + args[1] +
                                  " modules=" + modules);
       });
@@ -4618,6 +4692,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           // caller re-run read_verilog. The timing recording is
           // untouched; it names a file, not the live design.
           ctx.synth = CommandContext::SynthSession();
+          AppendEngineLog(ctx);
           return FromStatus(stats.status());
         }
         ctx.synth.elaborated = true;
@@ -4627,6 +4702,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.synth.generic_optimized = false;
         ctx.synth.generic_script.clear();
         ctx.synth.generic_verilog.clear();
+        AppendEngineLog(ctx);
         return CommandResult::Ok(SynthStatsText(stats.value()));
       });
 
@@ -4742,6 +4818,41 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(StatsText(stats.value()));
       });
 
+  // Reports the live design's elaboration issues for the
+  // session's top module, as the GUI issues panel (panel
+  // rework) consumes it. Read-only like synth_hierarchy: it
+  // runs the check pass, which only reads the design, and
+  // changes no session state. It fails fast when no elaborated
+  // design exists. The payload names the netlist the issues
+  // describe: after synth_generic the live design is the
+  // generic netlist, so the issues describe that, not the
+  // elaborated one. The check pass's own log lines reach the
+  // engine-log drain like any other engine output, so the log
+  // window shows the raw check lines alongside the issues.
+  add("synth_issues", "synth_issues",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "synth_issues")) {
+          return *bad;
+        }
+        if (!ctx.synth.elaborated) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no elaborated design: eos::elaborate first");
+        }
+        synth::YosysEngine engine;
+        const foundation::Result<
+            std::vector<synth::YosysEngine::YosysIssue>>
+            issues = engine.Issues(ctx.synth.top_cell);
+        AppendEngineLog(ctx);
+        if (!issues.ok()) {
+          return FromStatus(issues.status());
+        }
+        return CommandResult::Ok(IssuesText(
+            issues.value(),
+            ctx.synth.generic_optimized ? "generic" : "elaborated"));
+      });
+
   add("synth_generic", "synth_generic [-script <name>]",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
@@ -4794,6 +4905,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         // ABC cannot read Yosys's sequential Verilog form.
         const auto fail_after_mutation =
             [&ctx](const foundation::Status& status) {
+              AppendEngineLog(ctx);
               ctx.synth = CommandContext::SynthSession();
               return FromStatus(status);
             };
@@ -4848,6 +4960,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.synth.generic_after_and = generic.after.and_count;
         ctx.synth.generic_after_levels = generic.after.levels;
         ctx.synth.generic_verilog = optimized;
+        AppendEngineLog(ctx);
         return CommandResult::Ok(
             "script=" + script +
             " elaborated_cells=" + std::to_string(elaborated_cells) +
@@ -4968,6 +5081,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         const auto fail_after_mutation =
             [&ctx](const foundation::Status& status) {
+              AppendEngineLog(ctx);
               ctx.synth = CommandContext::SynthSession();
               return FromStatus(status);
             };
@@ -5125,6 +5239,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.synth.mapped_electrical_violations = electrical_violations;
         ctx.timing.verilog_path = mapped;
         ctx.timing.top_cell = ctx.synth.top_cell;
+        AppendEngineLog(ctx);
         return CommandResult::Ok(
             "target=" + target + " liberty=" + liberty_path +
             " genlib=" + genlib + " genlib_cells=" + genlib_list +
@@ -5523,6 +5638,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             incumbent_eval.total_negative;
         ctx.synth.opt_still_violating = still_violating;
         ctx.timing.verilog_path = incumbent;
+        AppendEngineLog(ctx);
         return CommandResult::Ok(
             "iterations=" + std::to_string(iterations) +
             " max_iterations=" + std::to_string(max_iterations) +
@@ -5694,7 +5810,10 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const foundation::Result<synth::EquivalenceVerdict> proof =
             abc.ProveEquivalent(positionals[0], positionals[1],
                                 genlib);
-        if (!proof.ok()) return FromStatus(proof.status());
+        if (!proof.ok()) {
+          AppendEngineLog(ctx);
+          return FromStatus(proof.status());
+        }
         const char* verdict = "unknown";
         if (proof.value() == synth::EquivalenceVerdict::kEquivalent) {
           verdict = "equivalent";
@@ -5707,11 +5826,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.synth.equiv_first = positionals[0];
         ctx.synth.equiv_second = positionals[1];
         if (proof.value() != synth::EquivalenceVerdict::kEquivalent) {
+          AppendEngineLog(ctx);
           return CommandResult::Fail(
               Diag::kProofUnknown,
               std::string("equivalence proof: ") + verdict + " for " +
                   positionals[0] + " vs " + positionals[1]);
         }
+        AppendEngineLog(ctx);
         return CommandResult::Ok(
             std::string("verdict=equivalent first=") +
             positionals[0] + " second=" + positionals[1] +

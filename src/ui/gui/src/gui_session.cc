@@ -1,6 +1,7 @@
 // gui: SessionView over the command registry (L6 interface).
 #include "eos/ui/gui.h"
 
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,28 @@ void AppendPayloadLines(std::vector<std::string>& echo,
   }
 }
 
+// The local time as "%H:%M:%S" for a log entry.
+std::string LogTimestamp() {
+  const std::time_t now = std::time(nullptr);
+  std::tm local{};
+  localtime_r(&now, &local);
+  char buffer[16];
+  std::strftime(buffer, sizeof(buffer), "%H:%M:%S", &local);
+  return buffer;
+}
+
+// The severity of one engine log line, by its Yosys prefix:
+// log_error writes "ERROR: ", log_warning writes "Warning: ",
+// and every other line is informational. The prefix may sit
+// after a time or source location, so this is a substring
+// match, not an anchor: an informational line never carries
+// either literal.
+std::string ClassifyLogLine(const std::string& line) {
+  if (line.find("ERROR:") != std::string::npos) return "error";
+  if (line.find("Warning:") != std::string::npos) return "warning";
+  return "info";
+}
+
 }  // namespace
 
 std::string SessionView::EchoLine(const std::string& name,
@@ -60,12 +83,14 @@ CommandResult SessionView::Dispatch(const std::string& name,
                                     const std::vector<std::string>& args) {
   const std::string line = EchoLine(name, args);
   echo_.push_back(line);
+  log_.push_back(LogEntry{LogTimestamp(), "info", line});
   CommandResult result = registry_.Dispatch(context_, name, args);
   if (!result.ok) {
     const std::string error = line + ": EOS " + DiagName(result.diag) +
                               ": " + result.message;
     messages_.push_back(error);
     echo_.push_back(error);
+    log_.push_back(LogEntry{LogTimestamp(), "error", error});
   } else {
     AppendPayloadLines(echo_, result.payload);
     if (name == "checkpoint" || name == "restore") {
@@ -73,6 +98,14 @@ CommandResult SessionView::Dispatch(const std::string& name,
     } else if (name == "close_design") {
       checkpoint_.clear();
     }
+  }
+  if (result.ok && (name == "read_verilog" || name == "read_filelist" ||
+                    name == "elaborate" || name == "synth_generic" ||
+                    name == "synth_map")) {
+    // A design-changing command: the issues the last refresh
+    // built describe the old design, so the next refresh
+    // re-runs the check.
+    issues_key_.clear();
   }
   return result;
 }
@@ -89,8 +122,10 @@ CommandResult SessionView::DispatchEntry(const std::string& line) {
           segment + ": EOS " + DiagName(Diag::kInvalidCommand) + ": " +
           parsed.error;
       echo_.push_back(segment);
+      log_.push_back(LogEntry{LogTimestamp(), "info", segment});
       messages_.push_back(error);
       echo_.push_back(error);
+      log_.push_back(LogEntry{LogTimestamp(), "error", error});
       if (!saw_failure) {
         aggregate =
             CommandResult::Fail(Diag::kInvalidCommand, parsed.error);
@@ -200,6 +235,32 @@ void SessionView::RefreshPanels() {
   if (!result.ok || !panels_.live_stats.LoadPayload(result.payload)) {
     panels_.live_stats.Clear();
   }
+}
+
+void SessionView::RefreshIssues() {
+  if (!context_.synth.elaborated) {
+    issues_.Clear();
+    issues_key_.clear();
+    return;
+  }
+  const std::string key =
+      context_.synth.top_cell +
+      (context_.synth.generic_optimized ? "|generic" : "|elaborated");
+  if (key == issues_key_) return;
+  const CommandResult result =
+      registry_.Dispatch(context_, "synth_issues", {});
+  if (!result.ok || !issues_.LoadPayload(result.payload)) {
+    issues_.Clear();
+  }
+  issues_key_ = key;
+}
+
+void SessionView::RefreshLog() {
+  for (const std::string& line : context_.engine_log_lines) {
+    log_.push_back(
+        LogEntry{LogTimestamp(), ClassifyLogLine(line), line});
+  }
+  context_.engine_log_lines.clear();
 }
 
 }  // namespace eos::ui

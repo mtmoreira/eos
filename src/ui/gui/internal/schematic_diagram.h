@@ -8,8 +8,8 @@
 // never Qt signals, so no Q_OBJECT here and no moc step is
 // needed. Gates are clickable: clicking one highlights its
 // fanin and fanout cones and dims the rest, clicking empty
-// space clears the highlight. The schematic is the bottom of
-// the navigation stack, so only the breadcrumb ascends.
+// space clears the highlight. The schematic lives as a tab in
+// the right panel set, so only the breadcrumb ascends.
 #ifndef EOS_UI_GUI_SCHEMATIC_DIAGRAM_H_
 #define EOS_UI_GUI_SCHEMATIC_DIAGRAM_H_
 
@@ -23,6 +23,7 @@
 class QGraphicsScene;
 class QGraphicsView;
 class QHBoxLayout;
+class QLabel;
 
 namespace eos::ui {
 
@@ -39,6 +40,13 @@ class SchematicDiagram : public QWidget {
   // Test seam: the scene this widget renders, for unit tests to
   // inspect the drawn items. Read-only; the widget owns it.
   const QGraphicsScene* Scene() const { return scene_; }
+
+  // Highlights one gate by its raw instance name, as the
+  // issues panel's locate does: the gate is selected, so its
+  // fanin and fanout cones highlight and the rest dims. An
+  // instance the model does not hold does nothing, and the
+  // selection survives later refreshes of the same module.
+  void HighlightGate(const std::string& instance);
 
   // Called after a breadcrumb click changes the selection or
   // the level, so the main window can refresh. Unset by
@@ -73,6 +81,7 @@ class SchematicDiagram : public QWidget {
   void OnCrumbClicked(const std::string& path);
 
   SessionView& view_;
+  QLabel* source_label_ = nullptr;
   QWidget* crumbs_ = nullptr;
   QHBoxLayout* crumbs_layout_ = nullptr;
   QGraphicsScene* scene_ = nullptr;

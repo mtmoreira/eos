@@ -581,5 +581,175 @@ TEST(YosysFacade, HierarchyWithoutOwnershipFails) {
   EXPECT_EQ(hierarchy.status().code(), foundation::ErrorCode::kInvalidState);
 }
 
+// Panel rework: elaboration issues. The registered adder is
+// clean: every port is driven and used, every cell is a known
+// primitive with all ports connected, so the check pass and
+// the design walk agree there is nothing to report.
+TEST(YosysFacade, IssuesCleanDesignIsEmpty) {
+  TempDir dir;
+  const std::string demo = dir.Write("demo.v", kDemo);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(demo).ok());
+  ASSERT_TRUE(engine.Elaborate("demo").ok());
+  const auto issues = engine.Issues("demo");
+  ASSERT_TRUE(issues.ok()) << issues.status().message();
+  EXPECT_TRUE(issues.value().empty());
+}
+
+// A latch inferred by an incomplete if: the check pass reports
+// it, and the issue carries the latch cell as its target.
+const char kLatch[] = R"V(module latchy (d, en, q);
+  input d, en;
+  output reg q;
+  always @* begin
+    if (en) q = d;
+  end
+endmodule
+)V";
+
+// A module with only a continuous assign and no cells: the
+// input is read by the assign, so it is connected, and the
+// module is not empty. (The 4-bit to 8-bit width change is
+// NOT reported: Yosys zero-extends silently, and width
+// mismatch is not one of the checks this pass claims.)
+const char kAssignOnly[] = R"V(module widthy (a, y);
+  input [3:0] a;
+  output [7:0] y;
+  assign y = a;
+endmodule
+)V";
+
+TEST(YosysFacade, IssuesAssignOnlyDesignIsClean) {
+  TempDir dir;
+  const std::string assign_only = dir.Write("width.v", kAssignOnly);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(assign_only).ok());
+  ASSERT_TRUE(engine.Elaborate("widthy").ok());
+  const auto issues = engine.Issues("widthy");
+  ASSERT_TRUE(issues.ok()) << issues.status().message();
+  // No cells, but the assign reads the input and drives the
+  // output, so neither unconnected_port nor empty_module fires.
+  EXPECT_TRUE(issues.value().empty());
+}
+
+TEST(YosysFacade, IssuesInferredLatchIsAWarning) {
+  TempDir dir;
+  const std::string latch = dir.Write("latch.v", kLatch);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(latch).ok());
+  ASSERT_TRUE(engine.Elaborate("latchy").ok());
+  const auto issues = engine.Issues("latchy");
+  ASSERT_TRUE(issues.ok()) << issues.status().message();
+  ASSERT_EQ(issues.value().size(), 1u);
+  const YosysEngine::YosysIssue& issue = issues.value()[0];
+  EXPECT_EQ(issue.severity, "warning");
+  EXPECT_EQ(issue.code, "inferred_latch");
+  EXPECT_EQ(issue.module, "latchy");
+  EXPECT_EQ(issue.path, "latchy");
+  // The latch cell is named for the proc pass that created it,
+  // "$auto$proc_dlatch.cc:559:proc_dlatch$15": it carries
+  // "proc_dlatch", not the literal "$dlatch" (the "$" belongs
+  // to "$auto$", and "dlatch" is preceded by "_").
+  EXPECT_NE(issue.target.find("proc_dlatch"), std::string::npos);
+}
+
+// A module that does not exist: the elaboration succeeds (the
+// cell is opaque), and the walk reports the unresolved
+// reference as an error with the instance path and cell name.
+const char kBroken[] = R"V(module broken_top (a, y);
+  input a;
+  output y;
+  does_not_exist u_missing (.a(a), .y(y));
+endmodule
+)V";
+
+TEST(YosysFacade, IssuesUnresolvedReferenceIsAnError) {
+  TempDir dir;
+  const std::string broken = dir.Write("broken.v", kBroken);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(broken).ok());
+  ASSERT_TRUE(engine.Elaborate("broken_top").ok());
+  const auto issues = engine.Issues("broken_top");
+  ASSERT_TRUE(issues.ok()) << issues.status().message();
+  // Two issues, severity ordered: the unresolved reference
+  // itself, and the undriven net it causes. Yosys cannot
+  // determine the port directions of an unknown cell type, so
+  // the output the cell drives looks undriven to the check
+  // pass; the undriven warning is the symptom, the unresolved
+  // reference is the cause.
+  ASSERT_EQ(issues.value().size(), 2u);
+  const YosysEngine::YosysIssue& issue = issues.value()[0];
+  EXPECT_EQ(issue.severity, "error");
+  EXPECT_EQ(issue.code, "unresolved_reference");
+  EXPECT_EQ(issue.module, "broken_top");
+  EXPECT_EQ(issue.path, "broken_top");
+  EXPECT_EQ(issue.target, "u_missing");
+  EXPECT_NE(issue.message.find("does_not_exist"), std::string::npos);
+  const YosysEngine::YosysIssue& symptom = issues.value()[1];
+  EXPECT_EQ(symptom.severity, "warning");
+  EXPECT_EQ(symptom.code, "undriven_net");
+  EXPECT_EQ(symptom.target, "y");
+}
+
+// Two gate cells driving one net: the check pass reports the
+// conflicting drivers as an error on the wire. (Two continuous
+// assigns to one net would not do: the check pass counts cell
+// ports and module inputs as drivers, not module connections,
+// so the assign form never reaches the multiple-drivers branch.
+// And the two gates need distinct inputs: a gate fed the same
+// signal twice optimizes to a wire, and the multiple driver
+// collapses into a merged net.)
+const char kMultiDriver[] = R"V(module multidrv (a, b, c, d, y);
+  input a, b, c, d;
+  output y;
+  and u_and1 (y, a, b);
+  and u_and2 (y, c, d);
+endmodule
+)V";
+
+TEST(YosysFacade, IssuesMultipleDriversIsAnError) {
+  TempDir dir;
+  const std::string multi = dir.Write("multi.v", kMultiDriver);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(multi).ok());
+  ASSERT_TRUE(engine.Elaborate("multidrv").ok());
+  const auto issues = engine.Issues("multidrv");
+  ASSERT_TRUE(issues.ok()) << issues.status().message();
+  ASSERT_EQ(issues.value().size(), 1u);
+  const YosysEngine::YosysIssue& issue = issues.value()[0];
+  EXPECT_EQ(issue.severity, "error");
+  EXPECT_EQ(issue.code, "multiple_drivers");
+  EXPECT_EQ(issue.module, "multidrv");
+  EXPECT_EQ(issue.target, "y");
+}
+
+TEST(YosysFacade, IssuesUnknownTopFails) {
+  TempDir dir;
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(dir.Write("demo.v", kDemo)).ok());
+  const auto issues = engine.Issues("nope");
+  ASSERT_FALSE(issues.ok());
+  EXPECT_EQ(issues.status().code(), foundation::ErrorCode::kInvalidArgument);
+}
+
+// Panel rework: the engine-log capture. The drain takes what
+// the engine logged since the last drain (the elaboration
+// passes report their steps), and a second drain right after
+// returns nothing: the buffer is empty until the engine logs
+// again. The drain first clears whatever earlier tests left
+// in the process-global buffer.
+TEST(YosysFacade, TakeLogDrainsCapturedOutput) {
+  TempDir dir;
+  const std::string demo = dir.Write("demo.v", kDemo);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(demo).ok());
+  (void)engine.TakeLog();
+  ASSERT_TRUE(engine.Elaborate("demo").ok());
+  const std::string log = engine.TakeLog();
+  EXPECT_FALSE(log.empty());
+  EXPECT_NE(log.find("HIERARCHY"), std::string::npos);
+  EXPECT_EQ(engine.TakeLog(), "");
+}
+
 }  // namespace
 }  // namespace eos::synth
