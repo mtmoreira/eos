@@ -47,7 +47,12 @@ stdin while the window is open, every terminal line is evaluated
 on the GUI thread through the Tcl shell so terminal and GUI
 commands can never race, closing the window hides it instead of
 killing the session, and typing show in the terminal shows the
-window again on the same session. The terminal REPL uses plain
+window again on the same session. eos::gui_show is the registry
+command for the same action, so it works from the GUI console as
+well as the terminal; run from the plain eos CLI it launches a
+separate eos-gui process that keeps running after the CLI ends,
+and closing such a viewer quits it, since no terminal is left to
+reopen it from. The terminal REPL uses plain
 line input: line editing, history, and tab completion stay in
 the eos CLI. Console entry takes registry commands only, not
 Tcl; the terminal REPL keeps full Tcl, and exit there quits the

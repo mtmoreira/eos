@@ -5754,6 +5754,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
       });
 
   RegisterRepairCommands(registry);
+  RegisterGuiShowCommand(registry);
 }
 
 }  // namespace eos::ui
