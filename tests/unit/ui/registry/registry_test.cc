@@ -3012,10 +3012,10 @@ TEST(CoreCommands, HelpWildcardPatterns) {
   // registry order, one "name usage" line each.
   const CommandResult tim = shell.Run("help", {"*tim*"});
   ASSERT_TRUE(tim.ok) << tim.message;
-  EXPECT_EQ(lines(tim.payload), 4u);
+  EXPECT_EQ(lines(tim.payload), 6u);
   for (const char* name :
-       {"close_timing", "report_timing", "run_timing",
-        "set_max_time_borrow"}) {
+       {"check_timing", "close_timing", "report_timing", "run_timing",
+        "set_max_time_borrow", "repair_timing"}) {
     EXPECT_NE(tim.payload.find(name), std::string::npos) << name;
   }
   EXPECT_EQ(tim.payload.find("create_clock"), std::string::npos);
@@ -3023,9 +3023,11 @@ TEST(CoreCommands, HelpWildcardPatterns) {
   // set_max_time_borrow, which ends in "borrow".
   const CommandResult suffix = shell.Run("help", {"*_timing"});
   ASSERT_TRUE(suffix.ok) << suffix.message;
-  EXPECT_EQ(lines(suffix.payload), 3u);
+  EXPECT_EQ(lines(suffix.payload), 5u);
   EXPECT_EQ(suffix.payload.find("set_max_time_borrow"),
             std::string::npos);
+  EXPECT_NE(suffix.payload.find("repair_timing"), std::string::npos);
+  EXPECT_NE(suffix.payload.find("check_timing"), std::string::npos);
   // "?" matches exactly one character.
   const CommandResult one_char = shell.Run("help", {"?eport_timing"});
   ASSERT_TRUE(one_char.ok) << one_char.message;
