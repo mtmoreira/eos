@@ -8,7 +8,10 @@
 // thread waits for each evaluation, so terminal output stays in
 // order and no two commands ever run at once. Closing the
 // window hides it (quit-on-last-window-closed is off); typing
-// show in the terminal shows it again on the same session. The
+// show in the terminal shows it again on the same session.
+// eos::gui_show is the registry command for the same action, so
+// it also works from the GUI console; from the plain CLI it
+// launches a separate viewer instead. The
 // terminal REPL reads through the Tcl shell's interactive line
 // reader, so it has the same linenoise editing, history, and
 // tab completion as the plain eos CLI, sharing .eos_history in
@@ -101,6 +104,10 @@ int RunGui(int argc, char** argv, CommandRegistry& registry,
   MainWindow window(view);
   set_stage("Opening window...", 90);
   window.show();
+  // eos::gui_show shows this window instead of launching a
+  // second viewer. Installed after the window exists and cleared
+  // on the way out, so the handler never outlives the window.
+  SetGuiShowHandler([&window]() { window.ShowAgain(); });
   if (splash != nullptr) {
     // FinishWhenReady owns the close from here: it finishes
     // at once when the 2-second minimum already passed, or
@@ -157,6 +164,7 @@ int RunGui(int argc, char** argv, CommandRegistry& registry,
 
   const int rc = app.exec();
   if (repl.joinable()) repl.join();
+  SetGuiShowHandler(nullptr);
   return rc;
 }
 

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -65,14 +66,16 @@ TEST(Registry, CoreSetIsComplete) {
   // extract_parasitics; P7 adds finish and write_gds; Immediate
   // unit 3 renames create_clock to bind_clock (same slot) and
   // adds create_clock (SDC), create_generated_clock, and the
-  // nine M27 commands; Immediate unit 4 adds check_timing.
-  EXPECT_EQ(shell.registry.Names().size(), 71u);
+  // nine M27 commands; Immediate unit 4 adds check_timing;
+  // gui_show adds gui_show.
+  EXPECT_EQ(shell.registry.Names().size(), 72u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
   EXPECT_NE(shell.registry.Find("bind_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("create_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("create_generated_clock"), nullptr);
+  EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
@@ -86,6 +89,7 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("report_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_map"), nullptr);
   EXPECT_NE(shell.registry.Find("help"), nullptr);
+  EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
 }
 
 TEST(CoreCommands, DesignLifecycleAndUnclosedDesignDiagnostic) {
@@ -4701,7 +4705,134 @@ TEST(CheckTiming, IncludeExcludeAndFailureModes) {
   ASSERT_FALSE(unknown.ok);
   EXPECT_NE(unknown.message.find("known checks: "), std::string::npos);
   EXPECT_NE(unknown.message.find("unconstrained_endpoints"),
-            std::string::npos);
+            std::string::npos);}
+
+class GuiShowTempDir {
+ public:
+  GuiShowTempDir()
+      : path_(std::filesystem::temp_directory_path() /
+              ("eos_registry_gui_show_test_" + std::to_string(counter_++))) {
+    std::filesystem::create_directories(path_);
+  }
+  ~GuiShowTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+  std::string Path(const std::string& name) const {
+    return (path_ / name).string();
+  }
+  void WriteExecutable(const std::string& name,
+                       const std::string& text) const {
+    const std::filesystem::path file = path_ / name;
+    std::filesystem::create_directories(file.parent_path());
+    std::ofstream out(file);
+    out << text;
+    out.close();
+    std::filesystem::permissions(
+        file,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write |
+            std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace);
+  }
+
+ private:
+  static inline int counter_ = 0;
+  std::filesystem::path path_;
+};
+
+TEST(GuiShow, FindBuildLayoutSibling) {
+  GuiShowTempDir dir;
+  dir.WriteExecutable("build/apps/eos-gui/eos-gui", "#!/bin/sh\nexit 0\n");
+  EXPECT_EQ(FindGuiExecutable(dir.Path("build/apps/eos"), ""),
+            dir.Path("build/apps/eos-gui/eos-gui"));
+}
+
+TEST(GuiShow, FindInstalledLayoutSibling) {
+  GuiShowTempDir dir;
+  dir.WriteExecutable("bin/eos-gui", "#!/bin/sh\nexit 0\n");
+  EXPECT_EQ(FindGuiExecutable(dir.Path("bin"), ""),
+            dir.Path("bin/eos-gui"));
+}
+
+TEST(GuiShow, FindPathFallback) {
+  GuiShowTempDir dir;
+  dir.WriteExecutable("elsewhere/eos-gui", "#!/bin/sh\nexit 0\n");
+  EXPECT_EQ(FindGuiExecutable(dir.Path("nowhere"), dir.Path("elsewhere")),
+            dir.Path("elsewhere/eos-gui"));
+}
+
+TEST(GuiShow, FindPrefersSiblingOverPath) {
+  GuiShowTempDir dir;
+  dir.WriteExecutable("build/apps/eos-gui/eos-gui", "#!/bin/sh\nexit 0\n");
+  dir.WriteExecutable("elsewhere/eos-gui", "#!/bin/sh\nexit 0\n");
+  EXPECT_EQ(FindGuiExecutable(dir.Path("build/apps/eos"),
+                              dir.Path("elsewhere")),
+            dir.Path("build/apps/eos-gui/eos-gui"));
+}
+
+TEST(GuiShow, FindSkipsNonExecutable) {
+  GuiShowTempDir dir;
+  const std::filesystem::path file =
+      std::filesystem::path(dir.Path("build/apps/eos-gui/eos-gui"));
+  std::filesystem::create_directories(file.parent_path());
+  std::ofstream out(file);
+  out << "not executable\n";
+  out.close();
+  EXPECT_EQ(FindGuiExecutable(dir.Path("build/apps/eos"), ""), "");
+  EXPECT_EQ(FindGuiExecutable(dir.Path("nowhere"), ""), "");
+}
+
+TEST(GuiShow, LaunchSucceedsForTrue) {
+  std::string error = "unset";
+  EXPECT_TRUE(LaunchGuiDetached("/bin/true", &error));
+}
+
+TEST(GuiShow, LaunchFailsForBadInterpreter) {
+  GuiShowTempDir dir;
+  dir.WriteExecutable("broken", "#!/definitely/not/a/real/interpreter\n");
+  std::string error;
+  EXPECT_FALSE(LaunchGuiDetached(dir.Path("broken"), &error));
+  EXPECT_FALSE(error.empty());
+}
+
+TEST(GuiShow, LaunchFailsForMissingPath) {
+  std::string error;
+  EXPECT_FALSE(LaunchGuiDetached("/definitely/not/a/real/path", &error));
+  EXPECT_FALSE(error.empty());
+}
+
+TEST(GuiShow, DispatchCallsInstalledHandler) {
+  Shell shell;
+  bool shown = false;
+  SetGuiShowHandler([&shown]() { shown = true; });
+  const CommandResult result = shell.Run("gui_show");
+  SetGuiShowHandler(nullptr);
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_EQ(result.payload, "viewer=shown");
+  EXPECT_TRUE(shown);
+}
+
+TEST(GuiShow, DispatchRejectsArguments) {
+  Shell shell;
+  const CommandResult result = shell.Run("gui_show", {"extra"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(GuiShow, DispatchFailsWhenNoViewerFound) {
+  Shell shell;
+  SetGuiShowHandler(nullptr);
+  GuiShowTempDir dir;
+  std::filesystem::create_directories(dir.Path("empty"));
+  const char* saved_path = std::getenv("PATH");
+  const std::string saved = saved_path == nullptr ? "" : saved_path;
+  ::setenv("PATH", dir.Path("empty").c_str(), 1);
+  const CommandResult result = shell.Run("gui_show");
+  ::setenv("PATH", saved.c_str(), 1);
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kIoError);
+  EXPECT_NE(result.message.find("not found"), std::string::npos);
 }
 
 }  // namespace

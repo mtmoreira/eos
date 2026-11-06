@@ -267,6 +267,33 @@ class CommandRegistry {
 // eos::set_wire_rc); called from RegisterCoreCommands.
 void RegisterRepairCommands(CommandRegistry& registry);
 
+// Registers eos::gui_show; called from RegisterCoreCommands.
+// In a GUI process (RunGui installs a handler with
+// SetGuiShowHandler) it shows the running viewer; otherwise it
+// launches the eos-gui binary as a detached process.
+void RegisterGuiShowCommand(CommandRegistry& registry);
+
+// Installs the viewer-show handler for this process (the GUI
+// installs one that shows its window). With no handler installed,
+// eos::gui_show launches a separate eos-gui process instead.
+// Passing an empty handler clears the installed one.
+void SetGuiShowHandler(std::function<void()> handler);
+
+// Finds the eos-gui binary for a process whose own executable
+// lives in exe_dir: eos-gui next to it (installed bin/ layout),
+// ../eos-gui/eos-gui (build/apps layout, eos in apps/eos/),
+// eos-gui/eos-gui under exe_dir (eos run from apps/ directly),
+// then each directory of path_env. Returns the first executable
+// regular file found, or an empty string when none is found.
+std::string FindGuiExecutable(const std::string& exe_dir,
+                              const std::string& path_env);
+
+// Launches path as a detached process (its own session, with
+// stdin, stdout, and stderr redirected to /dev/null) and returns
+// immediately without waiting for it. On failure returns false
+// and fills *error (which may be null) with the reason.
+bool LaunchGuiDetached(const std::string& path, std::string* error);
+
 // Registers the core command set: design lifecycle and construction,
 // scenarios, constraints and coverage, collections, ledger
 // transactions and artifacts, the export freshness gate, and the
