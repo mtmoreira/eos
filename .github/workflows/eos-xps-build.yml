@@ -1,0 +1,109 @@
+# XPS build: run an EOS full build plus ctest on the owner's
+# self-hosted XPS Linux box (Dell XPS 15 7590, Ubuntu 24.04),
+# so long builds stop competing with each other on the 8 GB
+# sandbox VM. Dispatch with a FULL commit SHA (a short SHA is
+# treated as a branch name by checkout and the fetch fails).
+#
+# Trigger is workflow_dispatch ONLY. It does not run on push
+# or pull_request, so the XPS is never grabbed by routine CI.
+# Self-hosted jobs may run up to 5 days (the 6 hour cap is
+# GitHub-hosted only); timeout-minutes below is a job-level
+# guard, not the platform cap.
+# Concurrency serializes dispatches: the XPS runs one build
+# at a time instead of thrashing like the sandbox did.
+# Build and test logs upload as artifacts on every run, pass
+# or fail, so a failure is diagnosable without re-running.
+#
+# Runner prerequisite: a self-hosted runner registered to
+# mtmoreira/eos with the label `eos-xps` (the ci-ipfoundry
+# runner belongs to ip-foundry, not EOS). The machine needs
+# the same build dependencies as ci.yml; prefer installing
+# them once on the machine. The apt step below is a fallback
+# and is safe to delete once the machine is provisioned.
+
+name: XPS build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Full commit SHA to build (40 hex chars)"
+        required: true
+        type: string
+      ctest_regex:
+        description: "Optional ctest -R regex; empty runs the full suite"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: eos-xps-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: XPS build and test
+    runs-on: [self-hosted, eos-xps]
+    timeout-minutes: 360
+    steps:
+      - name: Check out requested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Show machine state
+        run: |
+          nproc; free -m; df -h .; cmake --version | head -1
+          g++ --version | head -1
+
+      - name: Install build dependencies
+        # Delete this step once the machine is provisioned once.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tcl-dev bison flex libfl-dev swig \
+            libeigen3-dev libboost-dev libboost-serialization-dev \
+            zlib1g-dev libspdlog-dev libfmt-dev liblemon-dev \
+            qt6-base-dev qt6-base-dev-tools
+
+      - name: Install OR-Tools (P2 declared external dependency)
+        run: |
+          curl -L -o /tmp/or-tools.tar.gz https://github.com/google/or-tools/releases/download/v9.5/or-tools_amd64_ubuntu-22.04_cpp_v9.5.2237.tar.gz
+          mkdir -p "$HOME/or-tools"
+          tar -xzf /tmp/or-tools.tar.gz -C "$HOME/or-tools" --strip-components=1
+
+      - name: Configure
+        run: cmake -S . -B build -DEOS_BUILD_TESTS=ON -DCMAKE_PREFIX_PATH="$HOME/or-tools"
+
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build -j"$(nproc)" 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          echo "build_exit=${rc}" | tee -a build.log
+          exit $rc
+
+      - name: Test
+        run: |
+          set -o pipefail
+          if [ -n "${{ inputs.ctest_regex }}" ]; then
+            ctest --test-dir build --no-tests=ignore --output-on-failure \
+              -R "${{ inputs.ctest_regex }}" 2>&1 | tee test.log
+            rc=${PIPESTATUS[0]}
+          else
+            ctest --test-dir build --no-tests=ignore --output-on-failure \
+              2>&1 | tee test.log
+            rc=${PIPESTATUS[0]}
+          fi
+          echo "test_exit=${rc}" | tee -a test.log
+          exit $rc
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eos-xps-build-${{ inputs.ref }}
+          path: |
+            build.log
+            test.log
+          retention-days: 30
