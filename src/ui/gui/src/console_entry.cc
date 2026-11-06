@@ -53,6 +53,76 @@ ConsoleLine ParseConsoleLine(const std::string& line) {
   return out;
 }
 
+std::vector<std::string> SplitConsoleSegments(
+    const std::string& text, const std::vector<std::string>& names) {
+  std::vector<std::string> out;
+  std::string current;
+  auto flush = [&]() {
+    const std::size_t first = current.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+      current.clear();
+      return;
+    }
+    const std::size_t last = current.find_last_not_of(" \t\r\n");
+    out.push_back(current.substr(first, last - first + 1));
+    current.clear();
+  };
+  bool in_quotes = false;
+  std::size_t i = 0;
+  const std::size_t n = text.size();
+  while (i < n) {
+    const char c = text[i];
+    if (in_quotes) {
+      current += c;
+      if (c == '\\' && i + 1 < n) {
+        current += text[i + 1];
+        i += 2;
+        continue;
+      }
+      if (c == '"') in_quotes = false;
+      ++i;
+      continue;
+    }
+    if (c == '"') {
+      in_quotes = true;
+      current += c;
+      ++i;
+      continue;
+    }
+    if (c == '\n' || c == '\r') {
+      flush();
+      ++i;
+      continue;
+    }
+    // Outside quotes, an eos::<known-name> marker starts a new
+    // segment, unless the current segment holds nothing yet
+    // (the marker is then the first command, not a split).
+    if (c == 'e' && i + 5 <= n && text.compare(i, 5, "eos::") == 0) {
+      std::size_t j = i + 5;
+      while (j < n && !IsSpace(text[j]) && text[j] != '"' &&
+             text[j] != '\n' && text[j] != '\r') {
+        ++j;
+      }
+      const std::string name = text.substr(i + 5, j - (i + 5));
+      bool known = false;
+      for (const std::string& known_name : names) {
+        if (known_name == name) {
+          known = true;
+          break;
+        }
+      }
+      if (known &&
+          current.find_first_not_of(" \t\r\n") != std::string::npos) {
+        flush();
+      }
+    }
+    current += c;
+    ++i;
+  }
+  flush();
+  return out;
+}
+
 void ConsoleHistory::Add(const std::string& line) {
   if (line.empty()) return;
   if (!entries_.empty() && entries_.back() == line) return;

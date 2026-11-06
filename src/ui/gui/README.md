@@ -244,7 +244,11 @@ for the optloop demo (see demo/synth/README.md).
 
 The console entry line takes one registry command per Return and
 dispatches it through the session, so the stepper, tree, diagram,
-schematic, and panels update after each command. The eos::
+schematic, and panels update after each command. The transcript
+above the entry shows every submitted command followed by its
+outcome: the result output on success, the error text on
+failure. A pasted submission holding several commands runs each
+in turn, each with its own outcome in the transcript. The eos::
 prefix is optional (create_scenario and eos::create_scenario
 mean the same here). Arguments are whitespace-separated;
 double-quoted arguments support backslash escapes for quote and

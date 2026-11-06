@@ -26,6 +26,23 @@ struct ConsoleLine {
 // ok=false with an error string instead.
 ConsoleLine ParseConsoleLine(const std::string& line);
 
+// Splits one submitted console text into the command segments it
+// contains, in order. Newlines separate segments, and inside one
+// line a segment starts at a token of the form eos::<name> where
+// <name> is a known registry command: a multi-command paste
+// arrives in the single-line entry with its line breaks stripped,
+// so the commands run together and only the eos:: marker shows
+// where one ends and the next begins. A marker inside double
+// quotes is an argument, not a command, and is never split on.
+// A marker naming an unknown command is left in its segment, so
+// dispatch reports it as an unknown command instead of splitting
+// on it. Blank segments are dropped, so a trailing newline or a
+// blank line contributes nothing. Bare command names never start
+// a segment: an argument may legitimately equal a command name
+// (a top module named like one), so only the eos:: marker splits.
+std::vector<std::string> SplitConsoleSegments(
+    const std::string& text, const std::vector<std::string>& names);
+
 // Up and down history for the GUI console entry (Qt-free, so it
 // is unit-testable; the widget only forwards keys to it). The
 // history is in-session only: the console takes registry
