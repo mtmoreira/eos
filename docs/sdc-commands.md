@@ -234,6 +234,7 @@ need temp-file SDC materialization or engine text-input support.
   `ideal_transition`, `group_path`, `max_time_borrow`,
   `generated_clock`. All are usable through the generic
   `add_constraint` / `list_constraints` kind words.
-- Registry count pin: 55 to 66 (bind_clock keeps the renamed slot;
-  plus `create_clock`, `create_generated_clock`, and the nine M27
-  commands).
+- Registry count pin: 59 to 70 at the unit 3 base (bind_clock
+  keeps the renamed slot; plus `create_clock`,
+  `create_generated_clock`, and the nine M27 commands).
+  Immediate unit 4 adds `check_timing`, 70 to 71.

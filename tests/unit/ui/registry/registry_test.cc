@@ -65,14 +65,15 @@ TEST(Registry, CoreSetIsComplete) {
   // extract_parasitics; P7 adds finish and write_gds; Immediate
   // unit 3 renames create_clock to bind_clock (same slot) and
   // adds create_clock (SDC), create_generated_clock, and the
-  // nine M27 commands.
-  EXPECT_EQ(shell.registry.Names().size(), 70u);
+  // nine M27 commands; Immediate unit 4 adds check_timing.
+  EXPECT_EQ(shell.registry.Names().size(), 71u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
   EXPECT_NE(shell.registry.Find("bind_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("create_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("create_generated_clock"), nullptr);
+  EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -4378,6 +4379,329 @@ TEST(SdcCommands, MaxTimeBorrowStoresValue) {
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
     EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
   }
+}
+
+// ---- check_timing (Immediate unit 4, review item I1) ----------------
+// Every valid scenario and failure mode gets coverage: the
+// verdict rules, each runnable check, the not-run reporting,
+// the include/exclude set algebra, and the option failures.
+
+// The shared check_timing fixture: a clock port, two data
+// inputs, and one output.
+void BuildCheckDesign(Shell& shell) {
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"a", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"b", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"y", "out"}).ok);
+}
+
+TEST(CheckTiming, NoDesignFailsFast) {
+  Shell shell;
+  const CommandResult result = shell.Run("check_timing");
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kUnclosedDesign);
+}
+
+TEST(CheckTiming, EmptyDesignIsIncompleteNotPass) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  const CommandResult result = shell.Run("check_timing");
+  ASSERT_TRUE(result.ok) << result.message;
+  // Nothing to find, but four default checks cannot run, so the
+  // verdict is incomplete, never a clean pass.
+  EXPECT_NE(result.payload.find("verdict=incomplete"), std::string::npos);
+  EXPECT_NE(result.payload.find("check=no_input_delay status=pass "
+                               "findings=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("check=no_output_delay status=pass "
+                               "findings=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("check=unconstrained_endpoints "
+                               "status=pass findings=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("check=generated_clocks status=pass "
+                               "findings=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find(
+                "check=loops status=not_run findings=0 reason="),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("check=no_driving_cell status=not_run"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("check=partial_input_delay "
+                               "status=not_run"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("check=pulse_clock_cell_type "
+                               "status=not_run"),
+            std::string::npos);
+}
+
+TEST(CheckTiming, NoInputDelayFlagsUncoveredPorts) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_clock", {"-period", "10", "clk"}).ok);
+  ASSERT_TRUE(
+      shell.Run("add_constraint", {"input_delay", "d_a", "a"}).ok);
+  const CommandResult result =
+      shell.Run("check_timing", {"-verbose"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("verdict=fail"), std::string::npos);
+  EXPECT_NE(result.payload.find("check=no_input_delay status=fail "
+                               "findings=1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("finding=no_input_delay b missing bound "
+                               "input_delay"),
+            std::string::npos);
+  // The clock port is excluded: it needs no input delay.
+  EXPECT_EQ(result.payload.find("finding=no_input_delay clk"),
+            std::string::npos);
+  // The output is missing its output delay and has no covering
+  // constraint at all.
+  EXPECT_NE(result.payload.find("check=no_output_delay status=fail "
+                               "findings=1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("finding=no_output_delay y missing bound "
+                               "output_delay"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("check=unconstrained_endpoints "
+                               "status=fail findings=1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("finding=unconstrained_endpoints y no "
+                               "covering constraint"),
+            std::string::npos);
+}
+
+TEST(CheckTiming, FullCoveragePassesRunnableChecks) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_clock", {"-period", "10", "clk"}).ok);
+  ASSERT_TRUE(
+      shell.Run("add_constraint", {"input_delay", "d_a", "a"}).ok);
+  ASSERT_TRUE(
+      shell.Run("add_constraint", {"input_delay", "d_b", "b"}).ok);
+  ASSERT_TRUE(
+      shell.Run("add_constraint", {"output_delay", "d_y", "y"}).ok);
+  const CommandResult result = shell.Run("check_timing");
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("check=no_input_delay status=pass "
+                               "findings=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("check=no_output_delay status=pass "
+                               "findings=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("check=unconstrained_endpoints "
+                               "status=pass findings=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("check=generated_clocks status=pass "
+                               "findings=0"),
+            std::string::npos);
+  // Still incomplete: the four un-runnable default checks did
+  // not run, and that is never a clean pass.
+  EXPECT_NE(result.payload.find("verdict=incomplete"), std::string::npos);
+}
+
+TEST(CheckTiming, UnconstrainedEndpointsExemptions) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"y1", "out"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"y2", "out"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"y3", "out"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"y4", "out"}).ok);
+  ASSERT_TRUE(
+      shell.Run("add_constraint", {"max_delay", "m1", "y1"}).ok);
+  ASSERT_TRUE(
+      shell.Run("add_constraint", {"false_path", "f2", "y2"}).ok);
+  ASSERT_TRUE(
+      shell.Run("add_constraint", {"output_delay", "d3", "y3"}).ok);
+  const CommandResult result =
+      shell.Run("check_timing", {"-verbose"});
+  ASSERT_TRUE(result.ok) << result.message;
+  // y1 has a max delay, so it is not unconstrained, but it is
+  // still missing its output delay.
+  EXPECT_EQ(result.payload.find("finding=unconstrained_endpoints y1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("finding=no_output_delay y1"),
+            std::string::npos);
+  // y2 is deliberately false-pathed: an exemption, not a
+  // missing requirement.
+  EXPECT_EQ(result.payload.find("finding=unconstrained_endpoints y2"),
+            std::string::npos);
+  // y3 has its output delay: neither check flags it.
+  EXPECT_EQ(result.payload.find("finding=no_output_delay y3"),
+            std::string::npos);
+  EXPECT_EQ(result.payload.find("finding=unconstrained_endpoints y3"),
+            std::string::npos);
+  // y4 has nothing: both checks flag it.
+  EXPECT_NE(result.payload.find("finding=no_output_delay y4"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("finding=unconstrained_endpoints y4"),
+            std::string::npos);
+}
+
+TEST(CheckTiming, GeneratedClockMasterAndSource) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"div", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"div2", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"div3", "in"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_clock",
+                {"-period", "10", "-name", "sys", "clk"})
+          .ok);
+  // A well-formed generated clock passes.
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "sys",
+                         "-divide_by", "2", "div"})
+                  .ok);
+  const CommandResult clean = shell.Run("check_timing");
+  ASSERT_TRUE(clean.ok) << clean.message;
+  EXPECT_NE(clean.payload.find("check=generated_clocks status=pass "
+                              "findings=0"),
+            std::string::npos);
+  // An undefined master clock is a finding.
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "nope",
+                         "-divide_by", "2", "div2"})
+                  .ok);
+  const CommandResult missing_master =
+      shell.Run("check_timing", {"-verbose"});
+  ASSERT_TRUE(missing_master.ok) << missing_master.message;
+  EXPECT_NE(missing_master.payload.find(
+                "check=generated_clocks status=fail findings=1"),
+            std::string::npos);
+  EXPECT_NE(missing_master.payload.find(
+                "finding=generated_clocks div2 master clock nope is "
+                "not defined"),
+            std::string::npos);
+  // A source that names no design object is a finding, and a
+  // combinational generated clock needs no master.
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "ghost", "-master_clock", "sys",
+                         "-divide_by", "2", "div3"})
+                  .ok);
+  const CommandResult missing_source =
+      shell.Run("check_timing", {"-verbose"});
+  ASSERT_TRUE(missing_source.ok) << missing_source.message;
+  EXPECT_NE(missing_source.payload.find(
+                "finding=generated_clocks div3 source ghost does not "
+                "exist in the design"),
+            std::string::npos);
+}
+
+TEST(CheckTiming, GeneratedClockCombinationalNeedsNoMaster) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"div", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-combinational", "div"})
+                  .ok);
+  const CommandResult result = shell.Run("check_timing");
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("check=generated_clocks status=pass "
+                              "findings=0"),
+            std::string::npos);
+}
+
+TEST(CheckTiming, GeneratedClockUnresolvedTargetIsAFinding) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_clock",
+                {"-period", "10", "-name", "sys", "clk"})
+          .ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "sys",
+                         "-divide_by", "2", "ghost"})
+                  .ok);
+  const CommandResult result =
+      shell.Run("check_timing", {"-verbose"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("check=generated_clocks status=fail "
+                              "findings=1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("finding=generated_clocks ghost target "
+                              "ghost is unresolved"),
+            std::string::npos);
+}
+
+TEST(CheckTiming, MulticyclePathIsOptional) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(
+      shell.Run("add_constraint", {"multicycle", "mc1", "ghost"}).ok);
+  // Optional checks do not run by default.
+  const CommandResult plain = shell.Run("check_timing");
+  ASSERT_TRUE(plain.ok) << plain.message;
+  EXPECT_EQ(plain.payload.find("check=multicycle_path"),
+            std::string::npos);
+  // Included, the unresolved multicycle row is a finding.
+  const CommandResult included = shell.Run(
+      "check_timing", {"-include", "multicycle_path", "-verbose"});
+  ASSERT_TRUE(included.ok) << included.message;
+  EXPECT_NE(included.payload.find("check=multicycle_path status=fail "
+                                 "findings=1"),
+            std::string::npos);
+  EXPECT_NE(included.payload.find(
+                "finding=multicycle_path mc1 target ghost is unresolved"),
+            std::string::npos);
+  // A bound multicycle row passes.
+  ASSERT_TRUE(
+      shell.Run("add_constraint", {"multicycle", "mc2", "y"}).ok);
+  const CommandResult bound = shell.Run(
+      "check_timing", {"-include", "multicycle_path"});
+  ASSERT_TRUE(bound.ok) << bound.message;
+  EXPECT_NE(bound.payload.find("check=multicycle_path status=fail "
+                              "findings=1"),
+            std::string::npos);
+}
+
+TEST(CheckTiming, IncludeExcludeAndFailureModes) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  // Excluding a default check removes it from the output.
+  const CommandResult excluded =
+      shell.Run("check_timing", {"-exclude", "no_input_delay"});
+  ASSERT_TRUE(excluded.ok) << excluded.message;
+  EXPECT_EQ(excluded.payload.find("check=no_input_delay"),
+            std::string::npos);
+  EXPECT_NE(excluded.payload.find("check=no_output_delay"),
+            std::string::npos);
+  // Including an optional check adds it, in table order after
+  // the defaults.
+  const CommandResult included = shell.Run(
+      "check_timing", {"-include", "multicycle_path"});
+  ASSERT_TRUE(included.ok) << included.message;
+  EXPECT_NE(included.payload.find("check=multicycle_path status=pass "
+                                 "findings=0"),
+            std::string::npos);
+  const std::vector<std::vector<std::string>> bad = {
+      {"-include", "no_such_check"}, // unknown check
+      {"-exclude", "no_such_check"}, // unknown check
+      {"-exclude", "multicycle_path"}, // not in the run
+      {"-exclude", "clock_crossing"},  // not in the run
+      {"-verbose", "-summary"},        // conflicting forms
+      {"stray"},                       // positional argument
+      {"-exclude", "generated_clocks", "-exclude", "loops",
+       "-exclude", "no_driving_cell", "-exclude", "no_input_delay",
+       "-exclude", "no_output_delay", "-exclude", "partial_input_delay",
+       "-exclude", "pulse_clock_cell_type", "-exclude",
+       "unconstrained_endpoints"},     // empty run set
+  };
+  for (const std::vector<std::string>& args : bad) {
+    const CommandResult result = shell.Run("check_timing", args);
+    ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
+    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  }
+  // The unknown-check failure names the known checks.
+  const CommandResult unknown =
+      shell.Run("check_timing", {"-include", "no_such_check"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_NE(unknown.message.find("known checks: "), std::string::npos);
+  EXPECT_NE(unknown.message.find("unconstrained_endpoints"),
+            std::string::npos);
 }
 
 }  // namespace

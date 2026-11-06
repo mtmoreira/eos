@@ -1272,6 +1272,307 @@ void ReplaceNamed(CommandContext& ctx, db::ConstraintKind kind,
   for (db::ConstraintId id : dead) ctx.project.constraints.Remove(id);
 }
 
+// ---- check_timing (Immediate unit 4, review item I1) -----------------
+// The constraint-completeness gate: the check the guides put
+// before trusting any violation report. It runs FROM-SCRATCH over
+// the session constraint set and the session design, and it is
+// the EOS replacement for the internal OpenSTA CheckTiming, not
+// a duplicate of it: OpenSTA's CheckTiming stays internal and
+// unexposed, and this command never calls it. That matters
+// because the two check different things: OpenSTA's checks the
+// SDC file under a full STA session, while this one checks the
+// constraints the user authored with eos:: commands, with no
+// Liberty and no STA run required, so the gate can run before
+// run_timing, where the guides put it.
+//
+// A check reports one of three statuses, and the summary never
+// hides which one it is:
+//   pass     the check ran and found nothing.
+//   fail     the check ran and lists its findings.
+//   not_run  the session model cannot express the check, and the
+//            reason names the missing piece. A not_run check is
+//            never counted as passing.
+// The verdict follows the same honesty rule (review item H1: a
+// clean verdict on an unchecked constraint set is forbidden):
+//   pass       every selected check ran and passed.
+//   fail       at least one selected check failed.
+//   incomplete no check failed, but at least one selected check
+//            did not run.
+// The command returns Ok with the verdict in the payload in all
+// three cases, like report_timing returns Ok with negative
+// slack: the verdict is the gate, and a script that must stop
+// on a failed gate tests verdict=. Findings never make the
+// command fail, so the per-check payload stays available to
+// scripts. Out of scope by the plan: check_constraints rule
+// checking with waivers, and check_design.
+
+// One check's outcome: pass, fail, or not_run, with its
+// findings in sorted order. A not_run outcome carries the
+// reason; a pass or fail outcome leaves it empty.
+struct CheckTimingOutcome {
+  std::string name;
+  std::string status;
+  std::vector<std::string> findings;
+  std::string reason;
+};
+
+// One check_timing check: its name, whether it is in the
+// PrimeTime default set, its runner (null when the session
+// model cannot express it), and the reason it cannot run
+// (empty when it can). The table order is the output order:
+// the default set in PrimeTime order, then the optional set
+// alphabetically.
+struct CheckTimingCheck {
+  const char* name;
+  bool is_default;
+  CheckTimingOutcome (*run)(const db::Design&,
+                            const db::ConstraintSet&);
+  const char* not_run_reason;
+};
+
+// Whether a bound constraint of the given kind targets this
+// object. Only bound rows cover: an unresolved row names an
+// object that does not exist, so it covers nothing.
+bool CheckTimingCovered(const db::ConstraintSet& constraints, ObjectId object,
+                        db::ConstraintKind kind) {
+  for (const db::Constraint& c : constraints.all()) {
+    if (c.status == db::BindingStatus::kBound &&
+        c.bound_object == object && c.kind == kind) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Whether the named object exists in the design, as a port,
+// net, instance, or pin.
+bool CheckTimingObjectExists(const db::Design& design,
+                             const std::string& name) {
+  static const ObjectKind kKinds[] = {ObjectKind::kPort, ObjectKind::kNet,
+                                      ObjectKind::kInstance,
+                                      ObjectKind::kPin};
+  for (ObjectKind kind : kKinds) {
+    if (!design.Find(kind, name).is_null()) return true;
+  }
+  return false;
+}
+
+// The ports that are clock ports: targets of a bound clock or
+// generated-clock row. A clock port needs no input delay.
+std::set<std::uint32_t> CheckTimingClockPorts(
+    const db::ConstraintSet& constraints) {
+  std::set<std::uint32_t> ports;
+  for (const db::Constraint& c : constraints.all()) {
+    if (c.status != db::BindingStatus::kBound) continue;
+    if (c.kind == db::ConstraintKind::kClock ||
+        c.kind == db::ConstraintKind::kGeneratedClock) {
+      ports.insert(c.bound_object.raw());
+    }
+  }
+  return ports;
+}
+
+// Every top port that takes data in (input or inout, following
+// OpenSTA's isAnyInput) and is not a clock port, without a bound
+// input-delay constraint.
+CheckTimingOutcome CheckTimingNoInputDelay(
+    const db::Design& design, const db::ConstraintSet& constraints) {
+  CheckTimingOutcome outcome;
+  outcome.name = "no_input_delay";
+  const std::set<std::uint32_t> clocks = CheckTimingClockPorts(constraints);
+  for (const ObjectId id : EnumerateKind(design, ObjectKind::kPort)) {
+    const db::PortRecord* port = design.FindPort(id);
+    if (port == nullptr) continue;
+    if (port->direction != db::Direction::kInput &&
+        port->direction != db::Direction::kInout) {
+      continue;
+    }
+    if (clocks.count(id.raw()) != 0) continue;
+    if (CheckTimingCovered(constraints, id,
+                           db::ConstraintKind::kInputDelay)) {
+      continue;
+    }
+    outcome.findings.push_back(port->name + " missing bound input_delay");
+  }
+  std::sort(outcome.findings.begin(), outcome.findings.end());
+  outcome.status = outcome.findings.empty() ? "pass" : "fail";
+  return outcome;
+}
+
+// Every top port that drives data out (output or inout,
+// following OpenSTA's isAnyOutput) without a bound
+// output-delay constraint.
+CheckTimingOutcome CheckTimingNoOutputDelay(
+    const db::Design& design, const db::ConstraintSet& constraints) {
+  CheckTimingOutcome outcome;
+  outcome.name = "no_output_delay";
+  for (const ObjectId id : EnumerateKind(design, ObjectKind::kPort)) {
+    const db::PortRecord* port = design.FindPort(id);
+    if (port == nullptr) continue;
+    if (port->direction != db::Direction::kOutput &&
+        port->direction != db::Direction::kInout) {
+      continue;
+    }
+    if (CheckTimingCovered(constraints, id,
+                           db::ConstraintKind::kOutputDelay)) {
+      continue;
+    }
+    outcome.findings.push_back(port->name + " missing bound output_delay");
+  }
+  std::sort(outcome.findings.begin(), outcome.findings.end());
+  outcome.status = outcome.findings.empty() ? "pass" : "fail";
+  return outcome;
+}
+
+// Every top output port with no timing requirement on it at
+// all: no bound output delay, max delay, or multicycle path.
+// A false path counts as a deliberate exemption, not a missing
+// requirement: the user stated the endpoint has no timing, so
+// it is not reported as unconstrained.
+CheckTimingOutcome CheckTimingUnconstrainedEndpoints(
+    const db::Design& design, const db::ConstraintSet& constraints) {
+  CheckTimingOutcome outcome;
+  outcome.name = "unconstrained_endpoints";
+  for (const ObjectId id : EnumerateKind(design, ObjectKind::kPort)) {
+    const db::PortRecord* port = design.FindPort(id);
+    if (port == nullptr) continue;
+    if (port->direction != db::Direction::kOutput &&
+        port->direction != db::Direction::kInout) {
+      continue;
+    }
+    if (CheckTimingCovered(constraints, id,
+                           db::ConstraintKind::kOutputDelay) ||
+        CheckTimingCovered(constraints, id,
+                           db::ConstraintKind::kMaxDelay) ||
+        CheckTimingCovered(constraints, id,
+                           db::ConstraintKind::kMulticyclePath) ||
+        CheckTimingCovered(constraints, id,
+                           db::ConstraintKind::kFalsePath)) {
+      continue;
+    }
+    outcome.findings.push_back(port->name + " no covering constraint");
+  }
+  std::sort(outcome.findings.begin(), outcome.findings.end());
+  outcome.status = outcome.findings.empty() ? "pass" : "fail";
+  return outcome;
+}
+
+// Every generated clock whose definition is broken: a master
+// clock that names no bound SDC clock row, a source pin that
+// names no design object, or a target that never bound. The
+// master must be a real SDC clock row (period_ns present,
+// bound): a construction record (bind_clock) names a clock net
+// but carries no period, so it cannot be a master.
+CheckTimingOutcome CheckTimingGeneratedClocks(
+    const db::Design& design, const db::ConstraintSet& constraints) {
+  CheckTimingOutcome outcome;
+  outcome.name = "generated_clocks";
+  for (const db::Constraint& c : constraints.all()) {
+    if (c.kind != db::ConstraintKind::kGeneratedClock) continue;
+    if (c.status != db::BindingStatus::kBound) {
+      outcome.findings.push_back(c.name + " target " + c.target_spec +
+                                 " is unresolved");
+      continue;
+    }
+    const std::optional<std::string> master = c.Param("master_clock");
+    const bool combinational =
+        c.Param("combinational").has_value() &&
+        *c.Param("combinational") == "1";
+    if (!combinational && master.has_value()) {
+      bool defined = false;
+      for (const db::Constraint& m : constraints.all()) {
+        if (m.kind == db::ConstraintKind::kClock &&
+            m.status == db::BindingStatus::kBound && m.name == *master &&
+            m.Param("period_ns").has_value()) {
+          defined = true;
+          break;
+        }
+      }
+      if (!defined) {
+        outcome.findings.push_back(c.name + " master clock " + *master +
+                                   " is not defined");
+      }
+    }
+    const std::optional<std::string> source = c.Param("source");
+    if (source.has_value() && !CheckTimingObjectExists(design, *source)) {
+      outcome.findings.push_back(c.name + " source " + *source +
+                                 " does not exist in the design");
+    }
+  }
+  std::sort(outcome.findings.begin(), outcome.findings.end());
+  outcome.status = outcome.findings.empty() ? "pass" : "fail";
+  return outcome;
+}
+
+// Every multicycle-path row that never bound. Multicycle rows
+// carry no setup or hold values in the session model, so an
+// unbound target is the only checkable finding.
+CheckTimingOutcome CheckTimingMulticyclePath(
+    const db::Design& design, const db::ConstraintSet& constraints) {
+  (void)design;
+  CheckTimingOutcome outcome;
+  outcome.name = "multicycle_path";
+  for (const db::Constraint& c : constraints.all()) {
+    if (c.kind != db::ConstraintKind::kMulticyclePath) continue;
+    if (c.status == db::BindingStatus::kBound) continue;
+    outcome.findings.push_back(c.name + " target " + c.target_spec +
+                               " is unresolved");
+  }
+  std::sort(outcome.findings.begin(), outcome.findings.end());
+  outcome.status = outcome.findings.empty() ? "pass" : "fail";
+  return outcome;
+}
+
+const CheckTimingCheck kCheckTimingChecks[] = {
+    {"generated_clocks", true, &CheckTimingGeneratedClocks, ""},
+    {"loops", true, nullptr,
+     "the design model carries no pin directions, so combinational "
+     "cycles cannot be traced"},
+    {"no_driving_cell", true, nullptr,
+     "the session model has no driving-cell constraint"},
+    {"no_input_delay", true, &CheckTimingNoInputDelay, ""},
+    {"no_output_delay", true, &CheckTimingNoOutputDelay, ""},
+    {"partial_input_delay", true, nullptr,
+     "input-delay rows carry no clock association"},
+    {"pulse_clock_cell_type", true, nullptr,
+     "the session model has no clock cell types"},
+    {"unconstrained_endpoints", true, &CheckTimingUnconstrainedEndpoints, ""},
+    {"case_analysis", false, nullptr,
+     "case-analysis rows carry no value"},
+    {"clock_crossing", false, nullptr,
+     "the design model has no clock domains"},
+    {"gated_clock", false, nullptr,
+     "the design model has no clock-gating structure"},
+    {"multiple_clock", false, nullptr,
+     "the design model has no sequential elements"},
+    {"multicycle_path", false, &CheckTimingMulticyclePath, ""},
+};
+
+const CheckTimingCheck* FindCheckTimingCheck(const std::string& name) {
+  for (const CheckTimingCheck& check : kCheckTimingChecks) {
+    if (name == check.name) return &check;
+  }
+  return nullptr;
+}
+
+// The known check names, comma separated, for failure messages.
+std::string CheckTimingKnownChecks() {
+  std::string out;
+  for (const CheckTimingCheck& check : kCheckTimingChecks) {
+    if (!out.empty()) out += ", ";
+    out += check.name;
+  }
+  return out;
+}
+
+CheckTimingOutcome CheckTimingNotRun(const CheckTimingCheck& check) {
+  CheckTimingOutcome outcome;
+  outcome.name = check.name;
+  outcome.status = "not_run";
+  outcome.reason = check.not_run_reason;
+  return outcome;
+}
+
 }  // namespace
 
 void RegisterCoreCommands(CommandRegistry& registry) {
@@ -2417,6 +2718,127 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             " unresolved=" + std::to_string(report.unresolved) +
             " empty=" + std::to_string(report.empty) +
             (report.complete() ? " complete=1" : " complete=0"));
+      });
+
+  // ---- check_timing (Immediate unit 4, review item I1) -------------
+  // The constraint-completeness gate over the session constraint
+  // set and the session design. The default set runs unless
+  // -exclude removes a check; -include adds optional checks.
+  // -verbose adds one finding line per finding; -summary
+  // selects the summary form, which is also the default, and
+  // conflicts with -verbose. The payload is the summary form:
+  // verdict= first, then one check= line per selected check in
+  // table order, plus finding= lines under -verbose. The
+  // command needs an open design but no Liberty and no STA run:
+  // the gate runs before run_timing, where the guides put it.
+  // It reads stored binding status, so run rebind_constraints
+  // first when the design changed after the constraints were
+  // authored. It never mutates session state.
+  add("check_timing",
+      "check_timing [-include <check>]... [-exclude <check>]... "
+      "[-verbose] [-summary]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-include", 1, true},
+                 {"-exclude", 1, true},
+                 {"-verbose", 0, false},
+                 {"-summary", 0, false}},
+                "check_timing", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "check_timing: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        if (opts.Has("-verbose") && opts.Has("-summary")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "check_timing: -verbose and -summary conflict");
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        // Values() returns by value: bind the vectors first, so the
+        // set constructors take both iterators from the same object.
+        const std::vector<std::string> include_values =
+            opts.Values("-include");
+        const std::vector<std::string> exclude_values =
+            opts.Values("-exclude");
+        const std::set<std::string> included(include_values.begin(),
+                                             include_values.end());
+        const std::set<std::string> excluded(exclude_values.begin(),
+                                             exclude_values.end());
+        for (const std::string& name : included) {
+          if (FindCheckTimingCheck(name) == nullptr) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "check_timing: unknown check: " + name +
+                    " (known checks: " + CheckTimingKnownChecks() + ")");
+          }
+        }
+        for (const std::string& name : excluded) {
+          const CheckTimingCheck* check = FindCheckTimingCheck(name);
+          if (check == nullptr) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "check_timing: unknown check: " + name +
+                    " (known checks: " + CheckTimingKnownChecks() + ")");
+          }
+          if (!check->is_default && included.count(name) == 0) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "check_timing: -exclude names a check that is not in "
+                "the run: " +
+                    name + " (include it first)");
+          }
+        }
+        std::vector<const CheckTimingCheck*> run;
+        for (const CheckTimingCheck& check : kCheckTimingChecks) {
+          const bool selected =
+              (check.is_default || included.count(check.name) != 0) &&
+              excluded.count(check.name) == 0;
+          if (selected) run.push_back(&check);
+        }
+        if (run.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "check_timing: no checks selected");
+        }
+        std::vector<CheckTimingOutcome> outcomes;
+        for (const CheckTimingCheck* check : run) {
+          if (check->run == nullptr) {
+            outcomes.push_back(CheckTimingNotRun(*check));
+          } else {
+            outcomes.push_back(
+                check->run(*ctx.project.design, ctx.project.constraints));
+          }
+        }
+        bool any_fail = false;
+        bool any_not_run = false;
+        for (const CheckTimingOutcome& outcome : outcomes) {
+          if (outcome.status == "fail") any_fail = true;
+          if (outcome.status == "not_run") any_not_run = true;
+        }
+        const std::string verdict =
+            any_fail ? "fail" : (any_not_run ? "incomplete" : "pass");
+        std::string payload = "verdict=" + verdict;
+        for (const CheckTimingOutcome& outcome : outcomes) {
+          payload += "\ncheck=" + outcome.name +
+                     " status=" + outcome.status + " findings=" +
+                     std::to_string(outcome.findings.size());
+          if (outcome.status == "not_run") {
+            payload += " reason=" + outcome.reason;
+          }
+          if (opts.Has("-verbose")) {
+            for (const std::string& finding : outcome.findings) {
+              payload += "\nfinding=" + outcome.name + " " + finding;
+            }
+          }
+        }
+        return CommandResult::Ok(payload);
       });
 
   add("get_objects", "get_objects <cell|instance|net|port|pin> <pattern>",
