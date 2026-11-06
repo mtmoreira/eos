@@ -1573,6 +1573,380 @@ CheckTimingOutcome CheckTimingNotRun(const CheckTimingCheck& check) {
   return outcome;
 }
 
+// ---- report_clock (Immediate unit 5, review item I2) ----------------
+// The clock inventory, PrimeTime-adjacent: the Clock, Period,
+// Waveform, Attrs, Sources table plus the generated-clock table
+// (Timing Constraints U-2022.12 ch. 2, PrimeTime T-2022.03 ch. 7).
+// It runs FROM-SCRATCH over the session constraint set: SDC clocks
+// are kClock rows carrying period_ns, generated clocks are
+// kGeneratedClock rows, and construction records (bind_clock) are
+// kClock rows without a period. Nothing here reads the SDC file
+// recorded by read_sdc: that path stores the file path only, so
+// clocks defined in an SDC file do not appear until a later unit
+// wires file constraints into the session (see
+// docs/sdc-commands.md). The report never invents a number: a
+// period or waveform that cannot be derived from stored data
+// renders as "-", and the -skew column reports the stored clock
+// uncertainty, which is "none" for every clock today because EOS
+// has no set_clock_uncertainty command yet. Does NOT include
+// report_clock_timing (clock-network summary and skew); that is
+// a separate item.
+
+// One clock entry in the report_clock main table: stored rows that
+// render identically (same name, same kind, same effective period
+// and waveform), with their sources merged. Rows that differ in
+// any displayed value stay separate rows, so a name stacked with
+// -add under two periods is never collapsed into one number.
+struct ReportClockEntry {
+  std::string name;
+  bool generated = false;
+  bool unresolved = false;  // any row in the group never bound
+  std::vector<std::string> sources;  // target specs, insertion order
+  std::optional<double> period_ns;
+  std::optional<double> rise_ns;
+  std::optional<double> fall_ns;
+};
+
+// One row of the generated-clock table: a generated-clock
+// definition with its master and its waveform modification.
+// Generated sources merge within a group; the master source is
+// looked up from the master clock's own rows.
+struct ReportGeneratedEntry {
+  std::string name;
+  std::string master_clock;  // empty for a combinational clock
+  std::string master_source;  // "-" when the master is not defined
+  std::vector<std::string> sources;  // generated targets, insertion order
+  std::string modification;  // divide_by(n), multiply_by(n), invert,
+                             // combinational, in that order
+};
+
+// The effective period and waveform of a clock by name.
+struct ReportClockTiming {
+  double period_ns = 0;
+  double rise_ns = 0;
+  double fall_ns = 0;
+};
+
+// The effective waveform of an SDC clock row: the stored waveform
+// when given, else the SDC default {0 period/2}. The default is
+// SDC semantics, not an invented value: create_clock without
+// -waveform defines a clock whose first edge is at 0 and whose
+// second edge is at half the period.
+bool ReportClockWaveform(const db::Constraint& clock, double period_ns,
+                         double& rise_ns, double& fall_ns) {
+  const std::optional<std::string> rise = clock.Param("waveform_rise_ns");
+  const std::optional<std::string> fall = clock.Param("waveform_fall_ns");
+  if (!rise.has_value() && !fall.has_value()) {
+    rise_ns = 0.0;
+    fall_ns = period_ns / 2.0;
+    return true;
+  }
+  if (!rise.has_value() || !fall.has_value()) return false;
+  return ParseDouble(*rise, rise_ns) && ParseDouble(*fall, fall_ns);
+}
+
+std::optional<ReportClockTiming> ReportClockGeneratedTiming(
+    const db::ConstraintSet& constraints, const db::Constraint& c,
+    std::set<db::ConstraintId>& seen);
+
+// The effective period and waveform of a clock by name: the stored
+// values for an SDC clock, the derived values for a generated
+// clock. Returns nullopt when the clock is not defined, its
+// master is not defined, or its waveform cannot be represented
+// as one {rise fall} pair. `seen` holds the generated rows
+// already on the derivation path, by constraint id: a cycle
+// yields unknown, never a loop. An SDC row wins over a generated
+// row sharing the name: the direct definition governs. The
+// cycle set is by id, not by name, because one name can carry
+// both an SDC row and a generated row: a generated clock whose
+// master shares its name derives from the SDC row, which is a
+// different row and not a cycle.
+std::optional<ReportClockTiming> ReportClockTimingOf(
+    const db::ConstraintSet& constraints, const std::string& name,
+    std::set<db::ConstraintId>& seen) {
+  for (const db::Constraint& c : constraints.all()) {
+    if (c.kind != db::ConstraintKind::kClock || c.name != name) continue;
+    const std::optional<std::string> period = c.Param("period_ns");
+    if (!period.has_value()) continue;
+    double period_ns = 0.0;
+    if (!ParseDouble(*period, period_ns)) return std::nullopt;
+    ReportClockTiming timing;
+    timing.period_ns = period_ns;
+    if (!ReportClockWaveform(c, period_ns, timing.rise_ns,
+                             timing.fall_ns)) {
+      return std::nullopt;
+    }
+    return timing;
+  }
+  for (const db::Constraint& c : constraints.all()) {
+    if (c.kind != db::ConstraintKind::kGeneratedClock || c.name != name) {
+      continue;
+    }
+    return ReportClockGeneratedTiming(constraints, c, seen);
+  }
+  return std::nullopt;
+}
+
+// The effective period and waveform of one generated-clock row,
+// derived from its own master and waveform modification. The
+// period scales by divide_by over multiply_by (1 when absent);
+// a combinational clock keeps the master period. The waveform
+// scales by the same factor. Inversion moves the high interval
+// [rise, fall) to [fall, rise + period), which is one {rise
+// fall} pair only when the master rise is 0 and the master fall
+// is below the period, which the default waveform satisfies.
+std::optional<ReportClockTiming> ReportClockGeneratedTiming(
+    const db::ConstraintSet& constraints, const db::Constraint& c,
+    std::set<db::ConstraintId>& seen) {
+  // A generated row deriving from itself is a cycle: unknown,
+  // never a loop. The check is by constraint id, so a master
+  // that shares this row's name but is a different row (an SDC
+  // row, or another generated row) still resolves.
+  if (seen.count(c.id) != 0) return std::nullopt;
+  seen.insert(c.id);
+  const std::optional<std::string> master = c.Param("master_clock");
+  if (!master.has_value()) return std::nullopt;
+  const std::optional<ReportClockTiming> master_timing =
+      ReportClockTimingOf(constraints, *master, seen);
+  if (!master_timing.has_value()) return std::nullopt;
+  double factor = 1.0;
+  const std::optional<std::string> divide = c.Param("divide_by");
+  const std::optional<std::string> multiply = c.Param("multiply_by");
+  long divide_by = 0;
+  long multiply_by = 0;
+  if (divide.has_value() && !ParseInt(*divide, divide_by)) {
+    return std::nullopt;
+  }
+  if (multiply.has_value() && !ParseInt(*multiply, multiply_by)) {
+    return std::nullopt;
+  }
+  if (divide_by != 0) factor *= static_cast<double>(divide_by);
+  if (multiply_by != 0) factor /= static_cast<double>(multiply_by);
+  ReportClockTiming timing;
+  timing.period_ns = master_timing->period_ns * factor;
+  timing.rise_ns = master_timing->rise_ns * factor;
+  timing.fall_ns = master_timing->fall_ns * factor;
+  if (c.Param("invert").has_value()) {
+    if (timing.rise_ns != 0.0 || timing.fall_ns >= timing.period_ns) {
+      return std::nullopt;
+    }
+    const double rise = timing.fall_ns;
+    timing.fall_ns = timing.period_ns;
+    timing.rise_ns = rise;
+  }
+  return timing;
+}
+
+// The source objects of a clock by name: the target specs of its
+// stored rows, joined with spaces, or "-" when no row names it.
+std::string ReportClockSourcesOf(const db::ConstraintSet& constraints,
+                                 const std::string& name) {
+  std::string out;
+  for (const db::Constraint& c : constraints.all()) {
+    if (c.name != name) continue;
+    if (c.kind != db::ConstraintKind::kClock &&
+        c.kind != db::ConstraintKind::kGeneratedClock) {
+      continue;
+    }
+    if (!out.empty()) out += " ";
+    out += c.target_spec;
+  }
+  return out.empty() ? "-" : out;
+}
+
+// Appends a target to a source list once, keeping first-seen order.
+void ReportClockAddSource(std::vector<std::string>& sources,
+                          const std::string& target) {
+  if (std::find(sources.begin(), sources.end(), target) ==
+      sources.end()) {
+    sources.push_back(target);
+  }
+}
+
+// The main-table entries, grouped so rows that render identically
+// merge and rows that differ stay separate, sorted by name with an
+// SDC entry before a generated entry sharing the name.
+std::vector<ReportClockEntry> ReportClockEntries(
+    const db::ConstraintSet& constraints) {
+  std::vector<ReportClockEntry> entries;
+  const auto find_entry = [&entries](const std::string& name,
+                                     bool generated,
+                                     std::optional<double> period_ns,
+                                     std::optional<double> rise_ns,
+                                     std::optional<double> fall_ns) {
+    for (ReportClockEntry& entry : entries) {
+      if (entry.name == name && entry.generated == generated &&
+          entry.period_ns == period_ns && entry.rise_ns == rise_ns &&
+          entry.fall_ns == fall_ns) {
+        return &entry;
+      }
+    }
+    return static_cast<ReportClockEntry*>(nullptr);
+  };
+  for (const db::Constraint& c : constraints.all()) {
+    if (c.kind == db::ConstraintKind::kClock) {
+      const std::optional<std::string> period = c.Param("period_ns");
+      if (!period.has_value()) continue;  // construction record
+      double period_ns = 0.0;
+      if (!ParseDouble(*period, period_ns)) continue;
+      double rise_ns = 0.0;
+      double fall_ns = 0.0;
+      if (!ReportClockWaveform(c, period_ns, rise_ns, fall_ns)) continue;
+      ReportClockEntry* entry = find_entry(
+          c.name, false, period_ns, rise_ns, fall_ns);
+      if (entry == nullptr) {
+        entries.push_back(ReportClockEntry());
+        entry = &entries.back();
+        entry->name = c.name;
+        entry->generated = false;
+        entry->period_ns = period_ns;
+        entry->rise_ns = rise_ns;
+        entry->fall_ns = fall_ns;
+      }
+      if (c.status != db::BindingStatus::kBound) entry->unresolved = true;
+      ReportClockAddSource(entry->sources, c.target_spec);
+    } else if (c.kind == db::ConstraintKind::kGeneratedClock) {
+      // Derive from this row's own definition, not from the name:
+      // a name carrying both an SDC row and a generated row
+      // derives the generated entry from its master.
+      std::set<db::ConstraintId> seen;
+      const std::optional<ReportClockTiming> timing =
+          ReportClockGeneratedTiming(constraints, c, seen);
+      std::optional<double> period_ns;
+      std::optional<double> rise_ns;
+      std::optional<double> fall_ns;
+      if (timing.has_value()) {
+        period_ns = timing->period_ns;
+        rise_ns = timing->rise_ns;
+        fall_ns = timing->fall_ns;
+      }
+      ReportClockEntry* entry =
+          find_entry(c.name, true, period_ns, rise_ns, fall_ns);
+      if (entry == nullptr) {
+        entries.push_back(ReportClockEntry());
+        entry = &entries.back();
+        entry->name = c.name;
+        entry->generated = true;
+        entry->period_ns = period_ns;
+        entry->rise_ns = rise_ns;
+        entry->fall_ns = fall_ns;
+      }
+      if (c.status != db::BindingStatus::kBound) entry->unresolved = true;
+      ReportClockAddSource(entry->sources, c.target_spec);
+    }
+  }
+  std::sort(entries.begin(), entries.end(),
+            [](const ReportClockEntry& a, const ReportClockEntry& b) {
+              if (a.name != b.name) return a.name < b.name;
+              return !a.generated && b.generated;
+            });
+  return entries;
+}
+
+// The waveform modification of one generated-clock row, in the
+// fixed order divide_by, multiply_by, invert, combinational.
+std::string ReportClockModification(const db::Constraint& c) {
+  std::string out;
+  const std::optional<std::string> divide = c.Param("divide_by");
+  if (divide.has_value()) out += "divide_by(" + *divide + ")";
+  const std::optional<std::string> multiply = c.Param("multiply_by");
+  if (multiply.has_value()) {
+    if (!out.empty()) out += " ";
+    out += "multiply_by(" + *multiply + ")";
+  }
+  if (c.Param("invert").has_value()) {
+    if (!out.empty()) out += " ";
+    out += "invert";
+  }
+  if (c.Param("combinational").has_value()) {
+    if (!out.empty()) out += " ";
+    out += "combinational";
+  }
+  return out;
+}
+
+// The generated-clock table entries, grouped so identical rows
+// merge and rows that differ stay separate, sorted by name.
+std::vector<ReportGeneratedEntry> ReportGeneratedEntries(
+    const db::ConstraintSet& constraints) {
+  std::vector<ReportGeneratedEntry> entries;
+  for (const db::Constraint& c : constraints.all()) {
+    if (c.kind != db::ConstraintKind::kGeneratedClock) continue;
+    const std::string master =
+        c.Param("master_clock").value_or("");
+    const std::string modification = ReportClockModification(c);
+    ReportGeneratedEntry* entry = nullptr;
+    for (ReportGeneratedEntry& candidate : entries) {
+      if (candidate.name == c.name &&
+          candidate.master_clock == master &&
+          candidate.modification == modification) {
+        entry = &candidate;
+        break;
+      }
+    }
+    if (entry == nullptr) {
+      entries.push_back(ReportGeneratedEntry());
+      entry = &entries.back();
+      entry->name = c.name;
+      entry->master_clock = master;
+      entry->master_source =
+          master.empty() ? "-"
+                         : ReportClockSourcesOf(constraints, master);
+      entry->modification = modification;
+    }
+    ReportClockAddSource(entry->sources, c.target_spec);
+  }
+  std::sort(entries.begin(), entries.end(),
+            [](const ReportGeneratedEntry& a,
+               const ReportGeneratedEntry& b) {
+              if (a.name != b.name) return a.name < b.name;
+              return a.master_clock < b.master_clock;
+            });
+  return entries;
+}
+
+// Renders one table: a header row, a dash line, the data rows,
+// and a closing dash line. Columns pad to the widest cell, two
+// spaces between columns, left aligned, following the
+// report_timing table shape.
+std::string ReportClockRenderTable(
+    std::vector<std::vector<std::string>> rows) {
+  if (rows.empty()) return "";
+  const std::size_t cols = rows[0].size();
+  std::vector<std::size_t> widths(cols, 0);
+  for (const auto& row : rows) {
+    for (std::size_t i = 0; i < row.size(); ++i) {
+      widths[i] = std::max(widths[i], row[i].size());
+    }
+  }
+  std::size_t width = 0;
+  for (std::size_t i = 0; i < cols; ++i) width += widths[i];
+  width += 2 * (cols - 1);
+  std::string out;
+  for (std::size_t r = 0; r < rows.size(); ++r) {
+    for (std::size_t i = 0; i < cols; ++i) {
+      if (i != 0) out += "  ";
+      out += rows[r][i];
+      out += std::string(widths[i] - rows[r][i].size(), ' ');
+    }
+    out += "\n";
+    if (r == 0) out += std::string(width, '-') + "\n";
+  }
+  out += std::string(width, '-') + "\n";
+  return out;
+}
+
+// Joins sources into the vendor "{a b}" form.
+std::string ReportClockBrace(const std::vector<std::string>& sources) {
+  std::string out = "{";
+  for (std::size_t i = 0; i < sources.size(); ++i) {
+    if (i != 0) out += " ";
+    out += sources[i];
+  }
+  out += "}";
+  return out;
+}
+
 }  // namespace
 
 void RegisterCoreCommands(CommandRegistry& registry) {
@@ -2837,6 +3211,140 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               payload += "\nfinding=" + outcome.name + " " + finding;
             }
           }
+        }
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- report_clock (Immediate unit 5, review item I2) -------------
+  // The clock inventory over the session constraint set: the
+  // Clock, Period, Waveform, Attrs, Sources table plus the
+  // generated-clock table (Timing Constraints U-2022.12 ch. 2).
+  // -skew adds a Skew column reporting the stored clock
+  // uncertainty, which is "none" for every clock today because
+  // EOS has no set_clock_uncertainty command yet; the gap is
+  // named in the payload instead of hidden. Construction records
+  // (bind_clock) carry no period, so they are listed separately
+  // after the tables instead of in them. The command needs no
+  // design beyond the constraint set and never mutates session
+  // state.
+  add("report_clock", "report_clock [-skew]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args, {{"-skew", 0, false}}, "report_clock", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "report_clock: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        const bool skew = opts.Has("-skew");
+        const std::vector<ReportClockEntry> entries =
+            ReportClockEntries(ctx.project.constraints);
+        const std::vector<ReportGeneratedEntry> generated =
+            ReportGeneratedEntries(ctx.project.constraints);
+        std::vector<const db::Constraint*> records;
+        for (const db::Constraint& c : ctx.project.constraints.all()) {
+          if (c.kind == db::ConstraintKind::kClock &&
+              !c.Param("period_ns").has_value()) {
+            records.push_back(&c);
+          }
+        }
+        if (entries.empty() && records.empty()) {
+          return CommandResult::Ok("clocks=0");
+        }
+        std::string payload;
+        // The attribute legend lists only the letters this report
+        // uses. G is the vendor letter for a generated clock; u
+        // is EOS-only for a clock whose target never bound. The
+        // vendor letters p, d, and f never appear: EOS has no
+        // propagated_clock, dont_touch_network, or fix_hold
+        // command.
+        const bool any_generated =
+            std::any_of(entries.begin(), entries.end(),
+                        [](const ReportClockEntry& e) {
+                          return e.generated;
+                        });
+        const bool any_unresolved =
+            std::any_of(entries.begin(), entries.end(),
+                        [](const ReportClockEntry& e) {
+                          return e.unresolved;
+                        });
+        if (any_generated || any_unresolved) {
+          payload += "Attributes:\n";
+          if (any_generated) payload += "     G - generated_clock\n";
+          if (any_unresolved) {
+            payload += "     u - unresolved target (EOS)\n";
+          }
+          payload += "\n";
+        }
+        if (!entries.empty()) {
+          std::vector<std::vector<std::string>> rows;
+          std::vector<std::string> header = {"Clock", "Period",
+                                             "Waveform", "Attrs",
+                                             "Sources"};
+          if (skew) header.push_back("Skew");
+          rows.push_back(header);
+          for (const ReportClockEntry& entry : entries) {
+            std::vector<std::string> row;
+            row.push_back(entry.name);
+            row.push_back(entry.period_ns.has_value()
+                              ? FormatNum(*entry.period_ns)
+                              : "-");
+            row.push_back(entry.rise_ns.has_value() &&
+                                  entry.fall_ns.has_value()
+                              ? "{" + FormatNum(*entry.rise_ns) + " " +
+                                    FormatNum(*entry.fall_ns) + "}"
+                              : "-");
+            std::string attrs;
+            if (entry.generated) attrs += "G";
+            if (entry.unresolved) attrs += "u";
+            row.push_back(attrs);
+            row.push_back(ReportClockBrace(entry.sources));
+            if (skew) row.push_back("none");
+            rows.push_back(std::move(row));
+          }
+          payload += ReportClockRenderTable(std::move(rows));
+        }
+        if (!generated.empty()) {
+          if (!payload.empty()) payload += "\n";
+          std::vector<std::vector<std::string>> rows;
+          rows.push_back({"Generated Clock", "Master Source",
+                          "Generated Source", "Master Clock",
+                          "Waveform Modification"});
+          for (const ReportGeneratedEntry& entry : generated) {
+            rows.push_back({entry.name, entry.master_source,
+                            ReportClockBrace(entry.sources),
+                            entry.master_clock.empty()
+                                ? "-"
+                                : entry.master_clock,
+                            entry.modification});
+          }
+          payload += ReportClockRenderTable(std::move(rows));
+        }
+        if (!records.empty()) {
+          if (!payload.empty()) payload += "\n";
+          payload += "Clock construction records (bind_clock, no "
+                     "period):\n";
+          std::sort(records.begin(), records.end(),
+                    [](const db::Constraint* a, const db::Constraint* b) {
+                      if (a->name != b->name) return a->name < b->name;
+                      return a->target_spec < b->target_spec;
+                    });
+          std::vector<std::vector<std::string>> rows;
+          rows.push_back({"Name", "Target"});
+          for (const db::Constraint* c : records) {
+            rows.push_back({c->name, c->target_spec});
+          }
+          payload += ReportClockRenderTable(std::move(rows));
+        }
+        if (skew && !entries.empty()) {
+          payload += "skew: no clock uncertainty is defined for any "
+                     "clock (set_clock_uncertainty is not an EOS "
+                     "command yet)\n";
         }
         return CommandResult::Ok(payload);
       });

@@ -67,8 +67,8 @@ TEST(Registry, CoreSetIsComplete) {
   // unit 3 renames create_clock to bind_clock (same slot) and
   // adds create_clock (SDC), create_generated_clock, and the
   // nine M27 commands; Immediate unit 4 adds check_timing;
-  // gui_show adds gui_show.
-  EXPECT_EQ(shell.registry.Names().size(), 72u);
+  // gui_show adds gui_show; Immediate unit 5 adds report_clock.
+  EXPECT_EQ(shell.registry.Names().size(), 73u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -77,6 +77,7 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("create_generated_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -4833,6 +4834,311 @@ TEST(GuiShow, DispatchFailsWhenNoViewerFound) {
   ASSERT_FALSE(result.ok);
   EXPECT_EQ(result.diag, Diag::kIoError);
   EXPECT_NE(result.message.find("not found"), std::string::npos);
+}
+
+// ---- report_clock (Immediate unit 5, review item I2) ----------------
+// Every table and failure mode gets coverage: the main table, the
+// generated-clock table, the waveform default, derived periods and
+// waveforms, unknown masters, construction records, the -skew
+// column, and the option failures.
+
+TEST(ReportClock, NoDesignReportsZero) {
+  Shell shell;
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_EQ(result.payload, "clocks=0");
+}
+
+TEST(ReportClock, EmptyDesignReportsZero) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_EQ(result.payload, "clocks=0");
+}
+
+TEST(ReportClock, SingleClockTable) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_clock", {"-period", "10", "clk"}).ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // The whole payload, pinned exactly: header, separator, one
+  // row with the default waveform {0 5}, closing separator.
+  // Columns pad to the widest cell with two spaces between.
+  EXPECT_EQ(result.payload,
+            "Clock  Period  Waveform  Attrs  Sources\n"
+            "---------------------------------------\n"
+            "clk    10      {0 5}            {clk}  \n"
+            "---------------------------------------\n");
+  // No generated table and no construction section.
+  EXPECT_EQ(result.payload.find("Generated Clock"), std::string::npos);
+  EXPECT_EQ(result.payload.find("construction records"),
+            std::string::npos);
+}
+
+TEST(ReportClock, ExplicitWaveformAndMultipleSources) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_port", {"clk2", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_clock",
+                        {"-period", "10", "-waveform", "2", "5",
+                         "-name", "sys", "clk", "clk2"})
+                  .ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // One row for the shared name, both sources in braces.
+  EXPECT_NE(result.payload.find("sys"), std::string::npos);
+  EXPECT_NE(result.payload.find("{2 5}"), std::string::npos);
+  EXPECT_NE(result.payload.find("{clk clk2}"), std::string::npos);
+}
+
+TEST(ReportClock, SameNameStackedPeriodsStaySeparate) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_port", {"clk2", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_clock",
+                        {"-period", "10", "-name", "sys", "clk"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("create_clock",
+                        {"-period", "20", "-name", "sys", "-add",
+                         "clk2"})
+                  .ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // Two rows share the name sys, one per period, never collapsed.
+  EXPECT_NE(result.payload.find("10"), std::string::npos);
+  EXPECT_NE(result.payload.find("20"), std::string::npos);
+  EXPECT_NE(result.payload.find("{clk}"), std::string::npos);
+  EXPECT_NE(result.payload.find("{clk2}"), std::string::npos);
+}
+
+TEST(ReportClock, GeneratedClockTables) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_port", {"div", "in"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_clock", {"-period", "10", "-name", "sys",
+                                 "clk"})
+          .ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "sys",
+                         "-divide_by", "2", "div"})
+                  .ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // Main table: div is generated, derived period 20 and waveform
+  // {0 10}; the legend names the G letter.
+  EXPECT_NE(result.payload.find("G - generated_clock"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("20"), std::string::npos);
+  EXPECT_NE(result.payload.find("{0 10}"), std::string::npos);
+  // Generated table: master source clk, generated source {div},
+  // master sys, divide_by(2).
+  EXPECT_NE(result.payload.find("Generated Clock"), std::string::npos);
+  EXPECT_NE(result.payload.find("Master Clock"), std::string::npos);
+  EXPECT_NE(result.payload.find("divide_by(2)"), std::string::npos);
+  EXPECT_NE(result.payload.find("{div}"), std::string::npos);
+}
+
+TEST(ReportClock, GeneratedClockMultiply) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_port", {"gen", "in"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_clock", {"-period", "10", "-name", "sys",
+                                 "clk"})
+          .ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "sys",
+                         "-multiply_by", "2", "gen"})
+                  .ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // Period 10 times 1/2 is 5; waveform {0 5} times 1/2 is {0 2.5}.
+  EXPECT_NE(result.payload.find("{0 2.5}"), std::string::npos);
+  EXPECT_NE(result.payload.find("multiply_by(2)"), std::string::npos);
+}
+
+TEST(ReportClock, GeneratedClockInvert) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_port", {"gen", "in"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_clock", {"-period", "10", "-name", "sys",
+                                 "clk"})
+          .ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "sys",
+                         "-divide_by", "1", "-invert", "gen"})
+                  .ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // Inverting the default waveform {0 5} of period 10 gives
+  // {5 10}; the period is unchanged.
+  EXPECT_NE(result.payload.find("{5 10}"), std::string::npos);
+  EXPECT_NE(result.payload.find("invert"), std::string::npos);
+  EXPECT_NE(result.payload.find("divide_by(1)"), std::string::npos);
+}
+
+TEST(ReportClock, GeneratedClockChainsThroughMaster) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_port", {"div2", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"div4", "in"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_clock", {"-period", "10", "-name", "sys",
+                                 "clk"})
+          .ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "sys",
+                         "-divide_by", "2", "div2"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "div2", "-master_clock", "div2",
+                         "-divide_by", "2", "div4"})
+                  .ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // div2 derives 20 from sys; div4 derives 40 from div2.
+  EXPECT_NE(result.payload.find("40"), std::string::npos);
+  EXPECT_NE(result.payload.find("{0 20}"), std::string::npos);
+}
+
+TEST(ReportClock, GeneratedClockUnknownMasterShowsDash) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_port", {"div", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "ghost",
+                         "-divide_by", "2", "div"})
+                  .ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // The report succeeds: reporting a broken definition is not a
+  // failure, check_timing is the gate that flags it. No derived
+  // period or waveform appears anywhere in the payload.
+  EXPECT_EQ(result.payload.find("20"), std::string::npos);
+  EXPECT_EQ(result.payload.find("{0 10}"), std::string::npos);
+  // The generated table still lists the definition with its
+  // named master.
+  EXPECT_NE(result.payload.find("ghost"), std::string::npos);
+  EXPECT_NE(result.payload.find("divide_by(2)"), std::string::npos);
+}
+
+TEST(ReportClock, GeneratedClockCombinationalNeedsNoMaster) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_port", {"div", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-combinational", "div"})
+                  .ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // No master means no period source: nothing derives, and no
+  // number or waveform appears in the payload at all.
+  EXPECT_EQ(result.payload.find("10"), std::string::npos);
+  EXPECT_EQ(result.payload.find("{0"), std::string::npos);
+  EXPECT_NE(result.payload.find("combinational"), std::string::npos);
+}
+
+TEST(ReportClock, SameNameSdcAndGeneratedStaySeparate) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_port", {"div", "in"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_clock", {"-period", "10", "-name", "foo",
+                                 "clk"})
+          .ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "foo",
+                         "-divide_by", "2", "-name", "foo", "div"})
+                  .ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // The SDC row keeps period 10; the generated row derives 20
+  // from its own master, not from the SDC row sharing the name.
+  EXPECT_NE(result.payload.find("10"), std::string::npos);
+  EXPECT_NE(result.payload.find("20"), std::string::npos);
+  EXPECT_NE(result.payload.find("{0 10}"), std::string::npos);
+}
+
+TEST(ReportClock, UnresolvedClockMarked) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_clock", {"-period", "10", "ghost"})
+                  .ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // The unresolved target is marked with the EOS-only u letter,
+  // and the legend names it.
+  EXPECT_NE(result.payload.find("u - unresolved target (EOS)"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("ghost"), std::string::npos);
+  EXPECT_NE(result.payload.find("{ghost}"), std::string::npos);
+}
+
+TEST(ReportClock, ConstructionRecordListedSeparately) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("bind_clock", {"clk_net", "clk"}).ok);
+  const CommandResult result = shell.Run("report_clock");
+  ASSERT_TRUE(result.ok) << result.message;
+  // No period means no main-table row: the whole payload is the
+  // construction-records list, pinned exactly.
+  EXPECT_EQ(result.payload,
+            "Clock construction records (bind_clock, no period):\n"
+            "Name     Target\n"
+            "---------------\n"
+            "clk_net  clk   \n"
+            "---------------\n");
+}
+
+TEST(ReportClock, SkewColumnReportsNoUncertainty) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_clock", {"-period", "10", "clk"}).ok);
+  const CommandResult skewed = shell.Run("report_clock", {"-skew"});
+  ASSERT_TRUE(skewed.ok) << skewed.message;
+  EXPECT_NE(skewed.payload.find("Skew"), std::string::npos);
+  EXPECT_NE(skewed.payload.find("none"), std::string::npos);
+  // The gap is named in the payload, not hidden.
+  EXPECT_NE(skewed.payload.find(
+                "skew: no clock uncertainty is defined for any "
+                "clock (set_clock_uncertainty is not an EOS "
+                "command yet)"),
+            std::string::npos);
+  // Without -skew there is no Skew column and no footer.
+  const CommandResult plain = shell.Run("report_clock");
+  ASSERT_TRUE(plain.ok) << plain.message;
+  EXPECT_EQ(plain.payload.find("Skew"), std::string::npos);
+  EXPECT_EQ(plain.payload.find("skew:"), std::string::npos);
+}
+
+TEST(ReportClock, UnknownOptionFailsFast) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  const CommandResult result =
+      shell.Run("report_clock", {"-nonsense"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(ReportClock, PositionalArgumentFailsFast) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  const CommandResult result = shell.Run("report_clock", {"clk"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(ReportClock, SkewGivenTwiceFailsFast) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  const CommandResult result =
+      shell.Run("report_clock", {"-skew", "-skew"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
 }
 
 }  // namespace
