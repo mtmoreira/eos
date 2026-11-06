@@ -14,8 +14,9 @@
 // launches a separate viewer instead. The
 // terminal REPL reads through the Tcl shell's interactive line
 // reader, so it has the same linenoise editing, history, and
-// tab completion as the plain eos CLI, sharing .eos_history in
-// the launch directory.
+// tab completion as the plain eos CLI, sharing $HOME/.eos_history
+// with it and with the GUI console, so a command typed in either
+// entry is recallable with up-arrow in the other.
 #include <QApplication>
 #include <QIcon>
 #include <QMetaObject>
@@ -27,6 +28,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unistd.h>
 
 #include "eos/ui/gui.h"
 #include "eos/ui/tcl_shell.h"
@@ -101,6 +103,14 @@ int RunGui(int argc, char** argv, CommandRegistry& registry,
   set_stage("Starting session...", 10);
   SessionView view(registry, context);
   set_stage("Building interface...", 50);
+  if (shell != nullptr && isatty(STDIN_FILENO) != 0) {
+    // Feed the shared interactive history: a command typed in
+    // the GUI console is recallable with up-arrow in the terminal
+    // REPL, and vice versa. Only when stdin is a terminal: piped
+    // sessions neither read nor write history.
+    view.SetHistorySink(
+        [shell](const std::string& line) { shell->AddHistoryLine(line); });
+  }
   MainWindow window(view);
   set_stage("Opening window...", 90);
   window.show();

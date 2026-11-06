@@ -99,6 +99,11 @@ CommandResult SessionView::DispatchEntry(const std::string& line) {
       continue;
     }
     if (parsed.name.empty()) continue;
+    // Feed the shared interactive history before dispatch, so a
+    // command is recallable in the terminal REPL even when the
+    // registry rejects it. Blank, comment, and malformed lines
+    // never reach here.
+    if (history_sink_) history_sink_(EchoLine(parsed.name, parsed.args));
     CommandResult result = Dispatch(parsed.name, parsed.args);
     if (!result.ok) {
       if (!saw_failure) {

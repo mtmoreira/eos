@@ -2,19 +2,40 @@
 #include "eos/ui/tcl_shell.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
+#include <string>
 #include <utility>
 
 #ifdef EOS_HAS_TCL
 #include <tcl.h>
 
 #include <cerrno>
+#include <fcntl.h>
+#include <fstream>
+#include <mutex>
+#include <poll.h>
 #include <unistd.h>
+#include <vector>
 
 #include "linenoise.h"
 #endif
 
 namespace eos::ui {
+
+// The shared interactive history file: $HOME/.eos_history, so one
+// file serves the user, not one per working directory. A command
+// typed in the GUI console in demo/synth must be recallable with
+// up-arrow in the terminal REPL launched from demo/hier, and vice
+// versa. When HOME is unset, fall back to .eos_history in the
+// launch directory.
+std::string HistoryFilePath() {
+  const char* home = std::getenv("HOME");
+  if (home != nullptr && home[0] != '\0') {
+    return std::string(home) + "/.eos_history";
+  }
+  return ".eos_history";
+}
 
 #ifdef EOS_HAS_TCL
 
@@ -68,24 +89,93 @@ void CompleteCommand(const char* buffer, linenoiseCompletions* completions) {
     linenoiseAddCompletion(completions, "eos::");
     return;
   }
-  if (line.rfind(marker, 0) != 0) return;
-  const std::string rest = line.substr(marker.size());
+  if (line.rfind(marker, 0) == 0) {
+    const std::string rest = line.substr(marker.size());
+    for (const std::string& name : g_completion_registry->Names()) {
+      if (name.rfind(rest, 0) == 0) {
+        linenoiseAddCompletion(completions, ("eos::" + name).c_str());
+      }
+    }
+    return;
+  }
+  // A bare first word completes to the eos:: form, like the GUI
+  // console: the terminal is a Tcl shell, so a bare name would
+  // fail as a command, and completing it to eos::<name> is the
+  // helpful form. Only a single word completes; once arguments
+  // follow, there is nothing to complete.
+  if (line.find(' ') != std::string::npos ||
+      line.find('\t') != std::string::npos) {
+    return;
+  }
   for (const std::string& name : g_completion_registry->Names()) {
-    if (name.rfind(rest, 0) == 0) {
+    if (name.rfind(line, 0) == 0) {
       linenoiseAddCompletion(completions, ("eos::" + name).c_str());
     }
   }
 }
 
-// The history file lives in the directory the shell is launched
-// from, not in the user's home: history belongs to the workspace
-// being worked in, and one file per working directory keeps
-// sessions from different projects apart. It is saved after every
-// command, not only at exit, so the session's history survives any
-// exit path: Ctrl-D, Tcl's exit command, or the terminal window
-// closing. A failed save is silently ignored: history must never
-// break the shell.
-const char* kHistoryFile = ".eos_history";
+// Lines of the history file already reflected in the in-memory
+// linenoise history, and the mutex serializing every history file
+// operation. The terminal REPL and the GUI console both append to
+// the same file: the console appends on the GUI thread
+// (AddHistoryLine), the REPL rewrites the file on save and loads
+// the tail it has not seen yet before each prompt and while it
+// sits idle at a prompt (SyncHistoryFromFile, called from the
+// poll loop in ReadInteractiveLine). The mutex is held only for
+// those short file operations, never across the line read, so the
+// console feed never waits on the terminal and the terminal never
+// waits on the console. History must never break the shell, so a
+// failed file operation is silently ignored.
+std::mutex g_history_file_mutex;
+std::size_t g_history_synced_lines = 0;
+
+// The history file is saved after every command, not only at
+// exit, so the session's history survives any exit path: Ctrl-D,
+// Tcl's exit command, or the terminal window closing.
+std::size_t CountHistoryFileLines(const std::string& path) {
+  std::ifstream in(path);
+  if (!in) return 0;
+  std::size_t count = 0;
+  std::string line;
+  while (std::getline(in, line)) ++count;
+  return count;
+}
+
+// Loads the tail of the history file the in-memory history has
+// not seen yet: lines another entry (the GUI console) appended
+// since the last sync. Runs before each prompt and while the
+// terminal sits idle at a prompt (from the poll loop in
+// ReadInteractiveLine), so a GUI-typed command is recallable
+// with up-arrow without submitting a line first. The caller is
+// responsible for only syncing while the editor is not walking
+// history and not completing: appending mid-navigation would
+// shift the indices the editor walks. Returns how many lines
+// were added to the in-memory history. The file only grows by
+// appends in this process, so a smaller file means an external
+// edit: adopt its size without reloading, which avoids re-adding
+// entries already in memory.
+std::size_t SyncHistoryFromFile() {
+  std::lock_guard<std::mutex> lock(g_history_file_mutex);
+  const std::string path = HistoryFilePath();
+  std::ifstream in(path);
+  if (!in) return 0;
+  std::vector<std::string> lines;
+  std::string raw;
+  while (std::getline(in, raw)) {
+    for (char& c : raw) {
+      if (c == '\r') c = '\n';
+    }
+    lines.push_back(raw);
+  }
+  std::size_t added = 0;
+  if (lines.size() > g_history_synced_lines) {
+    for (std::size_t i = g_history_synced_lines; i < lines.size(); ++i) {
+      added += static_cast<std::size_t>(linenoiseHistoryAdd(lines[i].c_str()));
+    }
+  }
+  g_history_synced_lines = lines.size();
+  return added;
+}
 
 }  // namespace
 
@@ -186,29 +276,126 @@ void TclShell::InitInteractiveHistory() {
   linenoiseSetCompletionCallback(&CompleteCommand);
   linenoiseHistorySetMaxLen(1000);
   if (isatty(STDIN_FILENO) != 0) {
-    linenoiseHistoryLoad(kHistoryFile);
+    const std::string path = HistoryFilePath();
+    std::lock_guard<std::mutex> lock(g_history_file_mutex);
+    linenoiseHistoryLoad(path.c_str());
+    g_history_synced_lines = CountHistoryFileLines(path);
   }
   g_completion_registry = impl_->registry;
 }
 
 std::optional<std::string> TclShell::ReadInteractiveLine(
     const char* prompt) {
-  const bool tty = isatty(STDIN_FILENO) != 0;
+  if (isatty(STDIN_FILENO) == 0) {
+    // Piped stdin: plain reads with no prompt and no history,
+    // exactly as before. linenoise handles the non-tty case
+    // itself.
+    for (;;) {
+      errno = 0;
+      char* line = linenoise(prompt);
+      if (line == nullptr) return std::nullopt;
+      std::string out(line);
+      linenoiseFree(line);
+      return out;
+    }
+  }
+  // Terminal: drive the multiplexed linenoise API directly
+  // instead of the blocking linenoise() call, so the history
+  // file can be re-checked while the user sits idle at the
+  // prompt. A command typed in the GUI console is then
+  // recallable with up-arrow without submitting a line first.
+  // poll() waits for input with a short timeout; the read
+  // itself stays blocking, so key handling, pasting, and
+  // escape sequences behave exactly as in the stock blocking
+  // call. The edit buffer uses the same sizes as that call
+  // (linenoise.c: 4 KiB initial, 1 MiB maximum).
   for (;;) {
-    errno = 0;
-    char* line = linenoise(prompt);
-    if (line == nullptr) {
-      if (errno == EAGAIN) continue;
+    SyncHistoryFromFile();
+    struct linenoiseState state;
+    char* buf = static_cast<char*>(std::malloc(4096));
+    if (buf == nullptr) return std::nullopt;
+    if (linenoiseEditStart(&state, STDIN_FILENO, STDOUT_FILENO, buf, 4096,
+                           prompt) == -1) {
+      std::free(buf);
       return std::nullopt;
     }
-    std::string out(line);
-    linenoiseFree(line);
-    if (tty && !out.empty()) {
+    state.buflen_max = 1024 * 1024;
+    char* res = nullptr;
+    int feed_errno = 0;
+    for (;;) {
+      struct pollfd pfd;
+      pfd.fd = STDIN_FILENO;
+      pfd.events = POLLIN;
+      pfd.revents = 0;
+      const int ready = ::poll(&pfd, 1, 50);
+      if (ready == 0) {
+        // No input: pick up history lines another entry
+        // appended. Only while not walking history and not
+        // completing: appending mid-navigation would shift
+        // the indices the editor walks. The editor removes
+        // the last history entry on Enter, assuming it is
+        // the empty placeholder it appended at edit start,
+        // so a sync that added lines is followed by
+        // re-adding the placeholder to keep it last. That
+        // leaves one stale empty step in the up-arrow chain
+        // past a fed line; losing the fed line on Enter
+        // would be worse.
+        if (state.history_index == 0 && !state.in_completion &&
+            SyncHistoryFromFile() > 0) {
+          linenoiseHistoryAdd("");
+        }
+        continue;
+      }
+      if (ready < 0) {
+        if (errno == EINTR) continue;
+        break;
+      }
+      res = linenoiseEditFeed(&state);
+      if (res == linenoiseEditMore) continue;
+      feed_errno = errno;
+      break;
+    }
+    linenoiseEditStop(&state);
+    std::free(buf);
+    if (res == nullptr) {
+      if (feed_errno == EAGAIN) continue;  // Ctrl-C: cancel and re-prompt.
+      return std::nullopt;
+    }
+    std::string out(res);
+    linenoiseFree(res);
+    if (!out.empty()) {
+      std::lock_guard<std::mutex> lock(g_history_file_mutex);
       linenoiseHistoryAdd(out.c_str());
-      linenoiseHistorySave(kHistoryFile);
+      const std::string path = HistoryFilePath();
+      linenoiseHistorySave(path.c_str());
+      g_history_synced_lines = CountHistoryFileLines(path);
     }
     return out;
   }
+}
+
+void TclShell::AddHistoryLine(const std::string& line) {
+  if (line.empty()) return;
+  // Append only: the line must not disturb the in-memory history
+  // the terminal REPL may be editing. The REPL picks it up from
+  // the file at its next prompt, and while it sits idle at a
+  // prompt (the poll loop in ReadInteractiveLine). The caller
+  // installs this feed only for interactive sessions, so piped
+  // stdin never writes history.
+  std::lock_guard<std::mutex> lock(g_history_file_mutex);
+  const std::string path = HistoryFilePath();
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
+  if (fd < 0) return;
+  const std::string entry = line + "\n";
+  const char* p = entry.data();
+  std::size_t left = entry.size();
+  while (left > 0) {
+    const ssize_t n = ::write(fd, p, left);
+    if (n <= 0) break;
+    p += n;
+    left -= static_cast<std::size_t>(n);
+  }
+  ::close(fd);
 }
 
 #else  // EOS_HAS_TCL
@@ -238,6 +425,8 @@ void TclShell::InitInteractiveHistory() {}
 std::optional<std::string> TclShell::ReadInteractiveLine(const char*) {
   return std::nullopt;
 }
+
+void TclShell::AddHistoryLine(const std::string&) {}
 
 #endif  // EOS_HAS_TCL
 
