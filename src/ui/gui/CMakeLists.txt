@@ -11,6 +11,7 @@ add_library(eda_ui_gui STATIC
   src/console_entry.cc
   src/diagram.cc
   src/hierarchy.cc
+  src/issues.cc
   src/panels.cc
   src/schematic.cc)
 target_include_directories(eda_ui_gui PUBLIC include)

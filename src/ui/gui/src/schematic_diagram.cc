@@ -178,6 +178,12 @@ std::string LastComponent(const std::string& path) {
 SchematicDiagram::SchematicDiagram(SessionView& view, QWidget* parent)
     : QWidget(parent), view_(view) {
   auto* layout = new QVBoxLayout(this);
+  // Netlist source: which netlist this schematic draws, so the
+  // elaborated and generic views can never be mistaken for
+  // each other. The session owns the fact (synth_generic
+  // replaces the live design), and the module names the leaf.
+  source_label_ = new QLabel(this);
+  layout->addWidget(source_label_);
   crumbs_ = new QWidget(this);
   crumbs_layout_ = new QHBoxLayout(crumbs_);
   crumbs_layout_->addStretch();
@@ -194,8 +200,30 @@ SchematicDiagram::SchematicDiagram(SessionView& view, QWidget* parent)
 }
 
 void SchematicDiagram::Refresh() {
+  std::string source;
+  if (!view_.context().synth.elaborated) {
+    source = "No design loaded.";
+  } else {
+    source = view_.context().synth.generic_optimized ? "Generic netlist"
+                                                      : "Elaborated netlist";
+    const std::string& module = view_.Schematic().Module();
+    if (!module.empty()) source += ": " + module;
+  }
+  source_label_->setText(QString::fromStdString(source));
   RebuildBreadcrumb();
   RebuildScene();
+}
+
+void SchematicDiagram::HighlightGate(const std::string& instance) {
+  if (view_.Schematic().FindGate(instance) == nullptr) return;
+  // The selection belongs to the current module: claim it
+  // first, so the rebuild below does not clear the selection
+  // as a stale gate from the previous module.
+  selected_module_ = view_.Schematic().Module();
+  if (instance != selected_) {
+    selected_ = instance;
+    RebuildScene();
+  }
 }
 
 void SchematicDiagram::resizeEvent(QResizeEvent* event) {

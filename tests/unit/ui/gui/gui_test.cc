@@ -8,6 +8,7 @@
 #include "eos/ui/console_entry.h"
 #include "eos/ui/diagram.h"
 #include "eos/ui/hierarchy.h"
+#include "eos/ui/issues.h"
 #include "eos/ui/panels.h"
 #include "eos/ui/registry.h"
 #include "eos/ui/schematic.h"
@@ -49,8 +50,10 @@ using eos::ui::DisplayType;
 using eos::ui::FaninCone;
 using eos::ui::FanoutCone;
 using eos::ui::GateSymbol;
+using eos::ui::GuiIssue;
 using eos::ui::HierarchyModel;
 using eos::ui::HierarchyNode;
+using eos::ui::IssuesModel;
 using eos::ui::LiveStatsModel;
 using eos::ui::NetLabel;
 using eos::ui::PanelsModel;
@@ -2129,6 +2132,131 @@ void RegisterTwoGateSchematic(CommandRegistry& registry) {
   EXPECT_TRUE(status.ok());
 }
 
+// Panel rework: the issues model parses a synth_issues
+// payload, sorts by severity, and counts per severity. The
+// payload lists the issues out of order on purpose: the
+// warning comes first, then the error, then the info.
+const char kIssuesPayload[] =
+    "checked=hierarchy resolution, multiple drivers, undriven "
+    "nets, combinational loops, inferred latches, unknown cell "
+    "types, unconnected ports, top ports, empty modules\n"
+    "netlist=elaborated\n"
+    "issue severity=warning code=unconnected_port module=top "
+    "path=top/u_mid target=u_add file= line=0 message=Port Y of cell "
+    "u_add is unconnected\n"
+    "issue severity=error code=unresolved_reference module=broken_top "
+    "path=broken_top target=u_missing file=broken.v line=2 "
+    "message=Module does_not_exist instantiated at broken_top/u_missing "
+    "is not defined\n"
+    "issue severity=info code=empty_module module=top path=top "
+    "target= file= line=0 message=Module top has no cells\n";
+
+TEST(IssuesModel, ParsesPayloadSortsBySeverityAndCounts) {
+  IssuesModel model;
+  ASSERT_TRUE(model.LoadPayload(kIssuesPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.Netlist(), "elaborated");
+  EXPECT_NE(model.Checked().find("multiple drivers"), std::string::npos);
+  ASSERT_EQ(model.Issues().size(), 3u);
+  EXPECT_EQ(model.ErrorCount(), 1);
+  EXPECT_EQ(model.WarningCount(), 1);
+  EXPECT_EQ(model.InfoCount(), 1);
+  EXPECT_EQ(model.Issues()[0].severity, "error");
+  EXPECT_EQ(model.Issues()[0].code, "unresolved_reference");
+  EXPECT_EQ(model.Issues()[0].target, "u_missing");
+  EXPECT_EQ(model.Issues()[0].file, "broken.v");
+  EXPECT_EQ(model.Issues()[0].line, 2);
+  EXPECT_EQ(IssuesModel::DisplayPath(model.Issues()[0]),
+            "broken_top/u_missing");
+  EXPECT_EQ(model.Issues()[1].severity, "warning");
+  EXPECT_EQ(model.Issues()[1].code, "unconnected_port");
+  EXPECT_TRUE(model.Issues()[1].file.empty());
+  EXPECT_EQ(model.Issues()[1].line, 0);
+  EXPECT_EQ(IssuesModel::DisplayPath(model.Issues()[1]), "top/u_mid/u_add");
+  EXPECT_EQ(model.Issues()[2].severity, "info");
+  EXPECT_EQ(model.Issues()[2].code, "empty_module");
+  EXPECT_TRUE(model.Issues()[2].target.empty());
+  EXPECT_EQ(IssuesModel::DisplayPath(model.Issues()[2]), "top");
+}
+
+TEST(IssuesModel, ParsesEmptyPayload) {
+  IssuesModel model;
+  ASSERT_TRUE(model.LoadPayload(
+      "checked=hierarchy resolution, multiple drivers, undriven "
+      "nets, combinational loops, inferred latches, unknown cell "
+      "types, unconnected ports, top ports, empty modules\n"
+      "netlist=generic\n"));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.Netlist(), "generic");
+  EXPECT_TRUE(model.Issues().empty());
+  EXPECT_EQ(model.ErrorCount(), 0);
+  EXPECT_EQ(model.WarningCount(), 0);
+  EXPECT_EQ(model.InfoCount(), 0);
+}
+
+TEST(IssuesModel, RejectsMalformedPayloads) {
+  IssuesModel model;
+  ASSERT_TRUE(model.LoadPayload(kIssuesPayload));
+  const std::string good_checked = model.Checked();
+  // Bad netlist value.
+  EXPECT_FALSE(model.LoadPayload(
+      "checked=hierarchy resolution\nnetlist=bogus\n"));
+  // Missing checked line.
+  EXPECT_FALSE(model.LoadPayload("netlist=elaborated\n"));
+  // Unknown severity.
+  EXPECT_FALSE(model.LoadPayload(
+      "checked=hierarchy resolution\nnetlist=elaborated\n"
+      "issue severity=fatal code=x module=m path=p target= file= "
+      "line=0 message=bad\n"));
+  // Missing message field.
+  EXPECT_FALSE(model.LoadPayload(
+      "checked=hierarchy resolution\nnetlist=elaborated\n"
+      "issue severity=error code=x module=m path=p target= file= "
+      "line=0\n"));
+  // Negative line number.
+  EXPECT_FALSE(model.LoadPayload(
+      "checked=hierarchy resolution\nnetlist=elaborated\n"
+      "issue severity=error code=x module=m path=p target= file= "
+      "line=-1 message=bad\n"));
+  // Empty code.
+  EXPECT_FALSE(model.LoadPayload(
+      "checked=hierarchy resolution\nnetlist=elaborated\n"
+      "issue severity=error code= module=m path=p target= file= "
+      "line=0 message=bad\n"));
+  // A malformed load keeps the previous issues.
+  EXPECT_EQ(model.Checked(), good_checked);
+  ASSERT_EQ(model.Issues().size(), 3u);
+}
+
+TEST(IssuesModel, ReloadReplacesPreviousIssues) {
+  IssuesModel model;
+  ASSERT_TRUE(model.LoadPayload(kIssuesPayload));
+  ASSERT_EQ(model.Issues().size(), 3u);
+  ASSERT_TRUE(model.LoadPayload(
+      "checked=hierarchy resolution\nnetlist=elaborated\n"));
+  EXPECT_TRUE(model.Issues().empty());
+  model.Clear();
+  EXPECT_FALSE(model.Loaded());
+  EXPECT_TRUE(model.Issues().empty());
+}
+
+void RegisterIssuesCommand(CommandRegistry& registry,
+                           const std::string& payload, bool ok,
+                           int* calls = nullptr) {
+  auto status = registry.Register(
+      "synth_issues", "synth_issues",
+      [payload, ok, calls](CommandContext&,
+                           const std::vector<std::string>&) {
+        if (calls != nullptr) ++(*calls);
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no elaborated design");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
 TEST(SchematicOutline, GatesDrawWhiteOutlineWithoutFill) {
   OutlineSchematicView fixture;
   ASSERT_FALSE(fixture.view.Schematic().Empty());
@@ -2468,5 +2596,142 @@ TEST(BlockOutline, EmptyPlaceholderIsWhite) {
 }
 
 #endif  // EOS_GUI_HAVE_QT6
+
+TEST(GuiSessionView, RefreshIssuesPopulatesModelWithoutEcho) {
+  CommandRegistry registry;
+  RegisterIssuesCommand(registry, kIssuesPayload, true);
+  CommandContext context;
+  context.synth.elaborated = true;
+  context.synth.top_cell = "top";
+  SessionView view(registry, context);
+  view.RefreshIssues();
+  EXPECT_TRUE(view.Issues().Loaded());
+  ASSERT_EQ(view.Issues().Issues().size(), 3u);
+  EXPECT_EQ(view.Issues().ErrorCount(), 1);
+  EXPECT_TRUE(view.EchoLog().empty());
+}
+
+TEST(GuiSessionView, RefreshIssuesRunsCheckOncePerDesign) {
+  CommandRegistry registry;
+  int calls = 0;
+  RegisterIssuesCommand(registry, kIssuesPayload, true, &calls);
+  CommandContext context;
+  context.synth.elaborated = true;
+  context.synth.top_cell = "top";
+  SessionView view(registry, context);
+  view.RefreshIssues();
+  EXPECT_EQ(calls, 1);
+  view.RefreshIssues();
+  EXPECT_EQ(calls, 1);
+  view.RefreshIssues();
+  EXPECT_EQ(calls, 1);
+}
+
+TEST(GuiSessionView, RefreshIssuesRerunsAfterDesignChangingDispatch) {
+  CommandRegistry registry;
+  int calls = 0;
+  RegisterIssuesCommand(registry, kIssuesPayload, true, &calls);
+  auto status = registry.Register(
+      "elaborate", "elaborate",
+      [](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Ok("");
+      });
+  ASSERT_TRUE(status.ok());
+  CommandContext context;
+  context.synth.elaborated = true;
+  context.synth.top_cell = "top";
+  SessionView view(registry, context);
+  view.RefreshIssues();
+  EXPECT_EQ(calls, 1);
+  view.RefreshIssues();
+  EXPECT_EQ(calls, 1);
+  ASSERT_TRUE(view.Dispatch("elaborate", {}).ok);
+  view.RefreshIssues();
+  EXPECT_EQ(calls, 2);
+}
+
+TEST(GuiSessionView, RefreshIssuesClearsWhenNotElaborated) {
+  CommandRegistry registry;
+  RegisterIssuesCommand(registry, kIssuesPayload, true);
+  CommandContext context;
+  context.synth.elaborated = true;
+  context.synth.top_cell = "top";
+  SessionView view(registry, context);
+  view.RefreshIssues();
+  ASSERT_TRUE(view.Issues().Loaded());
+  context.synth.elaborated = false;
+  view.RefreshIssues();
+  EXPECT_FALSE(view.Issues().Loaded());
+  EXPECT_TRUE(view.Issues().Issues().empty());
+}
+
+TEST(GuiSessionView, RefreshIssuesClearsOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterIssuesCommand(registry, "", false);
+  CommandContext context;
+  context.synth.elaborated = true;
+  context.synth.top_cell = "top";
+  SessionView view(registry, context);
+  view.RefreshIssues();
+  EXPECT_FALSE(view.Issues().Loaded());
+  EXPECT_TRUE(view.Issues().Issues().empty());
+}
+
+TEST(GuiSessionView, RefreshIssuesClearsOnMalformedPayload) {
+  CommandRegistry registry;
+  RegisterIssuesCommand(registry, "garbage\n", true);
+  CommandContext context;
+  context.synth.elaborated = true;
+  context.synth.top_cell = "top";
+  SessionView view(registry, context);
+  view.RefreshIssues();
+  EXPECT_FALSE(view.Issues().Loaded());
+}
+
+// Panel rework: the log window's entries. A dispatch logs its
+// command line as info; a failed dispatch logs the diagnostic
+// as an error as well.
+TEST(GuiSessionView, DispatchLogsCommandAndFailure) {
+  CommandRegistry registry;
+  RegisterPing(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  ASSERT_TRUE(view.Dispatch("ping", {}).ok);
+  ASSERT_EQ(view.Log().size(), 1u);
+  EXPECT_EQ(view.Log()[0].severity, "info");
+  EXPECT_EQ(view.Log()[0].text, "eos::ping");
+  ASSERT_EQ(view.Log()[0].timestamp.size(), 8u);
+  EXPECT_FALSE(view.Dispatch("nope", {}).ok);
+  ASSERT_EQ(view.Log().size(), 3u);
+  EXPECT_EQ(view.Log()[1].severity, "info");
+  EXPECT_EQ(view.Log()[1].text, "eos::nope");
+  EXPECT_EQ(view.Log()[2].severity, "error");
+  EXPECT_NE(view.Log()[2].text.find("EOS invalid_command"),
+            std::string::npos);
+}
+
+// The engine-log drain: RefreshLog moves the context's engine
+// lines into log entries, classifying severity by the Yosys
+// prefix, and clears the context field so a second refresh
+// adds nothing.
+TEST(GuiSessionView, RefreshLogDrainsEngineLinesWithSeverity) {
+  CommandRegistry registry;
+  CommandContext context;
+  context.engine_log_lines = {
+      "1. Executing HIERARCHY pass (hierarchy, ...).",
+      "Warning: Cell top.u_x has unknown internal type $foo.",
+      "ERROR: something failed."};
+  SessionView view(registry, context);
+  view.RefreshLog();
+  ASSERT_EQ(view.Log().size(), 3u);
+  EXPECT_EQ(view.Log()[0].severity, "info");
+  EXPECT_EQ(view.Log()[0].text,
+            "1. Executing HIERARCHY pass (hierarchy, ...).");
+  EXPECT_EQ(view.Log()[1].severity, "warning");
+  EXPECT_EQ(view.Log()[2].severity, "error");
+  EXPECT_TRUE(context.engine_log_lines.empty());
+  view.RefreshLog();
+  EXPECT_EQ(view.Log().size(), 3u);
+}
 
 }  // namespace

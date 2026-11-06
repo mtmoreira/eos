@@ -35,6 +35,24 @@ Elaborate shows Results, Generic synth shows the Opt log); the
 stepper keeps only its per-step state, and the detailed outputs
 live in the panels. Messages are diagnostics only: a rejected
 dispatch records one line, a successful dispatch records none.
+Panel rework (after the natural level-based schematic layout):
+the schematic moves from the center into the right panel set
+as its own tab, so the center always shows the block diagram;
+the panels become six tabs (Issues, Sources, Results, Opt log,
+Messages, Schematic), and the stepper mapping changes to Read
+shows Sources, Elaborate shows Issues, Generic synth shows Opt
+log. The Issues tab shows the elaboration issues from the
+synth_issues registry query (the check pass plus a design
+walk), severity ordered, with a header stating the counts and
+what was checked; clicking a row selects the instance in the
+hierarchy, descends the diagram to it, and highlights the
+offending gate in the schematic. The Floorplan stage label
+carries the error count while any error exists. The bottom row
+gains a single log window beside the console, showing all
+engine output with severity colors, severity filters, and a
+search box; the Messages tab keeps dispatch history only.
+Clicking a block in the diagram descends into it, and when the
+new level is a leaf the Schematic tab shows for it.
 U6 delivers console command entry plus session persistence: the
 console gains an entry line that takes one registry command per
 Return and dispatches it through the session, so the stepper,

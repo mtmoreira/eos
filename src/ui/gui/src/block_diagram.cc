@@ -387,9 +387,15 @@ void BlockDiagram::RebuildScene() {
 void BlockDiagram::OnBlockClicked(const std::string& instance) {
   const std::string& level = view_.DiagramLevel();
   if (level.empty()) return;
-  if (view_.SelectHierarchyPath(level + "/" + instance) && on_action_) {
-    on_action_();
-  }
+  const std::string path = level + "/" + instance;
+  // Click-to-expand: a single click selects the block AND
+  // descends into it, exactly like a double-click. A block
+  // the hierarchy does not hold (an unresolved or black-box
+  // cell) selects nothing and descends nowhere.
+  if (!view_.SelectHierarchyPath(path)) return;
+  view_.SetDiagramLevel(path);
+  if (view_.DiagramLevelIsLeaf() && on_expand_) on_expand_();
+  if (on_action_) on_action_();
 }
 
 void BlockDiagram::OnBlockDoubleClicked(const std::string& instance) {

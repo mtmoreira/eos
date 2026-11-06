@@ -68,7 +68,8 @@ TEST(Registry, CoreSetIsComplete) {
   // adds create_clock (SDC), create_generated_clock, and the
   // nine M27 commands; Immediate unit 4 adds check_timing;
   // gui_show adds gui_show; Immediate unit 5 adds report_clock.
-  EXPECT_EQ(shell.registry.Names().size(), 73u);
+  // The panel rework adds synth_issues.
+  EXPECT_EQ(shell.registry.Names().size(), 74u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -78,6 +79,7 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("report_clock"), nullptr);
+  EXPECT_NE(shell.registry.Find("synth_issues"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -3747,6 +3749,129 @@ TEST(CoreCommands, SynthStatsAfterGenericReportsGenericNetlist) {
   EXPECT_NE(stats.payload.find("cells=3"), std::string::npos);
   EXPECT_NE(stats.payload.find("depth=2"), std::string::npos);
   EXPECT_NE(stats.payload.find("type $and 3"), std::string::npos);
+}
+
+// Panel rework: synth_issues fails fast like the other synth
+// queries when no elaborated design exists.
+TEST(CoreCommands, SynthIssuesFailsFastWhenNotElaborated) {
+  Shell shell;
+  const CommandResult fresh = shell.Run("synth_issues");
+  EXPECT_FALSE(fresh.ok);
+  EXPECT_EQ(fresh.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(fresh.message.find("no elaborated design: eos::elaborate first"),
+            std::string::npos);
+  TimingTempDir dir;
+  Shell parsed;
+  ASSERT_TRUE(parsed
+                  .Run("read_verilog",
+                       {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                  .ok);
+  const CommandResult unelaborated = parsed.Run("synth_issues");
+  EXPECT_FALSE(unelaborated.ok);
+  EXPECT_EQ(unelaborated.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, SynthIssuesRejectsBadArguments) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult extra = shell.Run("synth_issues", {"optloop"});
+  EXPECT_FALSE(extra.ok);
+  EXPECT_EQ(extra.diag, Diag::kInvalidConfiguration);
+}
+
+// The flat optloop is clean: no issues, and the payload names
+// what was checked and which netlist the (empty) list
+// describes. The checked line is the honest list: the command
+// does not claim width coverage it does not implement.
+TEST(CoreCommands, SynthIssuesCleanDesignReportsCheckedAndNetlist) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("optloop.v", kSynthOptLoopDemo), "optloop"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult issues = shell.Run("synth_issues");
+  ASSERT_TRUE(issues.ok) << issues.message;
+  EXPECT_EQ(issues.payload,
+            "checked=hierarchy resolution, multiple drivers, "
+            "undriven nets, combinational loops, inferred "
+            "latches, unknown cell types, unconnected ports, "
+            "top ports, empty modules\n"
+            "netlist=elaborated\n");
+}
+
+// After synth_generic the issues describe the generic
+// netlist, not the elaborated one: the payload says so.
+TEST(CoreCommands, SynthIssuesAfterGenericReportsGenericNetlist) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("optloop.v", kSynthOptLoopDemo), "optloop"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  const CommandResult issues = shell.Run("synth_issues");
+  ASSERT_TRUE(issues.ok) << issues.message;
+  EXPECT_NE(issues.payload.find("netlist=generic"), std::string::npos);
+}
+
+// A design instantiating a module that does not exist: the
+// elaboration succeeds (the cell is opaque), and synth_issues
+// reports the unresolved reference as an error with the
+// owning module, the instance path, and the cell name.
+TEST(CoreCommands, SynthIssuesUnresolvedReferenceReportsError) {
+  static const char* kBroken =
+      "module broken_top(input wire a, output wire y);\n"
+      "  does_not_exist u_missing(.a(a), .y(y));\n"
+      "endmodule\n";
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("broken.v", kBroken), "broken_top"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult issues = shell.Run("synth_issues");
+  ASSERT_TRUE(issues.ok) << issues.message;
+  EXPECT_NE(issues.payload.find("netlist=elaborated"),
+            std::string::npos);
+  EXPECT_NE(issues.payload.find(
+                "issue severity=error code=unresolved_reference "
+                "module=broken_top path=broken_top "
+                "target=u_missing"),
+            std::string::npos);
+  EXPECT_NE(issues.payload.find("does_not_exist"),
+            std::string::npos);
+}
+
+// Panel rework: the engine-log drain feeds the GUI log
+// window. After elaborate the context holds the engine's own
+// lines for the command (the hierarchy pass reports its
+// steps), and a second drain adds nothing new.
+TEST(CoreCommands, EngineLogDrainsAfterElaborate) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell
+                  .Run("read_verilog",
+                       {dir.Write("optloop.v", kSynthOptLoopDemo), "optloop"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  EXPECT_FALSE(shell.ctx.engine_log_lines.empty());
+  bool saw_hierarchy = false;
+  for (const std::string& line : shell.ctx.engine_log_lines) {
+    if (line.find("HIERARCHY") != std::string::npos) saw_hierarchy = true;
+  }
+  EXPECT_TRUE(saw_hierarchy);
+  const std::size_t drained = shell.ctx.engine_log_lines.size();
+  ASSERT_TRUE(shell.Run("synth_stats").ok);
+  EXPECT_EQ(shell.ctx.engine_log_lines.size(), drained);
 }
 
 // PR4 validation: set_wire_rc storage and rejection, repair_timing

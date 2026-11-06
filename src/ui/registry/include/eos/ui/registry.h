@@ -232,6 +232,15 @@ struct CommandContext {
   // ResetProject on close_design, like the timing/synth sessions.
   std::map<std::string, std::pair<double, double>> wire_rc_overrides;
 
+  // Captured engine output (panel rework): Yosys log lines
+  // drained from the engine after each synthesis command,
+  // oldest first, capped at 2000 lines (the oldest drop). The
+  // GUI log window drains this field on every refresh. Interface
+  // session state like the timing and synth sessions: cleared by
+  // ResetProject on close_design, and a checkpoint restore does
+  // not bring it back.
+  std::vector<std::string> engine_log_lines;
+
   bool HasDesign() const { return project.HasDesign(); }
 };
 

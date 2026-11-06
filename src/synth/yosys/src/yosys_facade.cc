@@ -38,9 +38,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -347,6 +349,474 @@ bool SigTouchesWire(const Yosys::RTLIL::SigSpec& sig,
   return false;
 }
 
+// ---- Panel rework: engine-output capture and elaboration issues ----
+
+// The captured Yosys log: one line per entry, oldest first,
+// bounded so a caller that never drains stays bounded. The
+// capturing sink below feeds it; TakeLog drains it.
+constexpr std::size_t kMaxCapturedLogLines = 2000;
+std::deque<std::string> g_captured_log_lines;
+
+// A log sink that keeps a copy of Yosys output in memory for
+// interfaces (the GUI log window) without touching the console
+// sink: every message still reaches the console, and this sink
+// is only a second copy. Messages arrive formatted
+// (cached_msg), so lines are split here and stored without the
+// trailing newline; empty lines are dropped.
+class CapturingLogSink : public Yosys::LogSink {
+ public:
+  void log(const Yosys::LogMessage& msg) override {
+    const std::string& text = msg.cached_msg;
+    std::size_t start = 0;
+    while (start < text.size()) {
+      const std::size_t newline = text.find('\n', start);
+      const std::string line =
+          newline == std::string::npos
+              ? text.substr(start)
+              : text.substr(start, newline - start);
+      if (!line.empty()) {
+        g_captured_log_lines.push_back(line);
+        while (g_captured_log_lines.size() > kMaxCapturedLogLines) {
+          g_captured_log_lines.pop_front();
+        }
+      }
+      if (newline == std::string::npos) break;
+      start = newline + 1;
+    }
+  }
+};
+
+// Splits captured log text into lines, dropping empty ones, so
+// a parser sees one finding per line.
+std::vector<std::string> SplitLogLines(const std::string& text) {
+  std::vector<std::string> lines;
+  std::size_t start = 0;
+  while (start < text.size()) {
+    const std::size_t newline = text.find('\n', start);
+    const std::string line =
+        newline == std::string::npos
+            ? text.substr(start)
+            : text.substr(start, newline - start);
+    if (!line.empty()) lines.push_back(line);
+    if (newline == std::string::npos) break;
+    start = newline + 1;
+  }
+  return lines;
+}
+
+// Parses a Yosys src attribute ("file.v:12.5-12.20" or
+// "file.v:12") into its file and first line. A missing or
+// unparsable location leaves file empty and line 0: the issue
+// is still reported, only without a source location.
+void ParseSrcLocation(const std::string& src, std::string& file,
+                      int& line) {
+  file.clear();
+  line = 0;
+  if (src.empty()) return;
+  // The attribute can carry several locations; the first is the
+  // defining one.
+  std::string first = src;
+  const std::size_t cut = first.find_first_of(" ,");
+  if (cut != std::string::npos) first = first.substr(0, cut);
+  const std::size_t colon = first.rfind(':');
+  if (colon == std::string::npos) {
+    file = first;
+    return;
+  }
+  file = first.substr(0, colon);
+  const std::string rest = first.substr(colon + 1);
+  std::size_t digits = 0;
+  while (digits < rest.size() && rest[digits] >= '0' &&
+         rest[digits] <= '9') {
+    ++digits;
+  }
+  // No digits, or a digit run too long for an int: the file is
+  // the part before the colon and the line stays unknown.
+  if (digits == 0 || digits > 9) return;
+  line = std::stoi(rest.substr(0, digits));
+}
+
+// Severity order for issue sorting: errors first, then
+// warnings, then info.
+int IssueSeverityRank(const std::string& severity) {
+  if (severity == "error") return 0;
+  if (severity == "warning") return 1;
+  return 2;
+}
+
+// Maps every module in the hierarchy to the first
+// (path-sorted) instance path that instantiates it, so a
+// diagnostic naming a module can name the hierarchy path the
+// GUI selects. The top module maps to its own name. Modules
+// the hierarchy never reaches keep no entry; callers fall back
+// to the module name.
+void ModuleInstancePaths(const YosysEngine::HierarchyNode& node,
+                         std::map<std::string, std::string>& paths) {
+  if (paths.find(node.module) == paths.end()) {
+    paths[node.module] = node.path;
+  }
+  for (const auto& child : node.children) {
+    ModuleInstancePaths(child, paths);
+  }
+}
+
+std::string ModulePathFor(
+    const std::string& module,
+    const std::map<std::string, std::string>& paths) {
+  const auto found = paths.find(module);
+  return found == paths.end() ? module : found->second;
+}
+
+// Finds a live cell or wire by its unescaped name, so a
+// diagnostic naming it can read its source location. The
+// check pass prints names in their stored form, which matches
+// the unescaped name for the plain and $-prefixed names this
+// flow produces; a name that matches neither form simply has
+// no source location.
+Yosys::RTLIL::Cell* FindCellByName(Yosys::RTLIL::Module* module,
+                                   const std::string& name) {
+  if (module == nullptr) return nullptr;
+  for (const auto& entry : module->cells_) {
+    if (entry.second->name.unescape() == name ||
+        entry.second->name.str() == name) {
+      return entry.second;
+    }
+  }
+  return nullptr;
+}
+
+Yosys::RTLIL::Wire* FindWireByName(Yosys::RTLIL::Module* module,
+                                   const std::string& name) {
+  if (module == nullptr) return nullptr;
+  for (const auto& entry : module->wires_) {
+    if (entry.second->name.unescape() == name ||
+        entry.second->name.str() == name) {
+      return entry.second;
+    }
+  }
+  return nullptr;
+}
+
+// The check pass prints wire and cell names in RTLIL escaped
+// form, which prefixes a user identifier with a backslash
+// ("\y", "\u_and1") while $-prefixed names carry none. The
+// design stores the same objects under the unescaped name
+// ("y", "u_and1"), so a parsed name keeps its backslash only
+// when the design does not. Strip one leading backslash so a
+// parsed target matches the name the walk and the GUI use.
+std::string StripLeadingBackslash(const std::string& name) {
+  if (!name.empty() && name[0] == '\\') return name.substr(1);
+  return name;
+}
+
+// Strips a trailing "[n]" bit selector from a wire name the
+// check pass prints (log_signal names one bit of a vector as
+// "wire[n]"), so the target names the wire, not one bit of it.
+std::string StripBitSelector(const std::string& name) {
+  if (name.empty() || name.back() != ']') return name;
+  const std::size_t bracket = name.rfind('[');
+  if (bracket == std::string::npos) return name;
+  for (std::size_t i = bracket + 1; i + 1 < name.size(); ++i) {
+    if (name[i] < '0' || name[i] > '9') return name;
+  }
+  return name.substr(0, bracket);
+}
+
+// Reads the source location of a live cell or wire into an
+// issue's file and line, leaving them empty and 0 when the
+// object has none.
+void FillSrcFromCell(Yosys::RTLIL::Module* module,
+                     const std::string& cell_name, YosysEngine::YosysIssue& issue) {
+  Yosys::RTLIL::Cell* cell = FindCellByName(module, cell_name);
+  if (cell == nullptr) return;
+  ParseSrcLocation(cell->get_src_attribute(), issue.file, issue.line);
+}
+
+void FillSrcFromWire(Yosys::RTLIL::Module* module,
+                     const std::string& wire_name, YosysEngine::YosysIssue& issue) {
+  Yosys::RTLIL::Wire* wire = FindWireByName(module, wire_name);
+  if (wire == nullptr) return;
+  ParseSrcLocation(wire->get_src_attribute(), issue.file, issue.line);
+}
+
+// Parses the captured output of "check -nolatches" into
+// issues. Only lines starting with "Warning: " carry findings;
+// the pass header, the per-module "Checking module ..." lines,
+// and the "Found and reported N problems." summary are skipped.
+// Multi-line findings (multiple drivers, loops) consume their
+// indented body lines for the first cell and source location.
+// Severity follows the reviews, not the pass: the pass logs
+// everything as a warning, but multiple drivers and loops are
+// errors (they break synthesis and placement), while latches,
+// undriven nets, and init attributes stay warnings.
+void ParseCheckLog(const std::string& log, const std::string& top,
+                   const std::map<std::string, std::string>& module_paths,
+                   std::vector<YosysEngine::YosysIssue>& issues) {
+  const std::vector<std::string> lines = SplitLogLines(log);
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    const std::string& line = lines[i];
+    if (line.rfind("Warning: ", 0) != 0) continue;
+    const std::string body = line.substr(9);
+    // The indented body of a multi-line finding, if any.
+    std::vector<std::string> detail;
+    while (i + 1 < lines.size() &&
+           lines[i + 1].rfind("    ", 0) == 0) {
+      detail.push_back(lines[++i]);
+    }
+    // First "source: <src>" in the body, for the loop's first
+    // cell or wire.
+    std::string detail_file;
+    int detail_line = 0;
+    std::string detail_target;
+    for (const std::string& detail_line_text : detail) {
+      const std::size_t cell_at = detail_line_text.find("cell ");
+      if (detail_target.empty() && cell_at != std::string::npos) {
+        const std::size_t start = cell_at + 5;
+        const std::size_t end = detail_line_text.find(' ', start);
+        if (end != std::string::npos) {
+          detail_target = StripLeadingBackslash(
+              detail_line_text.substr(start, end - start));
+        }
+      }
+      const std::size_t src_at = detail_line_text.find("source: ");
+      if (src_at != std::string::npos) {
+        ParseSrcLocation(detail_line_text.substr(src_at + 8),
+                         detail_file, detail_line);
+        break;
+      }
+    }
+    YosysEngine::YosysIssue issue;
+    if (body.rfind("Cell ", 0) == 0) {
+      const std::size_t dot = body.find('.', 5);
+      if (dot == std::string::npos) continue;
+      const std::string module_name =
+          StripLeadingBackslash(body.substr(5, dot - 5));
+      const std::size_t unknown_at =
+          body.find(" has unknown internal type ");
+      const std::size_t latch_at = body.find(" is a latch of type ");
+      if (unknown_at != std::string::npos) {
+        issue.severity = "error";
+        issue.code = "unknown_cell_type";
+        issue.target = StripLeadingBackslash(
+            body.substr(dot + 1, unknown_at - dot - 1));
+        issue.message = "Cell " + issue.target + " in module " +
+                        module_name + " has an unknown internal type";
+        issue.module = module_name;
+        issue.path = ModulePathFor(module_name, module_paths);
+        FillSrcFromCell(FindModule(module_name), issue.target, issue);
+      } else if (latch_at != std::string::npos) {
+        issue.severity = "warning";
+        issue.code = "inferred_latch";
+        issue.target = StripLeadingBackslash(
+            body.substr(dot + 1, latch_at - dot - 1));
+        issue.message = "Cell " + issue.target + " in module " +
+                        module_name + " is an inferred latch";
+        issue.module = module_name;
+        issue.path = ModulePathFor(module_name, module_paths);
+        FillSrcFromCell(FindModule(module_name), issue.target, issue);
+      } else {
+        continue;
+      }
+    } else if (body.rfind("Wire ", 0) == 0) {
+      const std::size_t dot = body.find('.', 5);
+      if (dot == std::string::npos) continue;
+      const std::string module_name =
+          StripLeadingBackslash(body.substr(5, dot - 5));
+      const std::size_t undriven_at =
+          body.find(" is used but has no driver.");
+      const std::size_t init_at =
+          body.find(" has an unprocessed 'init' attribute.");
+      if (undriven_at != std::string::npos) {
+        issue.severity = "warning";
+        issue.code = "undriven_net";
+        issue.target = StripLeadingBackslash(
+            StripBitSelector(body.substr(dot + 1, undriven_at - dot - 1)));
+        issue.message = "Wire " + issue.target + " in module " +
+                        module_name + " is used but has no driver";
+        issue.module = module_name;
+        issue.path = ModulePathFor(module_name, module_paths);
+        FillSrcFromWire(FindModule(module_name), issue.target, issue);
+      } else if (init_at != std::string::npos) {
+        issue.severity = "warning";
+        issue.code = "init_attribute";
+        issue.target = StripLeadingBackslash(
+            StripBitSelector(body.substr(dot + 1, init_at - dot - 1)));
+        issue.message = "Wire " + issue.target + " in module " +
+                        module_name + " has an unprocessed 'init' attribute";
+        issue.module = module_name;
+        issue.path = ModulePathFor(module_name, module_paths);
+        FillSrcFromWire(FindModule(module_name), issue.target, issue);
+      } else {
+        continue;
+      }
+    } else if (body.rfind("multiple conflicting drivers for ", 0) == 0) {
+      const std::string rest =
+          body.substr(std::string("multiple conflicting drivers for ").size());
+      const std::size_t dot = rest.find('.');
+      if (dot == std::string::npos) continue;
+      const std::string module_name =
+          StripLeadingBackslash(rest.substr(0, dot));
+      const std::size_t colon = rest.find(':', dot);
+      if (colon == std::string::npos) continue;
+      issue.severity = "error";
+      issue.code = "multiple_drivers";
+      issue.target = StripLeadingBackslash(
+          StripBitSelector(rest.substr(dot + 1, colon - dot - 1)));
+      issue.message = "Wire " + issue.target + " in module " +
+                      module_name + " has multiple conflicting drivers";
+      issue.module = module_name;
+      issue.path = ModulePathFor(module_name, module_paths);
+      if (!detail_target.empty()) {
+        FillSrcFromCell(FindModule(module_name), detail_target, issue);
+      }
+      if (issue.file.empty()) {
+        FillSrcFromWire(FindModule(module_name), issue.target, issue);
+      }
+    } else if (body.rfind("Drivers conflicting with a constant ", 0) == 0) {
+      issue.severity = "error";
+      issue.code = "multiple_drivers";
+      issue.message = body;
+      issue.module = top;
+      issue.path = ModulePathFor(top, module_paths);
+    } else if (body.rfind("found logic loop in module ", 0) == 0) {
+      const std::string module_name = StripLeadingBackslash(
+          body.substr(std::string("found logic loop in module ").size(),
+                      body.size() -
+                          std::string("found logic loop in module ").size() -
+                          1));
+      issue.severity = "error";
+      issue.code = "combinational_loop";
+      issue.message =
+          "Combinational loop in module " + module_name;
+      issue.module = module_name;
+      issue.path = ModulePathFor(module_name, module_paths);
+      issue.target = detail_target;
+      issue.file = detail_file;
+      issue.line = detail_line;
+    } else {
+      continue;
+    }
+    issues.push_back(std::move(issue));
+  }
+}
+
+// Adds the design-walk issues: unresolved references and
+// black-box instantiations (which the check pass does not
+// report), unconnected cell ports and dead module inputs, top
+// ports, and empty modules. The walk reads the live design
+// only; it runs no pass.
+void WalkDesignIssues(const std::string& top,
+                      const std::map<std::string, std::string>& module_paths,
+                      std::vector<YosysEngine::YosysIssue>& issues) {
+  if (Yosys::yosys_design == nullptr) return;
+  for (const auto& entry : Yosys::yosys_design->modules_) {
+    Yosys::RTLIL::Module* module = entry.second;
+    const std::string module_name = module->name.unescape();
+    const std::string path = ModulePathFor(module_name, module_paths);
+    if (module->cells_.empty() && module->connections_.empty() &&
+        !module->get_blackbox_attribute()) {
+      issues.push_back(YosysEngine::YosysIssue{"info", "empty_module",
+                                  "Module " + module_name + " has no cells",
+                                  module_name, path, "", "", 0});
+    }
+    if (module_name == top) {
+      bool has_input = false;
+      bool has_output = false;
+      for (const auto& port : module->ports) {
+        Yosys::RTLIL::Wire* wire = module->wire(port);
+        if (wire == nullptr) continue;
+        if (wire->port_input) has_input = true;
+        if (wire->port_output) has_output = true;
+      }
+      if (!has_input) {
+        issues.push_back(YosysEngine::YosysIssue{"warning", "top_no_ports",
+                                    "Top module " + top +
+                                        " has no input ports",
+                                    module_name, path, "", "", 0});
+      }
+      if (!has_output) {
+        issues.push_back(YosysEngine::YosysIssue{"warning", "top_no_ports",
+                                    "Top module " + top +
+                                        " has no output ports",
+                                    module_name, path, "", "", 0});
+      }
+    }
+    for (const auto& cell_entry : module->cells_) {
+      Yosys::RTLIL::Cell* cell = cell_entry.second;
+      const std::string cell_name = cell->name.unescape();
+      const std::string type = cell->type.unescape();
+      std::string file;
+      int line = 0;
+      ParseSrcLocation(cell->get_src_attribute(), file, line);
+      if (!type.empty() && type[0] != '$') {
+        Yosys::RTLIL::Module* target_module = FindModule(type);
+        if (target_module == nullptr) {
+          issues.push_back(YosysEngine::YosysIssue{
+              "error", "unresolved_reference",
+              "Module " + type + " instantiated at " + path + "/" +
+                  cell_name + " is not defined",
+              module_name, path, cell_name, file, line});
+        } else if (target_module->get_blackbox_attribute()) {
+          issues.push_back(YosysEngine::YosysIssue{
+              "warning", "blackbox_instantiation",
+              "Module " + type + " instantiated at " + path + "/" +
+                  cell_name + " is a black box (no RTL interior)",
+              module_name, path, cell_name, file, line});
+        }
+      }
+      for (const auto& connection : cell->connections()) {
+        if (connection.second.empty()) {
+          issues.push_back(YosysEngine::YosysIssue{
+              "warning", "unconnected_port",
+              "Port " + connection.first.unescape() + " of cell " +
+                  cell_name + " is unconnected",
+              module_name, path, cell_name, file, line});
+        }
+      }
+    }
+    for (const auto& port : module->ports) {
+      Yosys::RTLIL::Wire* wire = module->wire(port);
+      if (wire == nullptr || !wire->port_input || wire->port_output) {
+        continue;
+      }
+      bool touched = false;
+      for (const auto& cell_entry : module->cells_) {
+        for (const auto& connection : cell_entry.second->connections()) {
+          if (SigTouchesWire(connection.second, wire)) {
+            touched = true;
+            break;
+          }
+        }
+        if (touched) break;
+      }
+      // A continuous assign also uses the wire: a port read only
+      // by "assign y = a;" is connected, even though no cell
+      // touches it. The check pass counts the same way (cell
+      // ports and module inputs are drivers, not module
+      // connections), so this is the walk's own correction.
+      if (!touched) {
+        for (const auto& connection : module->connections_) {
+          if (SigTouchesWire(connection.first, wire) ||
+              SigTouchesWire(connection.second, wire)) {
+            touched = true;
+            break;
+          }
+        }
+      }
+      if (!touched) {
+        std::string file;
+        int line = 0;
+        ParseSrcLocation(wire->get_src_attribute(), file, line);
+        issues.push_back(YosysEngine::YosysIssue{
+            "warning", "unconnected_port",
+            "Input port " + port.unescape() + " of module " +
+                module_name + " drives nothing",
+            module_name, path, port.unescape(), file, line});
+      }
+    }
+  }
+}
+
 }  // namespace
 
 YosysEngine::YosysEngine() {
@@ -355,6 +825,7 @@ YosysEngine::YosysEngine() {
     if (!g_yosys_setup_done) {
       Yosys::yosys_setup();
       Yosys::logger().add_sink<Yosys::ConsoleLogSink>();
+      Yosys::logger().add_sink<CapturingLogSink>();
       g_yosys_setup_done = true;
     }
     // Point Yosys's share lookup at the build-tree staging
@@ -527,6 +998,61 @@ Result<YosysNetlistStats> YosysEngine::Elaborate(const std::string& top) {
     return InvalidArgument("top module not found after elaboration: " + top);
   }
   return ComputeStats(module);
+}
+
+std::string YosysEngine::TakeLog() {
+  std::string out;
+  for (const std::string& line : g_captured_log_lines) {
+    if (!out.empty()) out += '\n';
+    out += line;
+  }
+  g_captured_log_lines.clear();
+  return out;
+}
+
+Result<std::vector<YosysEngine::YosysIssue>> YosysEngine::Issues(
+    const std::string& top) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  if (!IsPlainIdentifier(top)) {
+    return InvalidArgument("top module name is not a plain identifier: " + top);
+  }
+  if (FindModule(top) == nullptr) {
+    return InvalidArgument("top module not found in the live design: " + top);
+  }
+  // Instance paths for diagnostics come from the hierarchy
+  // walk: children are path-sorted, so the first path recorded
+  // for a module is its smallest instance path.
+  const Result<HierarchyNode> hierarchy = Hierarchy(top);
+  if (!hierarchy.ok()) return hierarchy.status();
+  std::map<std::string, std::string> module_paths;
+  ModuleInstancePaths(hierarchy.value(), module_paths);
+  std::vector<YosysEngine::YosysIssue> issues;
+  // The check pass's own findings, captured from its log under
+  // a scoped sink so the capture stays local to this call. The
+  // check output also reaches the permanent capturing sink, so
+  // the log window still shows the raw check lines.
+  std::ostringstream captured;
+  Status check_status;
+  {
+    Yosys::LogManager::Scoped scope(Yosys::logger());
+    Yosys::logger().add_sink<Yosys::StreamLogSink>(captured);
+    check_status = RunPass("check -nolatches");
+  }
+  if (!check_status.ok()) return check_status;
+  ParseCheckLog(captured.str(), top, module_paths, issues);
+  WalkDesignIssues(top, module_paths, issues);
+  std::sort(issues.begin(), issues.end(),
+            [](const YosysEngine::YosysIssue& a, const YosysEngine::YosysIssue& b) {
+              const int rank_a = IssueSeverityRank(a.severity);
+              const int rank_b = IssueSeverityRank(b.severity);
+              if (rank_a != rank_b) return rank_a < rank_b;
+              if (a.path != b.path) return a.path < b.path;
+              if (a.code != b.code) return a.code < b.code;
+              return a.target < b.target;
+            });
+  return issues;
 }
 
 Result<YosysNetlistStats> YosysEngine::Stats(const std::string& top) {

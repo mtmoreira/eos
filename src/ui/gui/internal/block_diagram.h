@@ -41,6 +41,13 @@ class BlockDiagram : public QWidget {
     on_action_ = std::move(callback);
   }
 
+  // Called after a click descends to a leaf level, so the
+  // main window can show the schematic tab for it. Unset by
+  // default: without it a click descends but shows no tab.
+  void SetExpandCallback(std::function<void()> callback) {
+    on_expand_ = std::move(callback);
+  }
+
  protected:
   // Refit on resize, so the diagram fills the view after the
   // window is shown or resized, not just when its content
@@ -74,6 +81,7 @@ class BlockDiagram : public QWidget {
   QGraphicsScene* scene_ = nullptr;
   QGraphicsView* view_widget_ = nullptr;
   std::function<void()> on_action_;
+  std::function<void()> on_expand_;
 };
 
 }  // namespace eos::ui

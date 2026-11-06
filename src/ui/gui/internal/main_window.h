@@ -8,10 +8,13 @@
 
 #include <QMainWindow>
 
+#include <cstddef>
 #include <string>
 
 #include "eos/ui/console_entry.h"
+#include "eos/ui/gui.h"
 
+class QCheckBox;
 class QCloseEvent;
 class QCompleter;
 class QLabel;
@@ -26,17 +29,15 @@ namespace eos::ui {
 class BlockDiagram;
 class HierarchyBrowser;
 class PanelsView;
-class SchematicDiagram;
-class SessionView;
 
 class MainWindow : public QMainWindow {
  public:
   explicit MainWindow(SessionView& view, QWidget* parent = nullptr);
 
   // Re-reads step state, hierarchy, diagram, schematic, panels,
-  // and the echo log into the widgets. Called after any session
-  // change. At a leaf level the schematic replaces the diagram
-  // in the center; otherwise the diagram shows.
+  // issues, and the log into the widgets. Called after any
+  // session change. The center always shows the block diagram;
+  // the schematic lives as a tab in the right panels.
   void Refresh();
 
   // Shows a hidden window again (U6): the terminal reopen
@@ -69,6 +70,14 @@ class MainWindow : public QMainWindow {
  private:
   void RefreshSteps();
   void RefreshConsole();
+  // Appends the log entries RefreshLog drained since the last
+  // render, in severity colors, skipping severities whose
+  // filter toggle is off. A filter change re-renders the whole
+  // log from the start.
+  void RefreshLogWindow();
+  void AppendLogLine(const SessionView::LogEntry& entry);
+  bool LogSeverityEnabled(const std::string& severity) const;
+  void FindNextLogMatch();
 
   // Submits the console entry text: records it in the entry's
   // history, dispatches it through the session, clears the
@@ -80,15 +89,26 @@ class MainWindow : public QMainWindow {
   SessionView& view_;
   QPushButton* step_buttons_[3];
   QLabel* checkpoint_label_ = nullptr;
+  QLabel* floorplan_label_ = nullptr;
   HierarchyBrowser* browser_ = nullptr;
   BlockDiagram* diagram_ = nullptr;
-  SchematicDiagram* schematic_ = nullptr;
   PanelsView* panels_ = nullptr;
   QPlainTextEdit* console_ = nullptr;
   QLineEdit* entry_ = nullptr;
   QCompleter* entry_completer_ = nullptr;
   QStringListModel* entry_completion_model_ = nullptr;
   ConsoleHistory entry_history_;
+  QPlainTextEdit* log_ = nullptr;
+  QLineEdit* log_search_ = nullptr;
+  QCheckBox* log_errors_ = nullptr;
+  QCheckBox* log_warnings_ = nullptr;
+  QCheckBox* log_infos_ = nullptr;
+  // Log entries already rendered, so a refresh only appends
+  // the new ones. A filter change resets this to 0 and clears
+  // the view, so the whole log re-renders under the new
+  // filters.
+  std::size_t log_shown_ = 0;
+  bool log_filters_dirty_ = false;
   bool stdin_closed_ = false;
 };
 
