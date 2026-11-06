@@ -215,10 +215,12 @@ struct SchematicGatePlacement {
   std::vector<SchematicPortAnchor> ports;
 };
 
-// One placed parent terminal: the point on the square's outer
-// edge where a net attaches. Input terminals face right, output
-// terminals face left; the widget draws the square on the inner
-// side of the point.
+// One placed parent terminal: the point on the arrowhead where
+// a net attaches: the tip for an input, the base center for an
+// output. Input terminals face right, output terminals face
+// left; the widget draws the arrowhead outward from the point,
+// so the tip is at the point for an input and the base is at
+// the point for an output.
 struct SchematicTerminalPlacement {
   std::string name;
   bool input_side;
@@ -243,7 +245,7 @@ struct SchematicNetRoute {
 // column ordered to keep connected gates aligned, parent
 // terminals on the outer sides, and every net routed
 // orthogonally. Output_x is the left edge of the output
-// terminal squares; input terminals sit at kSchematicInputX.
+// terminal arrowheads; input terminals sit at kSchematicInputX.
 struct SchematicLayout {
   std::vector<SchematicGatePlacement> gates;
   std::vector<SchematicTerminalPlacement> terminals;

@@ -17,6 +17,23 @@
 #include "splash_screen.h"
 #endif
 
+#ifdef EOS_GUI_HAVE_QT6
+#include <cmath>
+
+#include <QApplication>
+#include <QGraphicsItem>
+#include <QGraphicsLineItem>
+#include <QGraphicsPathItem>
+#include <QGraphicsRectItem>
+#include <QGraphicsScene>
+#include <QGraphicsSimpleTextItem>
+#include <QGraphicsView>
+#include <QMouseEvent>
+
+#include "block_diagram.h"
+#include "schematic_diagram.h"
+#endif
+
 namespace {
 
 using eos::ui::CommandContext;
@@ -2003,5 +2020,453 @@ TEST(ConsoleEntry, SplitSegmentsDropsBlanks) {
   ASSERT_EQ(got.size(), 1u);
   EXPECT_EQ(got[0], "eos::ping");
 }
+
+#ifdef EOS_GUI_HAVE_QT6
+
+using eos::ui::BlockDiagram;
+using eos::ui::SchematicDiagram;
+
+// Widget rendering tests: both diagrams sit on a dark
+// background, so every shape is a white contour with no fill
+// and every label is white text. These tests need a
+// QApplication; the offscreen platform keeps them headless in
+// CI. They compile out without Qt.
+QApplication* OutlineTestApp() {
+  static int argc = 1;
+  static char arg0[] = "eda_ui_gui_unit_test";
+  static char* argv[] = {arg0, nullptr};
+  qputenv("QT_QPA_PLATFORM", QByteArray("offscreen"));
+  // Heap-allocated and deliberately never deleted: destroying a
+  // static QApplication at exit segfaults while tearing down its
+  // QPointingDevice children (Qt 6.4, offscreen). The process
+  // reclaims it; no test outlives the process.
+  static QApplication* app = new QApplication(argc, argv);
+  return app;
+}
+
+template <typename T>
+std::vector<T*> OutlineSceneItems(const QGraphicsScene* scene) {
+  std::vector<T*> found;
+  for (QGraphicsItem* item : scene->items()) {
+    if (auto* typed = qgraphicsitem_cast<T*>(item)) {
+      found.push_back(typed);
+    }
+  }
+  return found;
+}
+
+bool OutlineRectNear(const QRectF& a, const QRectF& b) {
+  return std::abs(a.left() - b.left()) < 0.01 &&
+         std::abs(a.top() - b.top()) < 0.01 &&
+         std::abs(a.width() - b.width()) < 0.01 &&
+         std::abs(a.height() - b.height()) < 0.01;
+}
+
+// A SessionView whose schematic holds the flat optloop payload:
+// three AND gates, four input terminals, two output terminals.
+struct OutlineSchematicView {
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view;
+  OutlineSchematicView() : view(registry, context) {
+    OutlineTestApp();
+    RegisterHierarchyCommand(registry, kFlatPayload, true);
+    RegisterSchematicCommand(registry, nullptr);
+    context.synth.elaborated = true;
+    view.RefreshHierarchy();
+    view.RefreshSchematic();
+  }
+};
+
+// A SessionView whose block diagram holds the top payload:
+// two hier blocks, three input terminals, one output terminal.
+struct OutlineBlockView {
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view;
+  OutlineBlockView() : view(registry, context) {
+    OutlineTestApp();
+    RegisterHierarchyCommand(registry, kNestedPayload, true);
+    RegisterBlocksCommand(registry, nullptr);
+    context.synth.elaborated = true;
+    view.RefreshHierarchy();
+    view.RefreshDiagram();
+  }
+};
+
+const char kOutlineTwoGateHierarchy[] =
+    "top=two\n"
+    "node path=two module=two ports=a,b,c,d,y1,y2\n";
+
+// Two disconnected AND gates, so selecting one dims the other.
+const char kOutlineTwoGateSchematic[] =
+    "module=two\n"
+    "parent port=a direction=in\n"
+    "parent port=b direction=in\n"
+    "parent port=c direction=in\n"
+    "parent port=d direction=in\n"
+    "parent port=y1 direction=out\n"
+    "parent port=y2 direction=out\n"
+    "gate instance=g1 type=$and ports=A:in,B:in,Y:out\n"
+    "gate instance=g2 type=$and ports=A:in,B:in,Y:out\n"
+    "net name=a gates=g1:A terminals=a\n"
+    "net name=b gates=g1:B terminals=b\n"
+    "net name=c gates=g2:A terminals=c\n"
+    "net name=d gates=g2:B terminals=d\n"
+    "net name=y1 gates=g1:Y terminals=y1\n"
+    "net name=y2 gates=g2:Y terminals=y2\n";
+
+void RegisterTwoGateSchematic(CommandRegistry& registry) {
+  auto status = registry.Register(
+      "synth_schematic", "synth_schematic <module>",
+      [](CommandContext&, const std::vector<std::string>& args) {
+        if (args.size() == 1 && args[0] == "two") {
+          return CommandResult::Ok(kOutlineTwoGateSchematic);
+        }
+        return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                   "unknown module");
+      });
+  EXPECT_TRUE(status.ok());
+}
+
+TEST(SchematicOutline, GatesDrawWhiteOutlineWithoutFill) {
+  OutlineSchematicView fixture;
+  ASSERT_FALSE(fixture.view.Schematic().Empty());
+  SchematicDiagram diagram(fixture.view);
+  diagram.Refresh();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  const std::vector<QGraphicsPathItem*> paths =
+      OutlineSceneItems<QGraphicsPathItem>(scene);
+  // Three AND gates plus six terminal arrowheads.
+  ASSERT_EQ(paths.size(), 9u);
+  std::size_t gates = 0;
+  std::size_t arrows = 0;
+  for (const QGraphicsPathItem* path : paths) {
+    EXPECT_EQ(path->brush().style(), Qt::NoBrush);
+    EXPECT_EQ(path->pen().color(), Qt::white);
+    const QRectF bounds = path->path().boundingRect();
+    if (std::abs(bounds.height() - 64) < 0.01) ++gates;
+    if (OutlineRectNear(bounds,
+                        QRectF(bounds.left(), bounds.top(), 16, 16))) {
+      ++arrows;
+    }
+  }
+  EXPECT_EQ(gates, 3u);
+  EXPECT_EQ(arrows, 6u);
+}
+
+TEST(SchematicOutline, GenericGateDrawsWhiteOutlineRect) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterHierarchyCommand(
+      registry,
+      "top=adder\nnode path=adder module=adder ports=a,b,y\n", true);
+  RegisterSchematicCommand(registry, nullptr);
+  CommandContext context;
+  context.synth.elaborated = true;
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  view.RefreshSchematic();
+  ASSERT_FALSE(view.Schematic().Empty());
+  SchematicDiagram diagram(view);
+  diagram.Refresh();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  // The $add gate draws as a rectangle, not a path; the other
+  // rect is the transparent hover rect over the gate.
+  const std::vector<QGraphicsRectItem*> rects =
+      OutlineSceneItems<QGraphicsRectItem>(scene);
+  ASSERT_EQ(rects.size(), 2u);
+  std::size_t outlined = 0;
+  std::size_t hover = 0;
+  for (const QGraphicsRectItem* rect : rects) {
+    EXPECT_EQ(rect->brush().style(), Qt::NoBrush);
+    if (rect->pen().style() == Qt::NoPen) {
+      ++hover;
+    } else {
+      EXPECT_EQ(rect->pen().color(), Qt::white);
+      ++outlined;
+    }
+  }
+  EXPECT_EQ(outlined, 1u);
+  EXPECT_EQ(hover, 1u);
+  // Three terminal arrowheads, all outline-only.
+  const std::vector<QGraphicsPathItem*> paths =
+      OutlineSceneItems<QGraphicsPathItem>(scene);
+  ASSERT_EQ(paths.size(), 3u);
+  for (const QGraphicsPathItem* path : paths) {
+    EXPECT_EQ(path->brush().style(), Qt::NoBrush);
+    EXPECT_EQ(path->pen().color(), Qt::white);
+  }
+}
+
+TEST(SchematicOutline, TerminalArrowsPointInSignalDirection) {
+  OutlineSchematicView fixture;
+  ASSERT_FALSE(fixture.view.Schematic().Empty());
+  SchematicDiagram diagram(fixture.view);
+  diagram.Refresh();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  const std::vector<QGraphicsPathItem*> paths =
+      OutlineSceneItems<QGraphicsPathItem>(scene);
+  std::size_t inputs = 0;
+  std::size_t outputs = 0;
+  for (const QGraphicsPathItem* path : paths) {
+    const QRectF bounds = path->path().boundingRect();
+    if (std::abs(bounds.height() - 64) < 0.01) continue;
+    ASSERT_EQ(path->path().elementCount(), 4); // moveTo, two lineTo, plus the closing line from closeSubpath
+    const QPointF center(bounds.center().x(), bounds.center().y());
+    const QPointF right(bounds.right(), center.y());
+    if (bounds.left() < 100) {
+      // Input arrowhead: the path starts at the tip, which
+      // meets the wire at the anchor.
+      EXPECT_EQ(path->path().elementAt(0).x, right.x());
+      EXPECT_EQ(path->path().elementAt(0).y, right.y());
+      ++inputs;
+    } else {
+      // Output arrowhead: the path ends at the tip, which
+      // points outward away from the design.
+      EXPECT_EQ(path->path().elementAt(2).x, right.x());
+      EXPECT_EQ(path->path().elementAt(2).y, right.y());
+      ++outputs;
+    }
+  }
+  EXPECT_EQ(inputs, 4u);
+  EXPECT_EQ(outputs, 2u);
+}
+
+TEST(SchematicOutline, LabelsAreWhite) {
+  OutlineSchematicView fixture;
+  ASSERT_FALSE(fixture.view.Schematic().Empty());
+  SchematicDiagram diagram(fixture.view);
+  diagram.Refresh();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  const std::vector<QGraphicsSimpleTextItem*> texts =
+      OutlineSceneItems<QGraphicsSimpleTextItem>(scene);
+  // Gate labels, terminal labels, and net labels.
+  ASSERT_GE(texts.size(), 12u);
+  for (const QGraphicsSimpleTextItem* text : texts) {
+    EXPECT_EQ(text->brush().color(), Qt::white) << text->text().toStdString();
+  }
+}
+
+TEST(SchematicOutline, EmptyPlaceholderIsWhite) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  SchematicDiagram diagram(view);
+  diagram.Refresh();
+  const std::vector<QGraphicsSimpleTextItem*> texts =
+      OutlineSceneItems<QGraphicsSimpleTextItem>(diagram.Scene());
+  ASSERT_EQ(texts.size(), 1u);
+  EXPECT_EQ(texts[0]->text().toStdString(), "No design loaded.");
+  EXPECT_EQ(texts[0]->brush().color(), Qt::white);
+}
+
+TEST(SchematicOutline, ClickSelectsGateWithBlueOutline) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kOutlineTwoGateHierarchy, true);
+  RegisterTwoGateSchematic(registry);
+  CommandContext context;
+  context.synth.elaborated = true;
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  view.RefreshSchematic();
+  ASSERT_FALSE(view.Schematic().Empty());
+  SchematicDiagram diagram(view);
+  diagram.show();
+  QApplication::processEvents();
+  diagram.Refresh();
+  QApplication::processEvents();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  auto* graphics_view = diagram.findChild<QGraphicsView*>();
+  ASSERT_NE(graphics_view, nullptr);
+  const std::vector<QGraphicsPathItem*> before =
+      OutlineSceneItems<QGraphicsPathItem>(scene);
+  const QGraphicsPathItem* target = nullptr;
+  for (const QGraphicsPathItem* path : before) {
+    if (std::abs(path->path().boundingRect().height() - 64) < 0.01) {
+      target = path;
+      break;
+    }
+  }
+  ASSERT_NE(target, nullptr);
+  const QPointF center = target->path().boundingRect().center();
+  const QPoint viewport_point = graphics_view->mapFromScene(center);
+  QMouseEvent press(QEvent::MouseButtonPress, QPointF(viewport_point),
+                    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(graphics_view->viewport(), &press);
+  // The click rebuilds the scene, so re-collect the items.
+  const std::vector<QGraphicsPathItem*> after =
+      OutlineSceneItems<QGraphicsPathItem>(scene);
+  std::size_t blue = 0;
+  std::size_t gray = 0;
+  for (const QGraphicsPathItem* path : after) {
+    if (std::abs(path->path().boundingRect().height() - 64) > 0.01) {
+      continue;
+    }
+    EXPECT_EQ(path->brush().style(), Qt::NoBrush);
+    if (path->pen().color() == Qt::blue) {
+      ++blue;
+      EXPECT_EQ(path->pen().widthF(), 2);
+    } else if (path->pen().color() == Qt::gray) {
+      ++gray;
+    }
+  }
+  EXPECT_EQ(blue, 1u);
+  EXPECT_EQ(gray, 1u);
+}
+
+TEST(BlockOutline, BlocksDrawWhiteOutlineWithoutFill) {
+  OutlineBlockView fixture;
+  ASSERT_FALSE(fixture.view.Diagram().Empty());
+  BlockDiagram diagram(fixture.view);
+  diagram.Refresh();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  const std::vector<QGraphicsRectItem*> rects =
+      OutlineSceneItems<QGraphicsRectItem>(scene);
+  ASSERT_EQ(rects.size(), 2u);
+  for (const QGraphicsRectItem* rect : rects) {
+    EXPECT_EQ(rect->brush().style(), Qt::NoBrush);
+    EXPECT_EQ(rect->pen().color(), Qt::white);
+  }
+  const std::vector<QGraphicsSimpleTextItem*> texts =
+      OutlineSceneItems<QGraphicsSimpleTextItem>(scene);
+  ASSERT_FALSE(texts.empty());
+  for (const QGraphicsSimpleTextItem* text : texts) {
+    EXPECT_EQ(text->brush().color(), Qt::white) << text->text().toStdString();
+  }
+}
+
+TEST(BlockOutline, HighlightedBlockOutlinesBlueWithoutFill) {
+  OutlineBlockView fixture;
+  ASSERT_FALSE(fixture.view.Diagram().Empty());
+  ASSERT_TRUE(fixture.view.SelectHierarchyPath("top/u_ctrl"));
+  BlockDiagram diagram(fixture.view);
+  diagram.Refresh();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  const std::vector<QGraphicsRectItem*> rects =
+      OutlineSceneItems<QGraphicsRectItem>(scene);
+  ASSERT_EQ(rects.size(), 2u);
+  for (const QGraphicsRectItem* rect : rects) {
+    EXPECT_EQ(rect->brush().style(), Qt::NoBrush);
+    // u_ctrl is the first block row (y 40), u_mid the second.
+    if (std::abs(rect->rect().top() - 40) < 0.01) {
+      EXPECT_EQ(rect->pen().color(), Qt::blue);
+      EXPECT_EQ(rect->pen().widthF(), 3);
+    } else {
+      EXPECT_EQ(rect->pen().color(), Qt::white);
+    }
+  }
+}
+
+TEST(BlockOutline, TerminalArrowsPointInSignalDirection) {
+  OutlineBlockView fixture;
+  ASSERT_FALSE(fixture.view.Diagram().Empty());
+  BlockDiagram diagram(fixture.view);
+  diagram.Refresh();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  const std::vector<QGraphicsPathItem*> paths =
+      OutlineSceneItems<QGraphicsPathItem>(scene);
+  // Three input terminals (a, b, sel) and one output (y).
+  ASSERT_EQ(paths.size(), 4u);
+  std::size_t inputs = 0;
+  std::size_t outputs = 0;
+  for (const QGraphicsPathItem* path : paths) {
+    EXPECT_EQ(path->brush().style(), Qt::NoBrush);
+    EXPECT_EQ(path->pen().color(), Qt::white);
+    ASSERT_EQ(path->path().elementCount(), 4); // moveTo, two lineTo, plus the closing line from closeSubpath
+    const QRectF bounds = path->path().boundingRect();
+    EXPECT_TRUE(OutlineRectNear(
+        bounds, QRectF(bounds.left(), bounds.top(), 16, 16)));
+    const QPointF right(bounds.right(), bounds.center().y());
+    if (bounds.left() < 100) {
+      EXPECT_EQ(path->path().elementAt(0).x, right.x());
+      EXPECT_EQ(path->path().elementAt(0).y, right.y());
+      ++inputs;
+    } else {
+      // Block arrowheads use one triangle on both sides, so the
+      // tip is element 0 here too; the input/output difference
+      // is the attach point, covered by NetLinesAttachAtArrowheadPoints.
+      EXPECT_EQ(path->path().elementAt(0).x, right.x());
+      EXPECT_EQ(path->path().elementAt(0).y, right.y());
+      ++outputs;
+    }
+  }
+  EXPECT_EQ(inputs, 3u);
+  EXPECT_EQ(outputs, 1u);
+}
+
+TEST(BlockOutline, NetLinesAttachAtArrowheadPoints) {
+  OutlineBlockView fixture;
+  ASSERT_FALSE(fixture.view.Diagram().Empty());
+  BlockDiagram diagram(fixture.view);
+  diagram.Refresh();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  const std::vector<QGraphicsLineItem*> lines =
+      OutlineSceneItems<QGraphicsLineItem>(scene);
+  // Net a attaches at the input arrowhead tip (56, 48); the
+  // lone output net y stubs out from the output arrowhead tip
+  // (656, 48) to (684, 48).
+  bool input_attach = false;
+  bool output_stub = false;
+  for (const QGraphicsLineItem* line : lines) {
+    const QLineF segment = line->line();
+    if (segment.p1() == QPointF(56, 48) ||
+        segment.p2() == QPointF(56, 48)) {
+      input_attach = true;
+    }
+    if ((segment.p1() == QPointF(656, 48) &&
+         segment.p2() == QPointF(684, 48)) ||
+        (segment.p1() == QPointF(684, 48) &&
+         segment.p2() == QPointF(656, 48))) {
+      output_stub = true;
+    }
+  }
+  EXPECT_TRUE(input_attach);
+  EXPECT_TRUE(output_stub);
+  // A lone block anchor stubs from the block edge itself: the
+  // m net leaves the right edge of u_mid, with no gap.
+  const std::vector<QGraphicsRectItem*> rects =
+      OutlineSceneItems<QGraphicsRectItem>(scene);
+  const QGraphicsRectItem* umid = nullptr;
+  for (const QGraphicsRectItem* rect : rects) {
+    if (std::abs(rect->rect().top() - 152) < 0.01) umid = rect;
+  }
+  ASSERT_NE(umid, nullptr);
+  const QPointF edge(umid->rect().right(), umid->rect().top() + 32);
+  bool block_stub = false;
+  for (const QGraphicsLineItem* line : lines) {
+    if (line->line().p1() == edge || line->line().p2() == edge) {
+      block_stub = true;
+    }
+  }
+  EXPECT_TRUE(block_stub);
+}
+
+TEST(BlockOutline, EmptyPlaceholderIsWhite) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  BlockDiagram diagram(view);
+  diagram.Refresh();
+  const std::vector<QGraphicsSimpleTextItem*> texts =
+      OutlineSceneItems<QGraphicsSimpleTextItem>(diagram.Scene());
+  ASSERT_EQ(texts.size(), 1u);
+  EXPECT_EQ(texts[0]->text().toStdString(), "No design loaded.");
+  EXPECT_EQ(texts[0]->brush().color(), Qt::white);
+}
+
+#endif  // EOS_GUI_HAVE_QT6
 
 }  // namespace

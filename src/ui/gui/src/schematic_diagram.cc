@@ -2,7 +2,6 @@
 #include "schematic_diagram.h"
 
 #include <QBrush>
-#include <QColor>
 #include <QFont>
 #include <QFontMetrics>
 #include <QGraphicsLineItem>
@@ -65,8 +64,11 @@ qreal LeftCurveX(qreal base, const QRectF& rect, qreal y) {
 // Draws one gate symbol inside rect. The rect is the gate's
 // bounding box: anchors and labels use it, and every shape
 // stays inside it except the inversion bubble, which sits past
-// the output edge. A dimmed gate (outside the selected cone)
-// fills light grey; a selected gate outlines in blue.
+// the output edge. The schematic sits on a dark background, so
+// every shape is a white contour with no fill: a solid white
+// fill would be a white box on black. A dimmed gate (outside
+// the selected cone) outlines in grey; a selected gate
+// outlines in blue.
 void DrawGateShape(QGraphicsScene* scene, const QRectF& rect,
                    GateSymbol symbol, bool dimmed, bool selected) {
   const qreal left = rect.left();
@@ -74,17 +76,17 @@ void DrawGateShape(QGraphicsScene* scene, const QRectF& rect,
   const qreal top = rect.top();
   const qreal bottom = rect.bottom();
   const qreal middle = top + rect.height() / 2;
-  const QPen pen(selected ? Qt::blue : Qt::black, selected ? 2 : 1);
-  const QBrush brush(dimmed ? QColor(238, 238, 238) : Qt::white);
+  const QPen pen(selected ? Qt::blue : (dimmed ? Qt::gray : Qt::white),
+                 selected ? 2 : 1);
   auto add_shape = [&](const QPainterPath& path) {
-    auto* item = scene->addPath(path, pen, brush);
+    auto* item = scene->addPath(path, pen, Qt::NoBrush);
     Q_UNUSED(item);
   };
   switch (symbol) {
     case GateSymbol::kGeneric: {
       auto* item = scene->addRect(rect);
       item->setPen(pen);
-      item->setBrush(brush);
+      item->setBrush(Qt::NoBrush);
       break;
     }
     case GateSymbol::kAnd:
@@ -137,8 +139,32 @@ void DrawGateShape(QGraphicsScene* scene, const QRectF& rect,
         QRectF(right, middle - kBubbleRadius, 2 * kBubbleRadius,
                2 * kBubbleRadius));
     bubble->setPen(pen);
-    bubble->setBrush(brush);
+    bubble->setBrush(Qt::NoBrush);
   }
+}
+
+// Draws one parent terminal as an arrowhead pointing in the
+// signal direction (right, on both sides): the tip meets the
+// wire on the input side and points outward on the output
+// side. White contour, no fill, like the gates. The anchor is
+// the point on the arrowhead where the net attaches: the tip
+// for an input, the base center for an output.
+void DrawTerminalArrow(QGraphicsScene* scene, const QPointF& anchor,
+                       bool input_side) {
+  const qreal size = kSchematicTerminalSize;
+  const qreal half = size / 2;
+  QPainterPath path;
+  if (input_side) {
+    path.moveTo(anchor.x(), anchor.y());
+    path.lineTo(anchor.x() - size, anchor.y() - half);
+    path.lineTo(anchor.x() - size, anchor.y() + half);
+  } else {
+    path.moveTo(anchor.x(), anchor.y() - half);
+    path.lineTo(anchor.x(), anchor.y() + half);
+    path.lineTo(anchor.x() + size, anchor.y());
+  }
+  path.closeSubpath();
+  scene->addPath(path, QPen(Qt::white, 1), Qt::NoBrush);
 }
 
 std::string LastComponent(const std::string& path) {
@@ -258,7 +284,8 @@ void SchematicDiagram::RebuildScene() {
     } else if (view_.Hierarchy().Empty()) {
       text = "No hierarchy.";
     }
-    scene_->addSimpleText(QString::fromStdString(text));
+    scene_->addSimpleText(QString::fromStdString(text))
+        ->setBrush(QBrush(Qt::white));
     scene_->setSceneRect(scene_->itemsBoundingRect().adjusted(-20, -20, 20, 20));
     return;
   }
@@ -374,37 +401,42 @@ void SchematicDiagram::RebuildScene() {
       auto* instance_text = scene_->addSimpleText(
           QString::fromStdString(instance_label));
       instance_text->setFont(instance_font);
+      instance_text->setBrush(QBrush(Qt::white));
       instance_text->setPos(center_x(instance_metrics, instance_label),
                             placement.y + 8);
       auto* type_text = scene_->addSimpleText(
           QString::fromStdString(type_label));
       type_text->setFont(type_font);
+      type_text->setBrush(QBrush(Qt::white));
       type_text->setPos(center_x(type_metrics, type_label),
                         placement.y + 34);
     } else {
       auto* type_text = scene_->addSimpleText(
           QString::fromStdString(type_label));
       type_text->setFont(type_font);
+      type_text->setBrush(QBrush(Qt::white));
       type_text->setPos(center_x(type_metrics, type_label),
                         placement.y + 22);
     }
   }
 
   // Terminals: input ports left, output and inout ports right,
-  // stacked in declaration order on their side. The layout
-  // gives the anchor point on the square's outer edge; the
-  // square sits on the inner side of it.
+  // stacked in declaration order on their side. Each terminal
+  // draws as an arrowhead pointing in the signal direction,
+  // with the tip at the wire on the input side and pointing
+  // outward on the output side. The layout gives the anchor
+  // point where a net attaches: the tip for an input, the base
+  // center for an output.
   for (const SchematicTerminalPlacement& terminal : layout.terminals) {
+    DrawTerminalArrow(scene_, QPointF(terminal.x, terminal.y),
+                      terminal.input_side);
     const qreal x = terminal.input_side
                         ? terminal.x - kSchematicTerminalSize
                         : terminal.x;
     const qreal y = terminal.y - kSchematicTerminalSize / 2;
-    auto* square = scene_->addRect(
-        QRectF(x, y, kSchematicTerminalSize, kSchematicTerminalSize));
-    square->setPen(QPen(Qt::black, 1));
-    square->setBrush(QBrush(Qt::white));
     auto* label =
         scene_->addSimpleText(QString::fromStdString(terminal.name));
+    label->setBrush(QBrush(Qt::white));
     if (terminal.input_side) {
       label->setPos(x + kSchematicTerminalSize + 8, y);
     } else {
@@ -458,6 +490,7 @@ void SchematicDiagram::RebuildScene() {
                         (first[0].y + first[1].y) / 2);
       auto* label = scene_->addSimpleText(
           QString::fromStdString(route.label));
+      label->setBrush(QBrush(Qt::white));
       label->setPos(mid.x() + 4, mid.y() - 18);
     }
   }

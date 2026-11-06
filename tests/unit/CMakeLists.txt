@@ -297,6 +297,15 @@ if(Qt6_FOUND)
 endif()
 add_test(NAME ui.gui COMMAND eda_ui_gui_unit_test)
 
+if(EOS_HAVE_QT6)
+  # Widget rendering tests in gui_test.cc need the internal
+  # widget headers and a Qt build; without Qt the file stays
+  # Qt-free and the guarded tests compile out.
+  target_include_directories(eda_ui_gui_unit_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/ui/gui/internal)
+  target_compile_definitions(eda_ui_gui_unit_test PRIVATE EOS_GUI_HAVE_QT6=1)
+endif()
+
 # Icon assets: the committed iconset PNGs, the .icns, and the
 # Info.plist naming the icon. Pure file checks, no image tool.
 add_test(NAME ui.gui.icon

@@ -2,7 +2,6 @@
 #include "block_diagram.h"
 
 #include <QBrush>
-#include <QColor>
 #include <QFont>
 #include <QFontMetrics>
 #include <QGraphicsLineItem>
@@ -13,6 +12,7 @@
 #include <QGraphicsView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPainterPath>
 #include <QPen>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -76,12 +76,35 @@ struct Anchor {
   QPointF point;
   bool left_side;
   bool is_output;
+  // True for a parent terminal anchor: the point is on the
+  // terminal arrowhead, and a lone anchor's stub leaves from
+  // the arrowhead's outer point. False for a block-edge anchor,
+  // whose stub starts at the edge point itself.
+  bool is_terminal;
 };
 
 std::string LastComponent(const std::string& path) {
   const std::size_t slash = path.rfind('/');
   if (slash == std::string::npos) return path;
   return path.substr(slash + 1);
+}
+
+// Draws one parent terminal as an arrowhead pointing in the
+// signal direction (right, on both sides): the tip meets the
+// wire on the input side and points outward on the output
+// side. White contour, no fill, like the blocks. Returns the
+// point where a net attaches: the tip for an input, the base
+// center for an output.
+QPointF DrawTerminalArrow(QGraphicsScene* scene, qreal x, qreal y,
+                          bool input_side) {
+  QPainterPath path;
+  path.moveTo(x + kTerminalSize, y + kTerminalSize / 2);
+  path.lineTo(x, y);
+  path.lineTo(x, y + kTerminalSize);
+  path.closeSubpath();
+  scene->addPath(path, QPen(Qt::white, 1), Qt::NoBrush);
+  return input_side ? QPointF(x + kTerminalSize, y + kTerminalSize / 2)
+                    : QPointF(x, y + kTerminalSize / 2);
 }
 
 }  // namespace
@@ -169,7 +192,8 @@ void BlockDiagram::RebuildScene() {
     } else if (view_.Hierarchy().Empty()) {
       text = "No hierarchy.";
     }
-    scene_->addSimpleText(QString::fromStdString(text));
+    scene_->addSimpleText(QString::fromStdString(text))
+        ->setBrush(QBrush(Qt::white));
     scene_->setSceneRect(scene_->itemsBoundingRect().adjusted(-20, -20, 20, 20));
     return;
   }
@@ -208,25 +232,32 @@ void BlockDiagram::RebuildScene() {
         [this](const std::string& instance) {
           OnBlockDoubleClicked(instance);
         });
-    item->setPen(QPen(highlighted ? Qt::blue : Qt::black,
+    // Blocks are white contours with no fill: the diagram sits
+    // on a dark background, so a solid white fill would be a
+    // white box on black. A highlighted block outlines in blue.
+    item->setPen(QPen(highlighted ? Qt::blue : Qt::white,
                       highlighted ? 3 : 1));
-    item->setBrush(highlighted ? QBrush(QColor(220, 232, 255))
-                               : QBrush(Qt::white));
+    item->setBrush(Qt::NoBrush);
     item->setToolTip(QString::fromStdString(block.instance + " (" +
                                                   block.module + ")"));
     scene_->addItem(item);
     auto* instance_text = scene_->addSimpleText(
         QString::fromStdString(block.instance));
     instance_text->setFont(instance_font);
+    instance_text->setBrush(QBrush(Qt::white));
     instance_text->setPos(kBlockX + 10, y + 8);
     auto* module_text = scene_->addSimpleText(
         QString::fromStdString(block.module));
     module_text->setFont(module_font);
+    module_text->setBrush(QBrush(Qt::white));
     module_text->setPos(kBlockX + 10, y + 34);
   }
 
   // Terminals: input ports left, output and inout ports right,
-  // each list in declaration order.
+  // each list in declaration order. Each terminal draws as an
+  // arrowhead pointing in the signal direction; a net attaches
+  // at the tip for an input and at the base center for an
+  // output, so the wire never crosses the arrowhead.
   std::map<std::string, Anchor> terminal_anchors;
   std::size_t input_row = 0;
   std::size_t output_row = 0;
@@ -237,11 +268,10 @@ void BlockDiagram::RebuildScene() {
     const qreal y = kBlockTop + static_cast<qreal>(row) *
                                     (kBlockHeight + kBlockGap);
     const qreal x = input_side ? kInputX : kOutputX;
-    auto* square = scene_->addRect(
-        QRectF(x, y, kTerminalSize, kTerminalSize));
-    square->setPen(QPen(Qt::black, 1));
-    square->setBrush(QBrush(Qt::white));
+    const QPointF attach =
+        DrawTerminalArrow(scene_, x, y, input_side);
     auto* label = scene_->addSimpleText(QString::fromStdString(port.name));
+    label->setBrush(QBrush(Qt::white));
     if (input_side) {
       label->setPos(x + kTerminalSize + 8, y);
     } else {
@@ -250,8 +280,7 @@ void BlockDiagram::RebuildScene() {
       label->setPos(x - 8 - width, y);
     }
     terminal_anchors[port.name] = Anchor{
-        QPointF(x + kTerminalSize / 2, y + kTerminalSize / 2),
-        input_side, port.direction == "out"};
+        attach, input_side, port.direction == "out", true};
   }
 
   // Port anchors along block edges: input and inout ports on the
@@ -287,7 +316,7 @@ void BlockDiagram::RebuildScene() {
                     (static_cast<qreal>(index) + 1) * rect.height() /
                         (n + 1);
     const qreal x = left_side ? rect.left() : rect.right();
-    return Anchor{QPointF(x, y), left_side, is_output};
+    return Anchor{QPointF(x, y), left_side, is_output, false};
   };
 
   // Nets: a star from the driving output endpoint when one
@@ -305,12 +334,25 @@ void BlockDiagram::RebuildScene() {
     if (anchors.empty()) continue;
     if (anchors.size() == 1) {
       const Anchor& anchor = anchors[0];
-      const QPointF end(anchor.point.x() +
+      // The stub leaves from the outer point of the terminal
+      // symbol (the base for an input, the tip for an output),
+      // not the net attach point, so it never crosses the
+      // arrowhead. A block-edge anchor stubs from its own
+      // point: shifting it would leave a gap at the block.
+      const QPointF outer =
+          anchor.is_terminal
+              ? QPointF(anchor.point.x() +
+                            (anchor.left_side ? -kTerminalSize
+                                             : kTerminalSize),
+                        anchor.point.y())
+              : anchor.point;
+      const QPointF end(outer.x() +
                             (anchor.left_side ? -kStubLength : kStubLength),
-                        anchor.point.y());
-      scene_->addLine(QLineF(anchor.point, end));
+                        outer.y());
+      scene_->addLine(QLineF(outer, end));
       auto* label = scene_->addSimpleText(
           QString::fromStdString(net.name));
+      label->setBrush(QBrush(Qt::white));
       label->setPos(end.x() + (anchor.left_side ? -4 : 4) -
                         (anchor.left_side
                              ? module_metrics.horizontalAdvance(
@@ -334,6 +376,7 @@ void BlockDiagram::RebuildScene() {
     const QPointF mid((anchors[center].point.x() + anchors[other].point.x()) / 2,
                       (anchors[center].point.y() + anchors[other].point.y()) / 2);
     auto* label = scene_->addSimpleText(QString::fromStdString(net.name));
+    label->setBrush(QBrush(Qt::white));
     label->setPos(mid.x() + 4, mid.y() - 18);
   }
 

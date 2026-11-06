@@ -30,6 +30,10 @@ class BlockDiagram : public QWidget {
   // Called after any session change, via MainWindow::Refresh.
   void Refresh();
 
+  // Test seam: the scene this widget renders, for unit tests to
+  // inspect the drawn items. Read-only; the widget owns it.
+  const QGraphicsScene* Scene() const { return scene_; }
+
   // Called after a diagram click changes the selection or the
   // level, so the main window can refresh. Unset by default:
   // without it the diagram only updates the model.
