@@ -3001,6 +3001,59 @@ TEST(CoreCommands, HelpListsAndDescribesCommands) {
   EXPECT_FALSE(shell.Run("help", {"a", "b"}).ok);
 }
 
+TEST(CoreCommands, HelpWildcardPatterns) {
+  Shell shell;
+  const auto lines = [](const std::string& payload) {
+    return static_cast<std::size_t>(
+               std::count(payload.begin(), payload.end(), '\n')) +
+           1;
+  };
+  // "*tim*" matches every command whose name contains "tim", in
+  // registry order, one "name usage" line each.
+  const CommandResult tim = shell.Run("help", {"*tim*"});
+  ASSERT_TRUE(tim.ok) << tim.message;
+  EXPECT_EQ(lines(tim.payload), 6u);
+  for (const char* name :
+       {"check_timing", "close_timing", "report_timing", "run_timing",
+        "set_max_time_borrow", "repair_timing"}) {
+    EXPECT_NE(tim.payload.find(name), std::string::npos) << name;
+  }
+  EXPECT_EQ(tim.payload.find("create_clock"), std::string::npos);
+  // A trailing star only: names ending in "_timing" lose
+  // set_max_time_borrow, which ends in "borrow".
+  const CommandResult suffix = shell.Run("help", {"*_timing"});
+  ASSERT_TRUE(suffix.ok) << suffix.message;
+  EXPECT_EQ(lines(suffix.payload), 5u);
+  EXPECT_EQ(suffix.payload.find("set_max_time_borrow"),
+            std::string::npos);
+  EXPECT_NE(suffix.payload.find("repair_timing"), std::string::npos);
+  EXPECT_NE(suffix.payload.find("check_timing"), std::string::npos);
+  // "?" matches exactly one character.
+  const CommandResult one_char = shell.Run("help", {"?eport_timing"});
+  ASSERT_TRUE(one_char.ok) << one_char.message;
+  EXPECT_EQ(lines(one_char.payload), 1u);
+  EXPECT_NE(one_char.payload.find("report_timing [-delay_type"),
+            std::string::npos);
+  // "*" alone lists everything, same as no argument.
+  const CommandResult all = shell.Run("help", {});
+  const CommandResult star = shell.Run("help", {"*"});
+  ASSERT_TRUE(star.ok) << star.message;
+  EXPECT_EQ(star.payload, all.payload);
+  // The "eos::" prefix is stripped before matching.
+  const CommandResult prefixed = shell.Run("help", {"eos::*tim*"});
+  ASSERT_TRUE(prefixed.ok) << prefixed.message;
+  EXPECT_EQ(prefixed.payload, tim.payload);
+  // No match fails with the no-match message.
+  const CommandResult none = shell.Run("help", {"bogus*"});
+  EXPECT_FALSE(none.ok);
+  EXPECT_EQ(none.diag, Diag::kInvalidCommand);
+  EXPECT_NE(none.message.find("no commands match: bogus*"),
+            std::string::npos);
+  const CommandResult leading = shell.Run("help", {"tim*"});
+  EXPECT_FALSE(leading.ok);
+  EXPECT_EQ(leading.diag, Diag::kInvalidCommand);
+}
+
 TEST(CoreCommands, ReportTimingHelpFlags) {
   Shell shell;
   for (const char* flag : {"-help", "--help", "-h"}) {

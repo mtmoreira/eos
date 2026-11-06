@@ -99,6 +99,33 @@ bool ParseU64(const std::string& token, std::uint64_t& out) {
   return result.ec == std::errc() && result.ptr == last;
 }
 
+// Glob match for eos::help patterns: '*' matches any run of
+// characters, '?' matches exactly one character. Case-sensitive,
+// like the exact command lookup.
+bool GlobMatches(const std::string& pattern, const std::string& name) {
+  std::size_t p = 0;
+  std::size_t n = 0;
+  std::size_t star_p = std::string::npos;
+  std::size_t star_n = 0;
+  while (n < name.size()) {
+    if (p < pattern.size() &&
+        (pattern[p] == '?' || pattern[p] == name[n])) {
+      ++p;
+      ++n;
+    } else if (p < pattern.size() && pattern[p] == '*') {
+      star_p = p++;
+      star_n = n;
+    } else if (star_p != std::string::npos) {
+      p = star_p + 1;
+      n = ++star_n;
+    } else {
+      return false;
+    }
+  }
+  while (p < pattern.size() && pattern[p] == '*') ++p;
+  return p == pattern.size();
+}
+
 // Database-unit coordinates may be negative (a die area need not
 // start at the origin), so floorplan areas parse as signed ints,
 // unlike the unsigned counts ParseU64 serves elsewhere.
@@ -5710,16 +5737,19 @@ void RegisterCoreCommands(CommandRegistry& registry) {
 
   // Per-command help. With no argument it prints every command's
   // usage line, the same list list_commands prints; with a command
-  // name it prints just that command's usage. The "eos::" namespace
-  // prefix is accepted and stripped. This is the discoverability
-  // entry point the shell's tab completion points at: list_commands
-  // stays as the script-friendly full listing.
-  add("help", "help [command]",
+  // name it prints just that command's usage; with a glob pattern
+  // ('*' for any run of characters, '?' for one character) it
+  // prints the usage line for every matching command, in registry
+  // order. The "eos::" namespace prefix is accepted and stripped.
+  // This is the discoverability entry point the shell's tab
+  // completion points at: list_commands stays as the script-friendly
+  // full listing.
+  add("help", "help [command|pattern]",
       [&registry](CommandContext&, const std::vector<std::string>& args)
           -> CommandResult {
         if (args.size() > 1) {
           return CommandResult::Fail(Diag::kInvalidConfiguration,
-                                     "usage: eos::help [command]");
+                                     "usage: eos::help [command|pattern]");
         }
         if (args.empty()) {
           std::string out;
@@ -5733,12 +5763,28 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (name.rfind("eos::", 0) == 0) {
           name = name.substr(5);
         }
-        const CommandInfo* info = registry.Find(name);
-        if (info == nullptr) {
-          return CommandResult::Fail(Diag::kInvalidCommand,
-                                     "unknown command: " + args[0]);
+        const bool wildcard =
+            name.find('*') != std::string::npos ||
+            name.find('?') != std::string::npos;
+        if (!wildcard) {
+          const CommandInfo* info = registry.Find(name);
+          if (info == nullptr) {
+            return CommandResult::Fail(Diag::kInvalidCommand,
+                                       "unknown command: " + args[0]);
+          }
+          return CommandResult::Ok(info->name + " " + info->usage);
         }
-        return CommandResult::Ok(info->name + " " + info->usage);
+        std::string out;
+        for (const std::string& candidate : registry.Names()) {
+          if (!GlobMatches(name, candidate)) continue;
+          if (!out.empty()) out += "\n";
+          out += candidate + " " + registry.Find(candidate)->usage;
+        }
+        if (out.empty()) {
+          return CommandResult::Fail(Diag::kInvalidCommand,
+                                     "no commands match: " + args[0]);
+        }
+        return CommandResult::Ok(out);
       });
 
   add("list_commands", "list_commands",
