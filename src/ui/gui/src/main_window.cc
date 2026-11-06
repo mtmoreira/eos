@@ -114,10 +114,12 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   // entry arrives in U6: the line below the transcript takes one
   // registry command per Return, dispatches it through the
   // session, and refreshes the window, so each effect is visible
-  // live. The entry takes registry commands only, not Tcl; the
-  // terminal REPL keeps full Tcl. Up and down cycle the entry's
-  // own command history; Tab completes the registry command
-  // name, with a popup when several names match.
+  // live; a pasted submission holding several commands runs
+  // each in turn, and the transcript shows every command with
+  // its outcome. The entry takes registry commands only, not
+  // Tcl; the terminal REPL keeps full Tcl. Up and down cycle
+  // the entry's own command history; Tab completes the registry
+  // command name, with a popup when several names match.
   console_ = new QPlainTextEdit(root);
   console_->setReadOnly(true);
   layout->addWidget(console_);
@@ -138,13 +140,6 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
     if (entry_completer_->popup()->isVisible()) {
       entry_completer_->popup()->hide();
     }
-  });
-  connect(entry_, &QLineEdit::returnPressed, [this]() {
-    const std::string text = entry_->text().toStdString();
-    entry_history_.Add(text);
-    view_.DispatchEntry(text);
-    entry_->clear();
-    Refresh();
   });
   layout->addWidget(entry_);
 
@@ -178,12 +173,25 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
   if (watched != entry_ || event->type() != QEvent::KeyPress) {
     return QMainWindow::eventFilter(watched, event);
   }
+  const auto* key = static_cast<QKeyEvent*>(event);
+  // Return always submits the entry, even while the completion
+  // popup is open: the completer would otherwise accept the
+  // highlighted completion and swallow the key, leaving the
+  // submission silently unrun. Tab is the completion key, and
+  // the popup is hidden first so it never lingers over the
+  // refreshed transcript.
+  if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+    if (entry_completer_->popup()->isVisible()) {
+      entry_completer_->popup()->hide();
+    }
+    SubmitEntry();
+    return true;
+  }
   // While the completion popup is open, its own keys navigate
   // and accept; this filter stays out of the way.
   if (entry_completer_->popup()->isVisible()) {
     return QMainWindow::eventFilter(watched, event);
   }
-  const auto* key = static_cast<QKeyEvent*>(event);
   if (key->key() == Qt::Key_Up) {
     std::optional<std::string> older =
         entry_history_.Up(entry_->text().toStdString());
@@ -259,6 +267,14 @@ void MainWindow::RefreshConsole() {
     text += '\n';
   }
   console_->setPlainText(QString::fromStdString(text));
+}
+
+void MainWindow::SubmitEntry() {
+  const std::string text = entry_->text().toStdString();
+  entry_history_.Add(text);
+  view_.DispatchEntry(text);
+  entry_->clear();
+  Refresh();
 }
 
 }  // namespace eos::ui

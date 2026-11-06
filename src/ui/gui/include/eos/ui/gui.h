@@ -33,11 +33,13 @@ enum class StepStatus {
 // the schematic model for a leaf level, and the right panels
 // model with the dispatch message log. Dispatching a command runs it on the shared
 // context (so widgets reading the context see the effect) and
-// records the echo line, including for commands the registry
-// rejects: the console shows what was attempted, not only what
-// succeeded. A rejected dispatch also records a message line,
-// so the Messages panel shows the failure and its diagnostic
-// instead of only the attempt.
+// records the echo line followed by its outcome in the console
+// transcript: the result payload lines on success, the
+// diagnostic line on failure. A rejected dispatch also records
+// the diagnostic line in Messages, so the Messages panel shows
+// the failure and its diagnostic, and the transcript shows it
+// too: the console reports every outcome where the user typed
+// the command, never only in another tab.
 class SessionView {
  public:
   SessionView(CommandRegistry& registry, CommandContext& context)
@@ -46,12 +48,16 @@ class SessionView {
   CommandResult Dispatch(const std::string& name,
                          const std::vector<std::string>& args);
 
-  // Dispatches one console line (U6): parses it with
-  // ParseConsoleLine and dispatches the command, so the console
-  // entry and the terminal REPL drive the session through the
-  // same path. A blank or comment line is a no-op and records
-  // nothing. A malformed line echoes the raw line and records a
-  // message, exactly like a rejected dispatch.
+  // Dispatches one submitted console text (U6): splits it into
+  // command segments with SplitConsoleSegments and dispatches
+  // each, so a multi-command paste runs every line instead of
+  // jamming them into one command's arguments, and a lone
+  // command runs exactly as before. A blank or comment segment
+  // is a no-op and records nothing. A malformed segment echoes
+  // the raw segment and records its diagnostic, exactly like a
+  // rejected dispatch. Returns the first failure when any
+  // segment fails, else the last segment's result; Ok with an
+  // empty payload when no segment ran.
   CommandResult DispatchEntry(const std::string& line);
 
   // Registry command names in registry order, for the console
@@ -67,6 +73,13 @@ class SessionView {
   // the design it belonged to is gone.
   const std::string& CheckpointName() const { return checkpoint_; }
 
+  // The console transcript: one echo line per dispatched
+  // command, each followed by its outcome lines (the result
+  // payload lines on success, the diagnostic line on failure),
+  // in dispatch order. A command with an empty payload shows
+  // only its echo line. RefreshConsole renders this verbatim,
+  // so the transcript is the record of what was attempted and
+  // what came of it.
   const std::vector<std::string>& EchoLog() const { return echo_; }
   CommandContext& context() { return context_; }
   const CommandContext& context() const { return context_; }

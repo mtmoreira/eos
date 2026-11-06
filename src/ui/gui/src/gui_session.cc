@@ -27,6 +27,23 @@ std::string QuoteArg(const std::string& arg) {
   return out;
 }
 
+// Appends one result payload to the echo log, one line per
+// payload line. A payload is key=value lines; a trailing
+// newline leaves no empty line behind, and an empty payload
+// appends nothing: a command with nothing to report shows
+// only its echo line.
+void AppendPayloadLines(std::vector<std::string>& echo,
+                        const std::string& payload) {
+  std::size_t i = 0;
+  const std::size_t n = payload.size();
+  while (i < n) {
+    std::size_t j = payload.find('\n', i);
+    if (j == std::string::npos) j = n;
+    if (j > i) echo.push_back(payload.substr(i, j - i));
+    i = j + 1;
+  }
+}
+
 }  // namespace
 
 std::string SessionView::EchoLine(const std::string& name,
@@ -45,26 +62,54 @@ CommandResult SessionView::Dispatch(const std::string& name,
   echo_.push_back(line);
   CommandResult result = registry_.Dispatch(context_, name, args);
   if (!result.ok) {
-    messages_.push_back(line + ": EOS " + DiagName(result.diag) + ": " +
-                        result.message);
-  } else if (name == "checkpoint" || name == "restore") {
-    if (args.size() == 1) checkpoint_ = args[0];
-  } else if (name == "close_design") {
-    checkpoint_.clear();
+    const std::string error = line + ": EOS " + DiagName(result.diag) +
+                              ": " + result.message;
+    messages_.push_back(error);
+    echo_.push_back(error);
+  } else {
+    AppendPayloadLines(echo_, result.payload);
+    if (name == "checkpoint" || name == "restore") {
+      if (args.size() == 1) checkpoint_ = args[0];
+    } else if (name == "close_design") {
+      checkpoint_.clear();
+    }
   }
   return result;
 }
 
 CommandResult SessionView::DispatchEntry(const std::string& line) {
-  const ConsoleLine parsed = ParseConsoleLine(line);
-  if (!parsed.ok) {
-    echo_.push_back(line);
-    messages_.push_back(line + ": EOS " + DiagName(Diag::kInvalidCommand) +
-                        ": " + parsed.error);
-    return CommandResult::Fail(Diag::kInvalidCommand, parsed.error);
+  const std::vector<std::string> segments =
+      SplitConsoleSegments(line, registry_.Names());
+  CommandResult aggregate = CommandResult::Ok("");
+  bool saw_failure = false;
+  for (const std::string& segment : segments) {
+    const ConsoleLine parsed = ParseConsoleLine(segment);
+    if (!parsed.ok) {
+      const std::string error =
+          segment + ": EOS " + DiagName(Diag::kInvalidCommand) + ": " +
+          parsed.error;
+      echo_.push_back(segment);
+      messages_.push_back(error);
+      echo_.push_back(error);
+      if (!saw_failure) {
+        aggregate =
+            CommandResult::Fail(Diag::kInvalidCommand, parsed.error);
+        saw_failure = true;
+      }
+      continue;
+    }
+    if (parsed.name.empty()) continue;
+    CommandResult result = Dispatch(parsed.name, parsed.args);
+    if (!result.ok) {
+      if (!saw_failure) {
+        aggregate = result;
+        saw_failure = true;
+      }
+    } else if (!saw_failure) {
+      aggregate = result;
+    }
   }
-  if (parsed.name.empty()) return CommandResult::Ok("");
-  return Dispatch(parsed.name, parsed.args);
+  return aggregate;
 }
 
 void SessionView::RefreshHierarchy() {

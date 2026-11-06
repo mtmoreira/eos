@@ -69,8 +69,9 @@ TEST(GuiSessionView, DispatchEchoesAndRuns) {
   const CommandResult result = view.Dispatch("ping", {});
   EXPECT_TRUE(result.ok);
   EXPECT_EQ(result.payload, "pong=1");
-  ASSERT_EQ(view.EchoLog().size(), 1u);
+  ASSERT_EQ(view.EchoLog().size(), 2u);
   EXPECT_EQ(view.EchoLog()[0], "eos::ping");
+  EXPECT_EQ(view.EchoLog()[1], "pong=1");
 }
 
 TEST(GuiSessionView, DispatchQuotesArgsWithSpaces) {
@@ -80,8 +81,9 @@ TEST(GuiSessionView, DispatchQuotesArgsWithSpaces) {
   SessionView view(registry, context);
   const CommandResult result = view.Dispatch("ping", {"a b", "plain"});
   EXPECT_TRUE(result.ok);
-  ASSERT_EQ(view.EchoLog().size(), 1u);
+  ASSERT_EQ(view.EchoLog().size(), 2u);
   EXPECT_EQ(view.EchoLog()[0], "eos::ping \"a b\" plain");
+  EXPECT_EQ(view.EchoLog()[1], "pong=1");
 }
 
 TEST(GuiSessionView, DispatchUnknownStillEchoed) {
@@ -90,8 +92,10 @@ TEST(GuiSessionView, DispatchUnknownStillEchoed) {
   SessionView view(registry, context);
   const CommandResult result = view.Dispatch("nope", {});
   EXPECT_FALSE(result.ok);
-  ASSERT_EQ(view.EchoLog().size(), 1u);
+  ASSERT_EQ(view.EchoLog().size(), 2u);
   EXPECT_EQ(view.EchoLog()[0], "eos::nope");
+  EXPECT_EQ(view.EchoLog()[1],
+            "eos::nope: EOS invalid_command: unknown command: eos::nope");
 }
 
 TEST(GuiSessionView, StepStatesFollowSessionFlags) {
@@ -1585,8 +1589,9 @@ TEST(GuiSessionView, DispatchRecordsMessageOnFailure) {
   ASSERT_EQ(view.Messages().size(), 1u);
   EXPECT_EQ(view.Messages()[0],
             "eos::nope: EOS invalid_command: unknown command: eos::nope");
-  ASSERT_EQ(view.EchoLog().size(), 1u);
+  ASSERT_EQ(view.EchoLog().size(), 2u);
   EXPECT_EQ(view.EchoLog()[0], "eos::nope");
+  EXPECT_EQ(view.EchoLog()[1], view.Messages()[0]);
 }
 
 TEST(GuiSessionView, DispatchRecordsNoMessageOnSuccess) {
@@ -1662,8 +1667,9 @@ TEST(GuiSessionView, DispatchEntryRunsAndEchoes) {
   const CommandResult result =
       view.DispatchEntry("eos::ping \"a b\" plain");
   EXPECT_TRUE(result.ok);
-  ASSERT_EQ(view.EchoLog().size(), 1u);
+  ASSERT_EQ(view.EchoLog().size(), 2u);
   EXPECT_EQ(view.EchoLog()[0], "eos::ping \"a b\" plain");
+  EXPECT_EQ(view.EchoLog()[1], "pong=1");
 }
 
 TEST(GuiSessionView, DispatchEntryBlankRecordsNothing) {
@@ -1682,11 +1688,105 @@ TEST(GuiSessionView, DispatchEntryMalformedEchoesAndMessages) {
   SessionView view(registry, context);
   const CommandResult result = view.DispatchEntry("ping \"abc");
   EXPECT_FALSE(result.ok);
-  ASSERT_EQ(view.EchoLog().size(), 1u);
+  ASSERT_EQ(view.EchoLog().size(), 2u);
   EXPECT_EQ(view.EchoLog()[0], "ping \"abc");
+  EXPECT_EQ(view.EchoLog()[1],
+            "ping \"abc: EOS invalid_command: unterminated quote");
   ASSERT_EQ(view.Messages().size(), 1u);
   EXPECT_EQ(view.Messages()[0],
             "ping \"abc: EOS invalid_command: unterminated quote");
+}
+
+TEST(GuiSessionView, DispatchEntryMultiLineRunsEach) {
+  CommandRegistry registry;
+  RegisterPing(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  const CommandResult result =
+      view.DispatchEntry("eos::ping a\neos::ping b");
+  EXPECT_TRUE(result.ok);
+  ASSERT_EQ(view.EchoLog().size(), 4u);
+  EXPECT_EQ(view.EchoLog()[0], "eos::ping a");
+  EXPECT_EQ(view.EchoLog()[1], "pong=1");
+  EXPECT_EQ(view.EchoLog()[2], "eos::ping b");
+  EXPECT_EQ(view.EchoLog()[3], "pong=1");
+}
+
+TEST(GuiSessionView, DispatchEntryPastedBlobRunsEach) {
+  CommandRegistry registry;
+  RegisterPing(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  const CommandResult result =
+      view.DispatchEntry("eos::ping a eos::ping b eos::ping c");
+  EXPECT_TRUE(result.ok);
+  ASSERT_EQ(view.EchoLog().size(), 6u);
+  EXPECT_EQ(view.EchoLog()[0], "eos::ping a");
+  EXPECT_EQ(view.EchoLog()[1], "pong=1");
+  EXPECT_EQ(view.EchoLog()[2], "eos::ping b");
+  EXPECT_EQ(view.EchoLog()[3], "pong=1");
+  EXPECT_EQ(view.EchoLog()[4], "eos::ping c");
+  EXPECT_EQ(view.EchoLog()[5], "pong=1");
+}
+
+TEST(GuiSessionView, DispatchEntryContinuesPastFailure) {
+  CommandRegistry registry;
+  RegisterPing(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  const CommandResult result =
+      view.DispatchEntry("eos::ping a\neos::nope\neos::ping b");
+  EXPECT_FALSE(result.ok);
+  ASSERT_EQ(view.EchoLog().size(), 6u);
+  EXPECT_EQ(view.EchoLog()[0], "eos::ping a");
+  EXPECT_EQ(view.EchoLog()[1], "pong=1");
+  EXPECT_EQ(view.EchoLog()[2], "eos::nope");
+  EXPECT_EQ(view.EchoLog()[3],
+            "eos::nope: EOS invalid_command: unknown command: eos::nope");
+  EXPECT_EQ(view.EchoLog()[4], "eos::ping b");
+  EXPECT_EQ(view.EchoLog()[5], "pong=1");
+}
+
+TEST(GuiSessionView, DispatchEntryBareMultiCommandReportsError) {
+  CommandRegistry registry;
+  auto status = registry.Register(
+      "one", "one <arg>",
+      [](CommandContext&, const std::vector<std::string>& args) {
+        if (args.size() != 1) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidCommand,
+                                     "want 1 arg");
+        }
+        return CommandResult::Ok("got=" + args[0]);
+      });
+  EXPECT_TRUE(status.ok());
+  CommandContext context;
+  SessionView view(registry, context);
+  // Bare command names never start a segment, so the blob parses
+  // as one command with too many arguments: it must fail loudly
+  // in the transcript, never silently do nothing.
+  const CommandResult result = view.DispatchEntry("one a one b");
+  EXPECT_FALSE(result.ok);
+  ASSERT_EQ(view.EchoLog().size(), 2u);
+  EXPECT_EQ(view.EchoLog()[0], "eos::one a one b");
+  EXPECT_EQ(view.EchoLog()[1],
+            "eos::one a one b: EOS invalid_command: want 1 arg");
+}
+
+TEST(GuiSessionView, DispatchEntryShowsMultiLinePayload) {
+  CommandRegistry registry;
+  auto status = registry.Register(
+      "multi", "multi",
+      [](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Ok("a=1\nb=2\n");
+      });
+  EXPECT_TRUE(status.ok());
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_TRUE(view.DispatchEntry("multi").ok);
+  ASSERT_EQ(view.EchoLog().size(), 3u);
+  EXPECT_EQ(view.EchoLog()[0], "eos::multi");
+  EXPECT_EQ(view.EchoLog()[1], "a=1");
+  EXPECT_EQ(view.EchoLog()[2], "b=2");
 }
 
 void RegisterCheckpointStubs(CommandRegistry& registry) {
@@ -1813,5 +1913,58 @@ TEST(SplashMinimumVisible, NegativeElapsedCountsAsZero) {
   EXPECT_EQ(eos::ui::SplashScreen::RemainingVisibleMs(-5), 2000);
 }
 #endif
+
+TEST(ConsoleEntry, SplitSegmentsOnNewlines) {
+  const std::vector<std::string> names = {"ping", "elaborate"};
+  const std::vector<std::string> got = eos::ui::SplitConsoleSegments(
+      "eos::ping a\neos::elaborate\n", names);
+  ASSERT_EQ(got.size(), 2u);
+  EXPECT_EQ(got[0], "eos::ping a");
+  EXPECT_EQ(got[1], "eos::elaborate");
+}
+
+TEST(ConsoleEntry, SplitSegmentsOnEosMarkers) {
+  const std::vector<std::string> names = {"ping", "elaborate"};
+  const std::vector<std::string> got = eos::ui::SplitConsoleSegments(
+      "eos::ping a eos::elaborate", names);
+  ASSERT_EQ(got.size(), 2u);
+  EXPECT_EQ(got[0], "eos::ping a");
+  EXPECT_EQ(got[1], "eos::elaborate");
+}
+
+TEST(ConsoleEntry, SplitSegmentsIgnoresQuotedMarkers) {
+  const std::vector<std::string> names = {"ping", "elaborate"};
+  const std::vector<std::string> got = eos::ui::SplitConsoleSegments(
+      "ping \"eos::elaborate\" eos::ping", names);
+  ASSERT_EQ(got.size(), 2u);
+  EXPECT_EQ(got[0], "ping \"eos::elaborate\"");
+  EXPECT_EQ(got[1], "eos::ping");
+}
+
+TEST(ConsoleEntry, SplitSegmentsIgnoresUnknownMarkers) {
+  const std::vector<std::string> names = {"ping"};
+  const std::vector<std::string> got = eos::ui::SplitConsoleSegments(
+      "eos::nope eos::ping", names);
+  ASSERT_EQ(got.size(), 2u);
+  EXPECT_EQ(got[0], "eos::nope");
+  EXPECT_EQ(got[1], "eos::ping");
+}
+
+TEST(ConsoleEntry, SplitSegmentsIgnoresBareNames) {
+  const std::vector<std::string> names = {"ping", "elaborate"};
+  const std::vector<std::string> got =
+      eos::ui::SplitConsoleSegments("ping a elaborate", names);
+  ASSERT_EQ(got.size(), 1u);
+  EXPECT_EQ(got[0], "ping a elaborate");
+}
+
+TEST(ConsoleEntry, SplitSegmentsDropsBlanks) {
+  const std::vector<std::string> names = {"ping"};
+  EXPECT_TRUE(eos::ui::SplitConsoleSegments("   \n\n", names).empty());
+  const std::vector<std::string> got =
+      eos::ui::SplitConsoleSegments("\neos::ping\n\n", names);
+  ASSERT_EQ(got.size(), 1u);
+  EXPECT_EQ(got[0], "eos::ping");
+}
 
 }  // namespace

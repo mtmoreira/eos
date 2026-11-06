@@ -58,14 +58,24 @@ class MainWindow : public QMainWindow {
 
   // Console entry keys: up and down cycle the entry's command
   // history, Tab completes the registry command name (a popup
-  // lists multiple matches). While the completion popup is
-  // open, its own keys navigate and accept, and this filter
+  // lists multiple matches). Return always submits the entry
+  // text, even while the completion popup is open: Tab is the
+  // completion key, and letting the completer swallow Return
+  // left submissions silently unrun. While the completion popup
+  // is open, its other keys navigate and accept, and this filter
   // stays out of the way.
   bool eventFilter(QObject* watched, QEvent* event) override;
 
  private:
   void RefreshSteps();
   void RefreshConsole();
+
+  // Submits the console entry text: records it in the entry's
+  // history, dispatches it through the session, clears the
+  // entry, and refreshes the window, so each effect is visible
+  // live. The one submit path for both the Return key and the
+  // completion-popup case.
+  void SubmitEntry();
 
   SessionView& view_;
   QPushButton* step_buttons_[3];
