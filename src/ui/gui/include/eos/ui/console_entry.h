@@ -45,17 +45,19 @@ std::vector<std::string> SplitConsoleSegments(
 
 // Up and down history for the GUI console entry (Qt-free, so it
 // is unit-testable; the widget only forwards keys to it). The
-// history is in-session only: the console takes registry
-// commands, not Tcl, so its lines are never written to the
-// terminal shell's .eos_history file, where a bare name would
-// fail as Tcl. Add records a dispatched line; empty lines and
-// consecutive duplicates are ignored. Up returns the older
-// entry, clamped at the oldest; Down returns the newer entry,
-// and past the newest it returns the draft text that was in
-// the entry when navigation started, ending navigation. Down
-// while not navigating returns nullopt, and Up on empty
-// history returns nullopt. Either way, nullopt means the widget
-// leaves the entry text unchanged.
+// entry's own history is in-session only, but each submitted line
+// is also fed to the shared history file in normalized "eos::"
+// form by the session view (see SessionView::SetHistorySink),
+// so the terminal REPL can recall it: a bare name would fail as
+// Tcl, which is why the shared copy carries the eos:: prefix.
+// Add records a dispatched line; empty lines and consecutive
+// duplicates are ignored. Up returns the older entry, clamped at
+// the oldest; Down returns the newer entry, and past the newest
+// it returns the draft text that was in the entry when
+// navigation started, ending navigation. Down while not
+// navigating returns nullopt, and Up on empty history returns
+// nullopt. Either way, nullopt means the widget leaves the entry
+// text unchanged.
 class ConsoleHistory {
  public:
   void Add(const std::string& line);

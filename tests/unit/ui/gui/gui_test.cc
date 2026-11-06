@@ -1789,6 +1789,43 @@ TEST(GuiSessionView, DispatchEntryShowsMultiLinePayload) {
   EXPECT_EQ(view.EchoLog()[2], "b=2");
 }
 
+// The history sink gets every successfully parsed console line in
+// normalized eos:: form (the echo line), including a dispatch the
+// registry rejects, so the terminal REPL can recall it; a bare
+// name is prefixed, since it would fail as Tcl.
+TEST(GuiSessionView, DispatchEntryFeedsHistorySinkNormalized) {
+  CommandRegistry registry;
+  RegisterPing(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  std::vector<std::string> fed;
+  view.SetHistorySink(
+      [&fed](const std::string& line) { fed.push_back(line); });
+  EXPECT_TRUE(view.DispatchEntry("ping \"a b\" plain").ok);
+  EXPECT_TRUE(view.DispatchEntry("eos::ping").ok);
+  EXPECT_FALSE(view.DispatchEntry("nope").ok);
+  ASSERT_EQ(fed.size(), 3u);
+  EXPECT_EQ(fed[0], "eos::ping \"a b\" plain");
+  EXPECT_EQ(fed[1], "eos::ping");
+  EXPECT_EQ(fed[2], "eos::nope");
+}
+
+// Blank, comment, and malformed lines never reach the sink: only
+// a line parsed into a command is shared.
+TEST(GuiSessionView, DispatchEntrySkipsSinkForBlankCommentAndMalformed) {
+  CommandRegistry registry;
+  RegisterPing(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  std::vector<std::string> fed;
+  view.SetHistorySink(
+      [&fed](const std::string& line) { fed.push_back(line); });
+  EXPECT_TRUE(view.DispatchEntry("   ").ok);
+  EXPECT_TRUE(view.DispatchEntry("# comment").ok);
+  EXPECT_FALSE(view.DispatchEntry("ping \"abc").ok);
+  EXPECT_TRUE(fed.empty());
+}
+
 void RegisterCheckpointStubs(CommandRegistry& registry) {
   auto one_arg = [](CommandContext&, const std::vector<std::string>& args) {
     if (args.size() != 1) {

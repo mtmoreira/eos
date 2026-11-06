@@ -10,6 +10,7 @@
 #ifndef EOS_UI_GUI_H_
 #define EOS_UI_GUI_H_
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -59,6 +60,17 @@ class SessionView {
   // segment fails, else the last segment's result; Ok with an
   // empty payload when no segment ran.
   CommandResult DispatchEntry(const std::string& line);
+
+  // History sink: when set, every successfully parsed console
+  // line is handed to it in normalized "eos::<name> ..." form
+  // (the echo line), so the terminal REPL can recall it with
+  // up-arrow. The GUI entry point sets it to the shell's shared
+  // history; unset, the console keeps its own in-session history
+  // only. Blank, comment, and malformed lines never reach the
+  // sink: only a line parsed into a command is shared, whether
+  // or not the dispatch itself succeeds.
+  using HistorySink = std::function<void(const std::string&)>;
+  void SetHistorySink(HistorySink sink) { history_sink_ = std::move(sink); }
 
   // Registry command names in registry order, for the console
   // entry's tab completion.
@@ -206,6 +218,7 @@ class SessionView {
 
   CommandRegistry& registry_;
   CommandContext& context_;
+  HistorySink history_sink_;
   std::vector<std::string> echo_;
   std::vector<std::string> messages_;
   std::string checkpoint_;
