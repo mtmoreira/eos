@@ -29,6 +29,11 @@
 #include "eos/ui/tcl_shell.h"
 #include "eos_icon_png.h"
 #include "main_window.h"
+#include "splash_screen.h"
+
+// Qt resource initializer generated from resources/splash.qrc
+// (global namespace; see the call site in RunGui).
+extern void qInitResources_splash();
 
 namespace eos::ui {
 
@@ -59,9 +64,50 @@ int RunGui(int argc, char** argv, CommandRegistry& registry,
   if (icon_pixmap.loadFromData(kEosIconPng, kEosIconPngSize, "PNG")) {
     app.setWindowIcon(QIcon(icon_pixmap));
   }
+  // The splash artwork lives in a static library, so the linker
+  // would otherwise drop the resource object as unreferenced and
+  // the splash would be silently skipped. This call forces it in,
+  // registering :/eos/eos-logo-dark.png before it is loaded.
+  // Qt generates qInitResources_splash in the global namespace,
+  // so it is declared at file scope and called qualified: the
+  // Q_INIT_RESOURCE macro cannot be used here, because a
+  // block-scope extern inside namespace eos::ui would declare
+  // eos::ui::qInitResources_splash instead, which does not exist.
+  ::qInitResources_splash();
+  // Splash: shown before the main window, closed once the
+  // window is ready AND the banner has been visible for at
+  // least 2 seconds (FinishWhenReady enforces the minimum;
+  // the close never blocks the GUI thread). Each stage is a
+  // real startup step below, never a timed animation. A
+  // missing logo resource skips the splash entirely; startup
+  // proceeds exactly as before. eos-gui always opens a window,
+  // so there is no headless mode in which the splash could block.
+  SplashScreen* splash = nullptr;
+  const QPixmap logo(":/eos/eos-logo-dark.png");
+  if (!logo.isNull()) {
+    splash = new SplashScreen(logo);
+    splash->show();
+    app.processEvents();
+  }
+  auto set_stage = [&](const char* message, int percent) {
+    if (splash != nullptr) {
+      splash->SetStage(message, percent);
+      app.processEvents();
+    }
+  };
+  set_stage("Starting session...", 10);
   SessionView view(registry, context);
+  set_stage("Building interface...", 50);
   MainWindow window(view);
+  set_stage("Opening window...", 90);
   window.show();
+  if (splash != nullptr) {
+    // FinishWhenReady owns the close from here: it finishes
+    // at once when the 2-second minimum already passed, or
+    // after the remainder on the event loop, and deletes the
+    // splash itself. Do not touch splash after this call.
+    splash->FinishWhenReady(&window);
+  }
 
   std::thread repl;
   if (shell != nullptr) {
