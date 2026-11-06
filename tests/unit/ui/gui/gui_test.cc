@@ -1,4 +1,5 @@
-// gui: SessionView unit tests (Qt-free; no engines needed).
+// gui: SessionView unit tests (Qt-free except the guarded
+// splash timing tests below; no engines needed).
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -11,6 +12,10 @@
 #include "eos/ui/registry.h"
 #include "eos/ui/schematic.h"
 #include "gtest/gtest.h"
+
+#ifdef EOS_UI_GUI_HAVE_QT6
+#include "splash_screen.h"
+#endif
 
 namespace {
 
@@ -1783,5 +1788,30 @@ TEST(ConsoleCompletion, EmptyWordMatchesAllAndArgumentsMatchNone) {
   EXPECT_TRUE(eos::ui::CompleteConsoleCommand(names, "elaborate foo").empty());
   EXPECT_TRUE(eos::ui::CompleteConsoleCommand(names, "zzz").empty());
 }
+
+#ifdef EOS_UI_GUI_HAVE_QT6
+// The splash minimum-visible seam is pure arithmetic on the
+// SplashScreen class, so it is testable without constructing
+// a widget (no QApplication needed here). The full close path
+// (timer fires, splash finishes and deletes itself) runs only
+// inside RunGui on the real event loop.
+TEST(SplashMinimumVisible, WaitsTheFullMinimumWhenJustShown) {
+  EXPECT_EQ(eos::ui::SplashScreen::kMinimumVisibleMs, 2000);
+  EXPECT_EQ(eos::ui::SplashScreen::RemainingVisibleMs(0), 2000);
+  EXPECT_EQ(eos::ui::SplashScreen::RemainingVisibleMs(1), 1999);
+  EXPECT_EQ(eos::ui::SplashScreen::RemainingVisibleMs(500), 1500);
+}
+
+TEST(SplashMinimumVisible, ClosesAtOnceAfterTheMinimum) {
+  EXPECT_EQ(eos::ui::SplashScreen::RemainingVisibleMs(1999), 1);
+  EXPECT_EQ(eos::ui::SplashScreen::RemainingVisibleMs(2000), 0);
+  EXPECT_EQ(eos::ui::SplashScreen::RemainingVisibleMs(2001), 0);
+  EXPECT_EQ(eos::ui::SplashScreen::RemainingVisibleMs(60000), 0);
+}
+
+TEST(SplashMinimumVisible, NegativeElapsedCountsAsZero) {
+  EXPECT_EQ(eos::ui::SplashScreen::RemainingVisibleMs(-5), 2000);
+}
+#endif
 
 }  // namespace

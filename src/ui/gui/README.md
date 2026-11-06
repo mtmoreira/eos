@@ -180,6 +180,43 @@ still opens on an empty session with its own console entry.
 Typing show in the terminal reopens a hidden window; closing the
 window never kills the session.
 
+### Startup splash
+
+On every eos-gui startup, a splash banner shows before the main
+window: dark background, the neon eos logo, the EDA OPEN SYSTEM
+subtitle, a progress bar, a status line, and the Version 0.1
+marker (the version string on the banner matches the approved
+banner artwork; the project CMake version is still 0.0.0).
+The status line reports real startup stages only: Starting
+session, Building interface, Opening window. The splash closes
+once the main window is ready AND the banner has been visible
+for at least 2 seconds (close at max(window-ready time, shown
+time plus 2 seconds)); the wait never blocks the GUI thread.
+That 2-second minimum is the only artificial wait in the
+splash: there is no timed animation and no fake stage. Script files still run first (see
+Launching below); the splash appears at GUI startup after they
+finish. The splash shows only at startup: closing and reopening
+the window does not show it again, and it never touches the
+terminal REPL, the console entry, or the checkpoint indicator.
+
+Logo asset: resources/eos-logo-dark.png is derived from the
+committed dark logo docs/logo/eos-logo-dark.webp (PR 74; that
+file is never modified). Qt does not reliably read webp, so the
+splash uses the PNG. The conversion is PIL decoding the webp to
+RGB PNG, verified pixel-exact at 1600x1600 (webp 153,876 bytes,
+sha256 starting 99eebe99; PNG 760,419 bytes, sha256 starting
+e2d094ac). The PNG is embedded in the binary through
+resources/splash.qrc (Qt resource path
+:/eos/eos-logo-dark.png), so a bare binary launched from any
+directory carries its artwork. If the resource fails to load,
+startup skips the splash entirely and proceeds as before. The
+resource object lives in a static library, so gui_app.cc calls
+the generated initializer qInitResources_splash to force the
+linker to pull it in; without that call the linker drops the
+unreferenced object and the splash is skipped. To
+regenerate the PNG after any logo change, decode the webp with
+PIL and re-verify pixel equality before committing.
+
 ### Launching
 
 No script file: the window opens on an empty session (steps

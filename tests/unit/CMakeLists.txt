@@ -279,6 +279,22 @@ endif()
 add_executable(eda_ui_gui_unit_test ui/gui/gui_test.cc)
 target_link_libraries(eda_ui_gui_unit_test
   PRIVATE eda_ui_gui GTest::gtest GTest::gtest_main)
+# The splash sources compile only when Qt6 was found for the
+# gui module, and the Qt6 targets live in that module's scope,
+# so re-find the package here (cached, cheap) to ask the same
+# question in this scope. Without Qt6 the splash sources are
+# not compiled and these tests are compiled out (see the
+# EOS_UI_GUI_HAVE_QT6 guard in the test).
+find_package(Qt6 QUIET COMPONENTS Widgets)
+if(Qt6_FOUND)
+  # SplashScreen lives in the gui module's internal/ dir; the
+  # test needs its header for the minimum-visible timing seam
+  # only.
+  target_include_directories(eda_ui_gui_unit_test
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/ui/gui/internal)
+  target_compile_definitions(eda_ui_gui_unit_test
+    PRIVATE EOS_UI_GUI_HAVE_QT6)
+endif()
 add_test(NAME ui.gui COMMAND eda_ui_gui_unit_test)
 
 # Icon assets: the committed iconset PNGs, the .icns, and the

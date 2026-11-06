@@ -24,7 +24,14 @@ if(Qt6_FOUND)
     src/block_diagram.cc
     src/schematic_diagram.cc
     src/panels_view.cc
+    src/splash_screen.cc
     src/gui_app.cc)
+  # The splash logo rides inside the binary via the Qt resource
+  # system, so a bare binary launched from any directory still
+  # finds its artwork. resources/splash.qrc embeds the PNG
+  # converted from the committed dark logo webp (see README.md).
+  set_property(TARGET eda_ui_gui PROPERTY AUTORCC ON)
+  target_sources(eda_ui_gui PRIVATE resources/splash.qrc)
   target_include_directories(eda_ui_gui PRIVATE internal)
   target_link_libraries(eda_ui_gui PUBLIC Qt6::Widgets)
   # Window icon: embed the 512 pixel iconset PNG as a C array
