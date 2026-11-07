@@ -175,11 +175,38 @@ struct PathReport {
 // endpoint can sit in several named groups at once, and the union
 // TNS counts it once while the every-group TNS counts it once per
 // group. The default groups are named after their clocks; the
-// special groups are named "path_delay", "gated_clk", "async"
+// special groups are named "path_delay", "gated clock", "async"
 // and "unconstrained" upstream.
 struct PathGroupSlack {
   std::string name;
   std::vector<EndpointSlack> endpoints;
+};
+
+// One clock's period (Immediate unit 10, review item T8):
+// the clock name and its period in nanoseconds, from the SDC
+// the engine read.
+struct ClockPeriod {
+  std::string name;
+  double period_ns = 0.0;
+};
+
+// One minimum-pulse-width check (Immediate unit 10, review item
+// T8): one clock pulse at one pin, from the upstream bulk
+// minimum-pulse-width check. transition is the opening edge
+// ("rise" for the high pulse, "fall" for the low pulse),
+// width_ns the measured pulse width, min_width_ns the required
+// minimum from the SDC set_min_pulse_width command (falling back
+// to the Liberty min-pulse-width arc when the SDC sets none),
+// and slack_ns is width minus min_width (negative when the
+// pulse is too narrow). A pin with a minimum-width constraint
+// but no clock path, or with a clock path but no close path,
+// yields no check: the absence of a row is not a pass.
+struct MinPulseWidthCheck {
+  std::string pin;
+  std::string transition;
+  double width_ns = 0.0;
+  double min_width_ns = 0.0;
+  double slack_ns = 0.0;
 };
 
 // One Liberty cell type's share of the design: the instance count
@@ -306,6 +333,21 @@ class StaEngine {
   // reported group. Fails with kInvalidState under the same
   // conditions as WorstSlackNs.
   Result<std::vector<PathGroupSlack>> PathGroupSlacks(CheckKind kind);
+  // The clocks of the scenario (Immediate unit 10, review item
+  // T8): one row per clock the engine read, sorted by name, each
+  // with its period in nanoseconds. Clocks from the SDC file
+  // only: EOS-native clock rows that were never written out and
+  // read back are invisible here, the same split the clock
+  // report documents. Fails with kInvalidState under the same
+  // conditions as WorstSlackNs.
+  Result<std::vector<ClockPeriod>> ClockPeriods();
+  // The minimum-pulse-width checks (Immediate unit 10, review
+  // item T8): one row per evaluated clock pulse, worst slack
+  // first, ties broken by pin path name then transition so the
+  // order is deterministic. Only pulses with a defined minimum
+  // width and a close path appear. Fails with kInvalidState
+  // under the same conditions as WorstSlackNs.
+  Result<std::vector<MinPulseWidthCheck>> MinPulseWidthChecks();
   // The design's cell census: one row per Liberty cell type
   // present as a leaf instance, plus the totals. Fails with
   // kInvalidState under the same conditions as WorstSlackNs.

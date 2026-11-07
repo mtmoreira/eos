@@ -1070,5 +1070,93 @@ TEST(StaFacade, AnalysisCoverageBeforeLinkFails) {
   EXPECT_EQ(coverage.status().code(), ErrorCode::kInvalidState);
 }
 
+// Clock periods (Immediate unit 10, review item T8). The
+// facade lists the clocks the engine read from the SDC with
+// their periods, so the timing service can derive each
+// clock's minimum period as period minus the worst setup
+// slack of its group. Note the upstream bulk minimum-period
+// check was deliberately not wrapped: it only reports
+// Liberty minimum_period constraints and SDF annotations,
+// none of which exist in EOS fixtures, so it returns no rows
+// on any of them (verified by running it: 0 checks on both
+// the clean and the tight fixture).
+TEST(StaFacade, ClockPeriodsCleanFixture) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto clocks = engine.ClockPeriods();
+  ASSERT_TRUE(clocks.ok()) << clocks.status().message();
+  ASSERT_EQ(clocks.value().size(), 1u);
+  EXPECT_EQ(clocks.value()[0].name, "clk");
+  EXPECT_NEAR(clocks.value()[0].period_ns, 10.0, 1e-6);
+}
+
+TEST(StaFacade, ClockPeriodsTightClock) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcTight);
+  const auto clocks = engine.ClockPeriods();
+  ASSERT_TRUE(clocks.ok()) << clocks.status().message();
+  ASSERT_EQ(clocks.value().size(), 1u);
+  EXPECT_EQ(clocks.value()[0].name, "clk");
+  EXPECT_NEAR(clocks.value()[0].period_ns, 0.5, 1e-6);
+}
+
+TEST(StaFacade, ClockPeriodsBeforeLinkFails) {
+  StaEngine engine;
+  const auto clocks = engine.ClockPeriods();
+  EXPECT_FALSE(clocks.ok());
+  EXPECT_EQ(clocks.status().code(), ErrorCode::kInvalidState);
+}
+
+// Minimum-pulse-width checks (Immediate unit 10, review item
+// T8). The SDC sets a 1.0 ns minimum on both clock pins and
+// the 10 ns clock has the default {0 5} waveform, so every
+// pulse is 5.0 ns wide with slack 4.0 ns: one check per pin
+// per opening edge (the high pulse opens on rise, the low
+// pulse on fall).
+TEST(StaFacade, MinPulseWidthChecks) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcMinPulseWidth);
+  const auto checks = engine.MinPulseWidthChecks();
+  ASSERT_TRUE(checks.ok()) << checks.status().message();
+  ASSERT_EQ(checks.value().size(), 4u);
+  for (const MinPulseWidthCheck& check : checks.value()) {
+    EXPECT_TRUE(check.pin == "r1/CK" || check.pin == "r2/CK")
+        << check.pin;
+    EXPECT_TRUE(check.transition == "rise" ||
+                check.transition == "fall")
+        << check.transition;
+    EXPECT_NEAR(check.width_ns, 5.0, 1e-6);
+    EXPECT_NEAR(check.min_width_ns, 1.0, 1e-6);
+    EXPECT_NEAR(check.slack_ns, 4.0, 1e-6);
+  }
+  // Worst slack first, ties broken by pin then transition.
+  for (std::size_t i = 1; i < checks.value().size(); ++i) {
+    EXPECT_LE(checks.value()[i - 1].slack_ns,
+              checks.value()[i].slack_ns);
+  }
+}
+
+TEST(StaFacade, MinPulseWidthChecksWithoutConstraintAreEmpty) {
+  // No set_min_pulse_width anywhere and no Liberty
+  // min-pulse-width arc: the bulk check returns nothing, and
+  // the facade reports the empty list rather than a pass.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto checks = engine.MinPulseWidthChecks();
+  ASSERT_TRUE(checks.ok()) << checks.status().message();
+  EXPECT_TRUE(checks.value().empty());
+}
+
+TEST(StaFacade, MinPulseWidthChecksBeforeLinkFails) {
+  StaEngine engine;
+  const auto checks = engine.MinPulseWidthChecks();
+  EXPECT_FALSE(checks.ok());
+  EXPECT_EQ(checks.status().code(), ErrorCode::kInvalidState);
+}
+
 }  // namespace
 }  // namespace eos::analysis

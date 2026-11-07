@@ -162,6 +162,66 @@ struct PathGroupResult {
   std::vector<EndpointSlack> endpoints;
 };
 
+// One path group's worst path: the group's name and the worst
+// path to its worst endpoint, from the facade's worst-path
+// report (the endpoint is the report's endpoint).
+struct GroupWorstPath {
+  std::string group;
+  PathReport path;
+};
+
+// One clock's derived minimum period (Immediate unit 10,
+// review item T8): the smallest period at which the clock's
+// group still meets setup timing, period minus the group's
+// worst setup slack, with the worst endpoint alongside. Only
+// clocks with a setup path group appear: a clock with no
+// constrained endpoints yields no row.
+struct MinPeriodClockRow {
+  std::string clock;
+  double period_ns = 0.0;
+  double min_period_ns = 0.0;
+  double slack_ns = 0.0;
+  std::string worst_pin;
+};
+
+// One endpoint's derived minimum period (Immediate unit 10,
+// review item T8): the smallest period at which this endpoint
+// still meets setup timing, period minus the endpoint's setup
+// slack. Only endpoints of a clock-named setup group appear:
+// endpoints reassigned to a named group_path are not in their
+// clock group, so they are not listed.
+struct MinPeriodEndpointRow {
+  std::string pin;
+  std::string clock;
+  double period_ns = 0.0;
+  double min_period_ns = 0.0;
+  double slack_ns = 0.0;
+};
+
+// One scene's check-specific report data (Immediate unit 10,
+// review item T8): every constrained endpoint for setup and
+// hold worst first, the per-group endpoints for both kinds, the
+// worst path of each group's worst endpoint for both kinds, the
+// derived per-clock and per-endpoint minimum periods, the
+// minimum-pulse-width checks, and the analysis-coverage pins
+// (which name the clock-gating enables and their gated clock
+// pins, and say whether each defined check was evaluated). One
+// service call per scene, exactly as AnalyzeQor, so a report
+// command needs no second run.
+struct CheckReportsResult {
+  db::Scenario scenario;
+  std::vector<EndpointSlack> setup_endpoints;
+  std::vector<EndpointSlack> hold_endpoints;
+  std::vector<PathGroupResult> setup_groups;
+  std::vector<PathGroupResult> hold_groups;
+  std::vector<GroupWorstPath> setup_group_paths;
+  std::vector<GroupWorstPath> hold_group_paths;
+  std::vector<MinPeriodClockRow> min_period_clocks;
+  std::vector<MinPeriodEndpointRow> min_period_endpoints;
+  std::vector<MinPulseWidthCheck> min_pulse_width_checks;
+  std::vector<CoveragePin> coverage_pins;
+};
+
 // One cell type's count and summed Liberty area in the design.
 struct CellTypeRow {
   std::string cell;
@@ -266,6 +326,26 @@ class TimingService {
   // runs on it. Fails as AnalyzeQor above plus kInvalidState
   // when the database has no top block.
   Result<std::vector<QorResult>> AnalyzeQor(
+      db::OdbDatabase& database, const std::string& sdc_path,
+      const std::vector<SceneAnalysis>& scenes);
+
+  // Reports the check-specific data (Immediate unit 10, review
+  // item T8) of the Verilog design under every scene: the
+  // per-endpoint slacks, the per-group endpoints and worst
+  // paths, the minimum-period and minimum-pulse-width checks,
+  // and the analysis-coverage pins. Each scene runs its own
+  // engine session, exactly as Analyze loads them. Fails as
+  // Analyze above.
+  Result<std::vector<CheckReportsResult>> AnalyzeCheckReports(
+      const VerilogDesign& design,
+      const std::vector<SceneAnalysis>& scenes);
+
+  // Reports the check-specific data of an imported ODB database
+  // under every scene. The database's top block is written to a
+  // temporary netlist exactly as Analyze does, and the Verilog
+  // form above runs on it. Fails as AnalyzeCheckReports above
+  // plus kInvalidState when the database has no top block.
+  Result<std::vector<CheckReportsResult>> AnalyzeCheckReports(
       db::OdbDatabase& database, const std::string& sdc_path,
       const std::vector<SceneAnalysis>& scenes);
 };

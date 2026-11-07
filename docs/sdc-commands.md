@@ -245,3 +245,10 @@ need temp-file SDC materialization or engine text-input support.
   Immediate unit 6 adds `report_constraint`, 74 to 75.
   Immediate unit 7 adds `report_analysis_coverage`, 75 to 76.
   Immediate unit 8 adds `write_sdc`, 76 to 77.
+  Immediate unit 9 adds `report_qor`, `report_bottleneck` and
+  `set_bottleneck_capture`, 77 to 80.
+  F0 adds `write_def`, `read_lef` and `read_def`, 80 to 83.
+  Immediate unit 10 adds the five check-specific reports
+  (`report_global_timing`, `report_global_slack`,
+  `report_min_period`, `report_min_pulse_width`,
+  `report_clock_gating_check`), 83 to 88.
