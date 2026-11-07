@@ -239,3 +239,4 @@ need temp-file SDC materialization or engine text-input support.
   `create_generated_clock`, and the nine M27 commands).
   Immediate unit 4 adds `check_timing`, 70 to 71.
   Immediate unit 5 adds `report_clock`, 72 to 73.
+  Immediate unit 6 adds `report_constraint`, 74 to 75.

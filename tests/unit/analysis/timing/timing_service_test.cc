@@ -456,6 +456,41 @@ TEST(TimingService, ElectricalMetricsAreReportedPerScene) {
   EXPECT_NEAR(metric("max_fanout_violations", "pins"), 1.0, 1e-9);
 }
 
+TEST(TimingService, ElectricalViolatorsAreReportedPerScene) {
+  // The violator lists (Immediate unit 6) carry every violating
+  // pin per check with the check's own worst values, and the kept
+  // check records name the worst pin, its limit and its slack, so
+  // the verdict-shaped report can cost the exact sum of the
+  // violations. The electrical fixture violates all three checks
+  // on u1/Y only.
+  TempDir dir;
+  const std::string liberty = dir.Write("cells_elec.lib", kLibertyElectrical);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  const auto results = service.Analyze(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)});
+  ASSERT_TRUE(results.ok()) << results.status().message();
+  ASSERT_EQ(results.value().size(), 1u);
+  const SceneResult& scene = results.value()[0];
+  ASSERT_EQ(scene.max_transition_violators.size(), 1u);
+  EXPECT_EQ(scene.max_transition_violators[0].pin, "u1/Y");
+  EXPECT_NEAR(scene.max_transition_violators[0].slack, -0.01, 1e-6);
+  EXPECT_TRUE(scene.max_transition_check.has_limit);
+  EXPECT_EQ(scene.max_transition_check.worst_pin, "u1/Y");
+  EXPECT_NEAR(scene.max_transition_check.worst_slack, -0.01, 1e-6);
+  ASSERT_EQ(scene.max_capacitance_violators.size(), 1u);
+  EXPECT_EQ(scene.max_capacitance_violators[0].pin, "u1/Y");
+  EXPECT_NEAR(scene.max_capacitance_violators[0].slack, -0.009, 1e-9);
+  EXPECT_TRUE(scene.max_capacitance_check.has_limit);
+  EXPECT_EQ(scene.max_capacitance_check.worst_pin, "u1/Y");
+  ASSERT_EQ(scene.max_fanout_violators.size(), 1u);
+  EXPECT_EQ(scene.max_fanout_violators[0].pin, "u1/Y");
+  EXPECT_NEAR(scene.max_fanout_violators[0].slack, -1.0, 1e-9);
+  EXPECT_TRUE(scene.max_fanout_check.has_limit);
+  EXPECT_EQ(scene.max_fanout_check.worst_pin, "u1/Y");
+}
+
 TEST(TimingService, ElectricalMetricsAreZeroWithoutLimits) {
   // The plain fixture library carries no electrical limit: the
   // metrics are present, with worst value 0 and count 0.
@@ -472,6 +507,15 @@ TEST(TimingService, ElectricalMetricsAreZeroWithoutLimits) {
   EXPECT_EQ(scene.metrics.at("max_capacitance_violations").value, 0.0);
   EXPECT_EQ(scene.metrics.at("max_fanout_violations").value, 0.0);
   EXPECT_EQ(scene.metrics.at("max_transition_ns").value, 0.0);
+  // No limit means no violators and no worst pin: the kept check
+  // records report has_limit false, so the report can tell "no
+  // limit defined" apart from "limit defined and clean".
+  EXPECT_FALSE(scene.max_transition_check.has_limit);
+  EXPECT_FALSE(scene.max_capacitance_check.has_limit);
+  EXPECT_FALSE(scene.max_fanout_check.has_limit);
+  EXPECT_TRUE(scene.max_transition_violators.empty());
+  EXPECT_TRUE(scene.max_capacitance_violators.empty());
+  EXPECT_TRUE(scene.max_fanout_violators.empty());
 }
 
 TEST(TimingService, OdbDesignAnalyzedThroughNetlist) {

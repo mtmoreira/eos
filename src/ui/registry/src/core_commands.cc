@@ -6267,6 +6267,402 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(payload);
       });
 
+  // ---- report_constraint (Immediate unit 6, review item I3) ---------
+  // The verdict-shaped constraint report, worst-violator tier
+  // (Timing Constraints U-2022.12 ch. 2, PrimeTime report_constraint
+  // in the singular DC spelling, chosen deliberately over the ICC2
+  // plural). One row per constraint class (max_delay/setup,
+  // min_delay/hold, max_transition, max_capacitance, max_fanout):
+  // the worst violator, its slack, the cost, the weight and the
+  // violating-pin count, plus the critical-range table of every
+  // violating endpoint or pin per class, worst first. The cost is
+  // the exact sum of the violations: -TNS for the timing classes
+  // and the sum of -slack over the violating pins for the DRC
+  // classes, so a DRC cost is never a worst magnitude wearing a
+  // cost label. The weight is 1 for every class: EOS has no
+  // constraint-weight command yet, and the gap is named in the
+  // report instead of hidden. -verbose adds the full worst path
+  // for the worst timing violator of each timing class and expands
+  // the DRC critical-range rows to pin, value, limit and slack.
+  // -all_violators is the tier 2 form (the full violator list with
+  // required and actual path delays per violator) and waits on the
+  // I8 path enumeration: passing it fails fast instead of silently
+  // reporting the tier 1 form. The DRC classes are evaluated from
+  // the timing engine's electrical checks (unit F5), not from EOS
+  // constraint rows: there is no max_transition, max_fanout or
+  // max_capacitance constraint kind, so a class with no limit at
+  // all is reported as "no limit", never as clean. The command
+  // runs the analysis itself for the selected scenes (it does not
+  // reuse a previous run_timing: the session keeps no live
+  // engine), and registers one report binding per scene through
+  // session/reports, like run_timing and report_timing.
+  add("report_constraint",
+      "report_constraint [-verbose] [-all_violators] [-scene <name>] "
+      "[-file <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-verbose", 0, false},
+                 {"-all_violators", 0, false},
+                 {"-scene", 1, false},
+                 {"-file", 1, false}},
+                "report_constraint", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "report_constraint: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        if (opts.Has("-all_violators")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "report_constraint: -all_violators is the tier 2 form: "
+              "it lists every violator with its required and actual "
+              "path delays, and waits on the I8 path enumeration");
+        }
+        const bool verbose = opts.Has("-verbose");
+        bool from_odb = false;
+        std::vector<analysis::SceneAnalysis> scenes;
+        if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          return *bad;
+        }
+        if (opts.Seen("-scene")) {
+          const std::string wanted = *opts.Value("-scene");
+          std::vector<analysis::SceneAnalysis> selected;
+          for (const analysis::SceneAnalysis& scene : scenes) {
+            if (scene.scenario.name == wanted) {
+              selected.push_back(scene);
+            }
+          }
+          if (selected.empty()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown scenario: " + wanted);
+          }
+          scenes = std::move(selected);
+        }
+        analysis::TimingService service;
+        const Result<std::vector<analysis::SceneResult>> analyzed =
+            from_odb
+                ? service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
+                                  scenes)
+                : service.Analyze(
+                      analysis::VerilogDesign{ctx.timing.verilog_path,
+                                              ctx.timing.top_cell,
+                                              ctx.timing.sdc_path},
+                      scenes);
+        if (!analyzed.ok()) return FromStatus(analyzed.status());
+        std::vector<ReportColumn> columns;
+        for (const ReportColumn& candidate : kReportColumns) {
+          columns.push_back(candidate);
+        }
+        // One class row: the class name, the worst violator's pin
+        // ("-" when none violates), the worst slack and the cost
+        // as display text, the violating-pin count, and whether
+        // the class carries a limit at all (a DRC class with no
+        // limit is reported as "no limit", never as clean).
+        struct ClassRow {
+          std::string name;
+          std::string violator;
+          std::string slack;
+          std::string cost;
+          std::size_t violations = 0;
+          bool has_limit = true;
+        };
+        const auto slack_text = [](double slack) {
+          return std::isfinite(slack) ? FormatNum(slack)
+                                      : std::string("-");
+        };
+        const auto timing_row =
+            [&slack_text](
+                const char* name,
+                const std::vector<analysis::EndpointSlack>& violators,
+                const std::optional<double>& worst_slack,
+                const std::optional<double>& total_negative_slack) {
+              ClassRow row;
+              row.name = name;
+              row.violations = violators.size();
+              row.violator = violators.empty() ? "-" : violators[0].pin;
+              row.slack = violators.empty()
+                              ? (worst_slack.has_value()
+                                     ? slack_text(*worst_slack)
+                                     : std::string("-"))
+                              : FormatNum(violators[0].slack_ns);
+              // -TNS is the cost and is non-negative, but negating
+              // a zero TNS gives -0.0, which FormatNum renders as
+              // "-0": normalize it to positive zero.
+              double cost = 0.0;
+              if (total_negative_slack.has_value()) {
+                cost = -*total_negative_slack;
+                if (cost == 0.0) cost = 0.0;
+              }
+              row.cost = total_negative_slack.has_value()
+                             ? FormatNum(cost)
+                             : std::string("-");
+              return row;
+            };
+        const auto drc_row =
+            [](const char* name,
+               const analysis::ElectricalCheck& check,
+               const std::vector<analysis::ElectricalViolation>&
+                   violators) {
+              ClassRow row;
+              row.name = name;
+              row.has_limit = check.has_limit;
+              row.violations = violators.size();
+              if (!check.has_limit) {
+                row.violator = "-";
+                row.slack = "-";
+                row.cost = "-";
+                return row;
+              }
+              row.violator = violators.empty() ? "-" : violators[0].pin;
+              row.slack = violators.empty()
+                              ? FormatNum(check.worst_slack)
+                              : FormatNum(violators[0].slack);
+              double cost = 0.0;
+              for (const analysis::ElectricalViolation& violation :
+                   violators) {
+                cost += -violation.slack;
+              }
+              row.cost = FormatNum(cost);
+              return row;
+            };
+        // One report binding per scene, registered through
+        // session/reports at the current ledger revision. The
+        // analysis completed, so the report's proof is pass: the
+        // class rows are the measured result, whatever their sign.
+        std::string payload = std::string("source=") +
+                              (from_odb ? "odb" : "verilog") +
+                              " scenes=" +
+                              std::to_string(analyzed.value().size()) +
+                              " revision=" +
+                              std::to_string(
+                                  ctx.project.ledger.current_revision());
+        std::string text;
+        for (std::size_t i = 0; i < analyzed.value().size(); ++i) {
+          const analysis::SceneAnalysis& scene = scenes[i];
+          const analysis::SceneResult& result = analyzed.value()[i];
+          const std::string report =
+              "constraint_report_" + result.scenario.name;
+          const Result<session::ArtifactId> artifact =
+              ctx.reports.RegisterReport(ctx.project, report,
+                                         session::ProofStatus::kPass,
+                                         "NLDM");
+          if (!artifact.ok()) return FromStatus(artifact.status());
+          const auto metric = [&result](const char* name) {
+            const auto it = result.metrics.find(name);
+            return it == result.metrics.end()
+                       ? std::optional<double>{}
+                       : std::optional<double>{it->second.value};
+          };
+          const std::optional<double> setup_worst =
+              metric("worst_slack_ns");
+          const std::optional<double> setup_tns =
+              metric("total_negative_slack_ns");
+          const std::optional<double> hold_worst =
+              metric("worst_hold_slack_ns");
+          const std::optional<double> hold_tns =
+              metric("total_negative_hold_slack_ns");
+          std::vector<ClassRow> rows;
+          rows.push_back(timing_row("max_delay",
+                                    result.setup_violating_endpoints,
+                                    setup_worst, setup_tns));
+          rows.push_back(timing_row("min_delay",
+                                    result.hold_violating_endpoints,
+                                    hold_worst, hold_tns));
+          rows.push_back(drc_row("max_transition",
+                                 result.max_transition_check,
+                                 result.max_transition_violators));
+          rows.push_back(drc_row("max_capacitance",
+                                 result.max_capacitance_check,
+                                 result.max_capacitance_violators));
+          rows.push_back(drc_row("max_fanout", result.max_fanout_check,
+                                 result.max_fanout_violators));
+          const std::size_t total_violations =
+              result.setup_violating_endpoints.size() +
+              result.hold_violating_endpoints.size() +
+              result.max_transition_violators.size() +
+              result.max_capacitance_violators.size() +
+              result.max_fanout_violators.size();
+          payload += "\nscene=" + result.scenario.name +
+                     " violations=" + std::to_string(total_violations) +
+                     " worst_slack_ns=" +
+                     (setup_worst.has_value() &&
+                              std::isfinite(*setup_worst)
+                          ? FormatNum(*setup_worst)
+                          : std::string("none")) +
+                     " report=" + report + " artifact=" +
+                     std::to_string(artifact.value());
+          for (const ClassRow& row : rows) {
+            payload += "\nscene=" + result.scenario.name +
+                       " class=" + row.name +
+                       " violator=" + row.violator;
+            if (row.has_limit) {
+              payload += " slack=" +
+                         (row.slack == "-" ? std::string("none")
+                                           : row.slack) +
+                         " cost=" + row.cost;
+            } else {
+              payload += " limit=none";
+            }
+            payload += " weight=1 violations=" +
+                       std::to_string(row.violations);
+          }
+          text += "\nScene: " + result.scenario.name + "\n";
+          std::vector<std::vector<std::string>> summary;
+          summary.push_back({"Constraint", "Worst Violator", "Slack",
+                             "Cost", "Weight", "Violations"});
+          for (const ClassRow& row : rows) {
+            summary.push_back({row.name, row.violator, row.slack,
+                               row.cost, "1",
+                               std::to_string(row.violations)});
+          }
+          text += ReportClockRenderTable(std::move(summary));
+          text += "Units: slack and cost in ns for max_delay, "
+                  "min_delay and max_transition; in pF for "
+                  "max_capacitance; in fanout load for max_fanout. "
+                  "Weight is 1 for every class: EOS has no "
+                  "constraint-weight command yet.\n";
+          for (const ClassRow& row : rows) {
+            if (!row.has_limit) {
+              text += row.name + ": no limit defined for this design.\n";
+            }
+          }
+          if (setup_worst.has_value() && !std::isfinite(*setup_worst)) {
+            text += "max_delay: no constrained endpoints in this "
+                    "scene.\n";
+          }
+          if (hold_worst.has_value() && !std::isfinite(*hold_worst)) {
+            text += "min_delay: no constrained endpoints in this "
+                    "scene.\n";
+          }
+          const auto timing_range =
+              [&text](const char* name,
+                      const std::vector<analysis::EndpointSlack>&
+                          violators) {
+                if (violators.empty()) return;
+                text += "\nCritical range (" + std::string(name) +
+                        "): endpoints with slack below 0, worst "
+                        "first:\n";
+                std::vector<std::vector<std::string>> table;
+                table.push_back({"Endpoint", "Slack (ns)"});
+                for (const analysis::EndpointSlack& endpoint :
+                     violators) {
+                  table.push_back(
+                      {endpoint.pin, FormatNum(endpoint.slack_ns)});
+                }
+                text += ReportClockRenderTable(std::move(table));
+              };
+          timing_range("max_delay", result.setup_violating_endpoints);
+          timing_range("min_delay", result.hold_violating_endpoints);
+          const auto drc_range =
+              [&text, verbose](
+                  const char* name, const char* unit,
+                  const std::vector<analysis::ElectricalViolation>&
+                      violators) {
+                if (violators.empty()) return;
+                text += "\nCritical range (" + std::string(name) +
+                        "): pins with slack below 0, worst first:\n";
+                std::vector<std::vector<std::string>> table;
+                if (verbose) {
+                  table.push_back({"Pin",
+                                   std::string("Value (") + unit + ")",
+                                   std::string("Limit (") + unit + ")",
+                                   std::string("Slack (") + unit + ")"});
+                  for (const analysis::ElectricalViolation& violation :
+                       violators) {
+                    table.push_back({violation.pin,
+                                     FormatNum(violation.value),
+                                     FormatNum(violation.limit),
+                                     FormatNum(violation.slack)});
+                  }
+                } else {
+                  table.push_back(
+                      {"Pin", std::string("Slack (") + unit + ")"});
+                  for (const analysis::ElectricalViolation& violation :
+                       violators) {
+                    table.push_back(
+                        {violation.pin, FormatNum(violation.slack)});
+                  }
+                }
+                text += ReportClockRenderTable(std::move(table));
+              };
+          drc_range("max_transition", "ns",
+                    result.max_transition_violators);
+          drc_range("max_capacitance", "pF",
+                    result.max_capacitance_violators);
+          drc_range("max_fanout", "fanout", result.max_fanout_violators);
+          if (verbose) {
+            const auto render_worst_path =
+                [&](analysis::CheckKind kind,
+                    const std::vector<analysis::EndpointSlack>& violators,
+                    const char* class_name)
+                -> std::optional<CommandResult> {
+              if (violators.empty()) return std::nullopt;
+              analysis::PathReportRequest request;
+              request.kind = kind;
+              request.endpoint = violators[0].pin;
+              request.max_paths = 1;
+              const std::vector<analysis::SceneAnalysis> one_scene{
+                  scene};
+              const Result<std::vector<analysis::ScenePathReports>>
+                  reported =
+                      from_odb
+                          ? service.ReportPaths(
+                                *ctx.timing.odb, ctx.timing.sdc_path,
+                                one_scene, request)
+                          : service.ReportPaths(
+                                analysis::VerilogDesign{
+                                    ctx.timing.verilog_path,
+                                    ctx.timing.top_cell,
+                                    ctx.timing.sdc_path},
+                                one_scene, request);
+              if (!reported.ok()) return FromStatus(reported.status());
+              if (!reported.value().empty() &&
+                  !reported.value()[0].paths.empty()) {
+                text += "\nWorst " + std::string(class_name) +
+                        " path (" + violators[0].pin + "):\n";
+                text += RenderPathReport(reported.value()[0].paths[0],
+                                         columns, "full", 3);
+              }
+              return std::nullopt;
+            };
+            if (auto bad = render_worst_path(
+                    analysis::CheckKind::kSetup,
+                    result.setup_violating_endpoints, "max_delay")) {
+              return *bad;
+            }
+            if (auto bad = render_worst_path(
+                    analysis::CheckKind::kHold,
+                    result.hold_violating_endpoints, "min_delay")) {
+              return *bad;
+            }
+          }
+        }
+        if (opts.Seen("-file")) {
+          const std::string file = *opts.Value("-file");
+          std::ofstream out(file);
+          if (!out) {
+            return CommandResult::Fail(Diag::kIoError,
+                                       "could not write file: " + file);
+          }
+          out << text;
+          out.close();
+          if (!out) {
+            return CommandResult::Fail(Diag::kIoError,
+                                       "could not write file: " + file);
+          }
+          payload += "\nfile=" + file;
+        }
+        payload += "\n" + text;
+        return CommandResult::Ok(payload);
+      });
+
   add("close_timing", "close_timing <max_iterations>",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {

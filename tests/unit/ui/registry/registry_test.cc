@@ -68,8 +68,9 @@ TEST(Registry, CoreSetIsComplete) {
   // adds create_clock (SDC), create_generated_clock, and the
   // nine M27 commands; Immediate unit 4 adds check_timing;
   // gui_show adds gui_show; Immediate unit 5 adds report_clock.
-  // The panel rework adds synth_issues.
-  EXPECT_EQ(shell.registry.Names().size(), 74u);
+  // The panel rework adds synth_issues; Immediate unit 6 adds
+  // report_constraint.
+  EXPECT_EQ(shell.registry.Names().size(), 75u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -80,6 +81,7 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("report_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_issues"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_constraint"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -464,6 +466,102 @@ endmodule
 
 const char kTimingSdc[] =
     "create_clock -name clk -period 10 [get_ports clk]\n";
+
+// The electrical variant of the timing fixture (unit F5):
+// the buffer output u1/Y violates all three electrical
+// limits by construction; see the note above
+// kLibertyElectrical in the STA facade tests for the
+// expected values.
+const char kTimingLibertyElectrical[] = R"LIB(library (eos_fixture_elec) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      fanout_load : 2.0;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (scalar) { values ("0.05"); }
+        fall_constraint (scalar) { values ("0.05"); }
+      }
+    }
+    pin (CK) {
+      direction : input;
+      capacitance : 0.001;
+      clock : true;
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+
+  cell (BUF) {
+    area : 2.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      max_transition : 0.04;
+      max_capacitance : 0.001;
+      max_fanout : 1.0;
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+const char kTimingSdcTight[] =
+    "create_clock -name clk -period 0.5 [get_ports clk]\n";
 
 const char kTimingLef[] = R"LEF(VERSION 5.8 ;
 BUSBITCHARS "[]" ;
@@ -2981,6 +3079,238 @@ TEST(CoreCommands, ReportTimingRejectsBadOptions) {
       shell.Run("report_timing", {"-to", "r2/D", "-max_paths", "2"}).ok);
   EXPECT_FALSE(shell.Run("report_timing", {"-max_paths", "0"}).ok);
   EXPECT_FALSE(shell.Run("report_timing", {"-path_type", "wide"}).ok);
+}
+
+// ---- report_constraint (Immediate unit 6, review item I3) ----------
+// The worst-violator tier: the per-class summary rows, the
+// critical-range tables, the -verbose paths and pin tables, the
+// tier 2 fail-fast, the scene selection, the file form, and the
+// no-session failures.
+
+// Sets up the two-flop timing fixture in the shell: one estimate
+// scenario, the given Liberty, the netlist and the given SDC.
+void BuildReportConstraintDesign(Shell& shell, const TimingTempDir& dir,
+                                 const char* liberty, const char* sdc) {
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty", {"tt", dir.Write("cells.lib", liberty)})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", sdc)}).ok);
+}
+
+TEST(ReportConstraint, CleanDesignReportsZeroViolations) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report = shell.Run("report_constraint", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("source=verilog"), std::string::npos);
+  EXPECT_NE(report.payload.find("scenes=1"), std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt violations=0 "
+                                "worst_slack_ns=9.4"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("report=constraint_report_func_tt"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt class=max_delay "
+                                "violator=- slack=9.4 cost=0 weight=1 "
+                                "violations=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt class=min_delay "
+                                "violator=- slack=0.45 cost=0 weight=1 "
+                                "violations=0"),
+            std::string::npos);
+  // The plain fixture library carries no electrical limit: every
+  // DRC class reports limit=none, never a clean worst value.
+  EXPECT_NE(report.payload.find("scene=func_tt class=max_transition "
+                                "violator=- limit=none weight=1 "
+                                "violations=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt class=max_capacitance "
+                                "violator=- limit=none weight=1 "
+                                "violations=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt class=max_fanout "
+                                "violator=- limit=none weight=1 "
+                                "violations=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("max_transition: no limit defined "
+                                "for this design."),
+            std::string::npos);
+  // No violations means no critical-range section at all.
+  EXPECT_EQ(report.payload.find("Critical range"), std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "constraint_report_func_tt"),
+            nullptr);
+}
+
+TEST(ReportConstraint, TightClockSetupViolation) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcTight);
+  const CommandResult report = shell.Run("report_constraint", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt violations=1 "
+                                "worst_slack_ns=-0.1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt class=max_delay "
+                                "violator=r2/D slack=-0.1 cost=0.1 "
+                                "weight=1 violations=1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt class=min_delay "
+                                "violator=- slack=0.45 cost=0 weight=1 "
+                                "violations=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Critical range (max_delay)"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("r2/D"), std::string::npos);
+  // The default form shows no worst path: that is -verbose.
+  EXPECT_EQ(report.payload.find("Worst max_delay path"),
+            std::string::npos);
+}
+
+TEST(ReportConstraint, VerboseShowsWorstSetupPath) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcTight);
+  const CommandResult report =
+      shell.Run("report_constraint", {"-verbose"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("Worst max_delay path (r2/D):"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Startpoint: r1/Q"), std::string::npos);
+  EXPECT_NE(report.payload.find("slack (VIOLATED): -0.100"),
+            std::string::npos);
+  // No hold violator, so no hold path even in verbose form.
+  EXPECT_EQ(report.payload.find("Worst min_delay path"),
+            std::string::npos);
+}
+
+TEST(ReportConstraint, ElectricalViolations) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLibertyElectrical,
+                              kTimingSdc);
+  const CommandResult report = shell.Run("report_constraint", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt violations=3"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt class=max_transition "
+                                "violator=u1/Y slack=-0.01 cost=0.01 "
+                                "weight=1 violations=1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt class=max_capacitance "
+                                "violator=u1/Y slack=-0.009 cost=0.009 "
+                                "weight=1 violations=1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt class=max_fanout "
+                                "violator=u1/Y slack=-1 cost=1 "
+                                "weight=1 violations=1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Critical range (max_transition)"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("u1/Y"), std::string::npos);
+  // The default DRC rows carry pin and slack only: the
+  // value/limit columns are the -verbose form.
+  EXPECT_EQ(report.payload.find("Value (ns)"), std::string::npos);
+  EXPECT_EQ(report.payload.find("Limit (ns)"), std::string::npos);
+}
+
+TEST(ReportConstraint, VerboseShowsDrcPinTables) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLibertyElectrical,
+                              kTimingSdc);
+  const CommandResult report =
+      shell.Run("report_constraint", {"-verbose"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("Value (ns)"), std::string::npos);
+  EXPECT_NE(report.payload.find("Limit (ns)"), std::string::npos);
+  EXPECT_NE(report.payload.find("0.04"), std::string::npos);
+  EXPECT_NE(report.payload.find("Value (pF)"), std::string::npos);
+  EXPECT_NE(report.payload.find("Limit (pF)"), std::string::npos);
+  EXPECT_NE(report.payload.find("0.001"), std::string::npos);
+  EXPECT_NE(report.payload.find("Value (fanout)"), std::string::npos);
+  EXPECT_NE(report.payload.find("Limit (fanout)"), std::string::npos);
+}
+
+TEST(ReportConstraint, AllViolatorsFailsFastWithTierTwoMessage) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report =
+      shell.Run("report_constraint", {"-all_violators"});
+  EXPECT_FALSE(report.ok);
+  EXPECT_EQ(report.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(report.message.find("tier 2"), std::string::npos);
+}
+
+TEST(ReportConstraint, RejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  EXPECT_FALSE(shell.Run("report_constraint", {"-bogus"}).ok);
+  EXPECT_FALSE(shell.Run("report_constraint", {"top"}).ok);
+  EXPECT_FALSE(
+      shell.Run("report_constraint", {"-scene", "func_xx"}).ok);
+}
+
+TEST(ReportConstraint, SceneSelectsOneScenario) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_ss", "func", "ss", "estimate"})
+          .ok);
+  const std::string liberty = dir.Write("cells.lib", kTimingLiberty);
+  ASSERT_TRUE(shell.Run("read_liberty", {"tt", liberty}).ok);
+  ASSERT_TRUE(shell.Run("read_liberty", {"ss", liberty}).ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult report =
+      shell.Run("report_constraint", {"-scene", "func_ss"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scenes=1"), std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_ss"), std::string::npos);
+  EXPECT_EQ(report.payload.find("scene=func_tt"), std::string::npos);
+}
+
+TEST(ReportConstraint, FileWritesReport) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcTight);
+  const std::string file = dir.Path("constraint.txt");
+  const CommandResult report =
+      shell.Run("report_constraint", {"-file", file});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("file=" + file), std::string::npos);
+  std::ifstream in(file);
+  ASSERT_TRUE(in);
+  std::stringstream contents;
+  contents << in.rdbuf();
+  EXPECT_NE(contents.str().find("Constraint"), std::string::npos);
+  EXPECT_NE(contents.str().find("r2/D"), std::string::npos);
+  EXPECT_NE(contents.str().find("max_delay"), std::string::npos);
+}
+
+TEST(ReportConstraint, NoTimingSessionFails) {
+  Shell shell;
+  EXPECT_FALSE(shell.Run("report_constraint", {}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  EXPECT_FALSE(shell.Run("report_constraint", {}).ok);
 }
 
 TEST(CoreCommands, HelpListsAndDescribesCommands) {

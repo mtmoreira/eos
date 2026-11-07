@@ -31,6 +31,7 @@
 
 #include "Graph.hh"
 #include "GraphDelayCalc.hh"
+#include "Fuzzy.hh"
 #include "MinMax.hh"
 #include "Network.hh"
 #include "PathEnd.hh"
@@ -287,6 +288,139 @@ struct StaEngine::Impl {
         check.worst_slack = static_cast<double>(slack);
       }
       return check;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
+  // Visits every pin of the design once, in the same order the
+  // upstream bulk electrical checks use: the pins of every leaf
+  // instance, then the top instance's pins (the top-level ports).
+  // The violator enumerations below replicate those bulk checks
+  // pin by pin through the public per-pin API, because the bulk
+  // check objects themselves are private members of Sta.
+  template <typename Fn>
+  void VisitAllPins(Fn&& visit) {
+    sta::Network* network = sta->network();
+    sta::LeafInstanceIterator* inst_iter =
+        network->leafInstanceIterator();
+    while (inst_iter->hasNext()) {
+      const sta::Instance* inst = inst_iter->next();
+      sta::InstancePinIterator* pin_iter = network->pinIterator(inst);
+      while (pin_iter->hasNext()) visit(pin_iter->next());
+      delete pin_iter;
+    }
+    delete inst_iter;
+    sta::InstancePinIterator* top_iter =
+        network->pinIterator(network->topInstance());
+    while (top_iter->hasNext()) visit(top_iter->next());
+    delete top_iter;
+  }
+
+  // Worst slack first, ties by pin path name, so the order is
+  // deterministic across runs.
+  static void SortViolators(std::vector<ElectricalViolation>& violators) {
+    std::sort(violators.begin(), violators.end(),
+              [](const ElectricalViolation& a,
+                 const ElectricalViolation& b) {
+                if (a.slack != b.slack) return a.slack < b.slack;
+                return a.pin < b.pin;
+              });
+  }
+
+  // The three violator enumerations (Immediate unit 6). Each
+  // mirrors the upstream bulk check's violators form: the per-pin
+  // call, the filter that decides a pin violates, and the pin
+  // iteration above. The preamble calls are required before the
+  // per-pin calls, exactly as the bulk forms require them.
+  Result<std::vector<ElectricalViolation>> MaxTransitionViolators() {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      sta->checkSlewsPreamble();
+      std::vector<ElectricalViolation> violators;
+      VisitAllPins([this, &violators](const sta::Pin* pin) {
+        sta::Slew slew = 0.0F;
+        float limit = 0.0F;
+        float slack = 0.0F;
+        const sta::RiseFall* rf = nullptr;
+        const sta::Scene* scene = nullptr;
+        sta->checkSlew(pin, sta->scenes(), sta::MinMax::max(), true, slew,
+                       limit, slack, rf, scene);
+        // The bulk check keeps exactly the pins whose limit scene
+        // exists and whose slack is negative, with a plain float
+        // comparison (CheckSlews::checkPin).
+        if (scene != nullptr && slack < 0.0F) {
+          violators.push_back(ElectricalViolation{
+              sta->network()->pathName(pin), ToNs(slew), ToNs(limit),
+              ToNs(slack)});
+        }
+      });
+      SortViolators(violators);
+      return violators;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
+  Result<std::vector<ElectricalViolation>> MaxCapacitanceViolators() {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      sta->checkCapacitancesPreamble(sta->scenes());
+      std::vector<ElectricalViolation> violators;
+      VisitAllPins([this, &violators](const sta::Pin* pin) {
+        float capacitance = 0.0F;
+        float limit = 0.0F;
+        float slack = 0.0F;
+        const sta::RiseFall* rf = nullptr;
+        const sta::Scene* scene = nullptr;
+        sta->checkCapacitance(pin, sta->scenes(), sta::MinMax::max(),
+                              capacitance, limit, slack, rf, scene);
+        // The bulk check keeps the minimum-slack check per pin
+        // only when its slack is fuzzily negative
+        // (CheckCapacitances::check with violators true).
+        if (scene != nullptr && sta::fuzzyLess(slack, 0.0F)) {
+          violators.push_back(ElectricalViolation{
+              sta->network()->pathName(pin), ToPf(capacitance),
+              ToPf(limit), ToPf(slack)});
+        }
+      });
+      SortViolators(violators);
+      return violators;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
+  Result<std::vector<ElectricalViolation>> MaxFanoutViolators() {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      sta->checkFanoutPreamble();
+      std::vector<ElectricalViolation> violators;
+      VisitAllPins([this, &violators](const sta::Pin* pin) {
+        for (const sta::Mode* mode : sta->modes()) {
+          float fanout = 0.0F;
+          float limit = 0.0F;
+          float slack = 0.0F;
+          sta->checkFanout(pin, mode, sta::MinMax::max(), fanout, limit,
+                           slack);
+          // The bulk check keeps one entry per violating (pin,
+          // mode): the per-pin check returns the null check
+          // (slack INF) for pins with no limit or outside the
+          // check gate, so a plain slack comparison replicates
+          // it exactly (CheckFanouts::checkPin).
+          if (slack < 0.0F) {
+            violators.push_back(ElectricalViolation{
+                sta->network()->pathName(pin),
+                static_cast<double>(fanout), static_cast<double>(limit),
+                static_cast<double>(slack)});
+          }
+        }
+      });
+      SortViolators(violators);
+      return violators;
     } catch (const std::exception& ex) {
       return Status::Error(ErrorCode::kIoError, ex.what());
     }
@@ -593,6 +727,20 @@ Result<ElectricalCheck> StaEngine::MaxCapacitanceCheck() {
 
 Result<ElectricalCheck> StaEngine::MaxFanoutCheck() {
   return impl_->MaxFanout();
+}
+
+Result<std::vector<ElectricalViolation>>
+StaEngine::MaxTransitionViolators() {
+  return impl_->MaxTransitionViolators();
+}
+
+Result<std::vector<ElectricalViolation>>
+StaEngine::MaxCapacitanceViolators() {
+  return impl_->MaxCapacitanceViolators();
+}
+
+Result<std::vector<ElectricalViolation>> StaEngine::MaxFanoutViolators() {
+  return impl_->MaxFanoutViolators();
 }
 
 }  // namespace eos::analysis

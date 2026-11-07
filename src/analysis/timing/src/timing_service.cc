@@ -111,14 +111,19 @@ Result<SceneResult> AnalyzeScene(const VerilogDesign& design,
                &StaEngine::TotalNegativeHoldSlackNs);
   if (!status.ok()) return status;
   // The electrical checks (unit F5): worst value in the check's
-  // own unit and the violating-pin count, per scene.
+  // own unit and the violating-pin count, per scene. The full
+  // check record is kept in the result (Immediate unit 6) so the
+  // verdict-shaped report can name the worst pin, its limit and
+  // its slack and can tell "no limit defined" apart from "limit
+  // defined and clean".
   const auto add_electrical =
       [&result, &engine, &scene](
           const char* value_name, const char* unit,
-          const char* count_name,
+          const char* count_name, ElectricalCheck& check_out,
           Result<ElectricalCheck> (StaEngine::*query)()) -> Status {
     Result<ElectricalCheck> value = (engine.*query)();
     if (!value.ok()) return SceneError(scene, value.status());
+    check_out = value.value();
     result.metrics[value_name] = TimingMetric{value.value().worst_value, unit};
     result.metrics[count_name] =
         TimingMetric{static_cast<double>(value.value().violation_count),
@@ -127,14 +132,39 @@ Result<SceneResult> AnalyzeScene(const VerilogDesign& design,
   };
   status = add_electrical("max_transition_ns", "ns",
                           "max_transition_violations",
+                          result.max_transition_check,
                           &StaEngine::MaxTransitionCheck);
   if (!status.ok()) return status;
   status = add_electrical("max_capacitance_pf", "pF",
                           "max_capacitance_violations",
+                          result.max_capacitance_check,
                           &StaEngine::MaxCapacitanceCheck);
   if (!status.ok()) return status;
   status = add_electrical("max_fanout", "fanout", "max_fanout_violations",
+                          result.max_fanout_check,
                           &StaEngine::MaxFanoutCheck);
+  if (!status.ok()) return status;
+  // The electrical violators (Immediate unit 6): every violating
+  // pin per check, worst slack first, so the report's cost is
+  // the exact sum of the violations.
+  const auto add_violators =
+      [&engine, &scene](
+          std::vector<ElectricalViolation>& out,
+          Result<std::vector<ElectricalViolation>> (StaEngine::*query)())
+      -> Status {
+    Result<std::vector<ElectricalViolation>> value = (engine.*query)();
+    if (!value.ok()) return SceneError(scene, value.status());
+    out = value.value();
+    return Status::Ok();
+  };
+  status = add_violators(result.max_transition_violators,
+                         &StaEngine::MaxTransitionViolators);
+  if (!status.ok()) return status;
+  status = add_violators(result.max_capacitance_violators,
+                         &StaEngine::MaxCapacitanceViolators);
+  if (!status.ok()) return status;
+  status = add_violators(result.max_fanout_violators,
+                         &StaEngine::MaxFanoutViolators);
   if (!status.ok()) return status;
   const auto setup_endpoints = engine.ViolatingEndpoints(CheckKind::kSetup);
   if (!setup_endpoints.ok()) return SceneError(scene, setup_endpoints.status());

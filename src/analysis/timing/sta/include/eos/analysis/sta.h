@@ -89,6 +89,19 @@ struct ElectricalCheck {
   bool has_limit = false;
 };
 
+// One violating pin of an electrical check: the pin's path name,
+// the measured value, the limit it violates and the slack, all in
+// the check's own unit (nanoseconds for max transition,
+// picofarads for max capacitance, the dimensionless fanout load
+// for max fanout). The slack is negative by construction: only
+// pins that violate appear in a violator list.
+struct ElectricalViolation {
+  std::string pin;
+  double value = 0.0;
+  double limit = 0.0;
+  double slack = 0.0;
+};
+
 // One point on a worst path, in path order: the pin's path name,
 // the path name of the instance that owns the pin (empty for a
 // top-level port pin, which no instance owns), the owning cell's
@@ -237,6 +250,21 @@ class StaEngine {
   // Fails with kInvalidState under the same conditions as
   // WorstSlackNs.
   Result<ElectricalCheck> MaxFanoutCheck();
+  // Every pin violating the max transition check, sorted by slack
+  // ascending (worst first), ties broken by pin path name so the
+  // order is deterministic. The list is empty when no pin
+  // violates, including when no pin carries a limit. Its size is
+  // the check's violation count. Fails with kInvalidState under
+  // the same conditions as WorstSlackNs.
+  Result<std::vector<ElectricalViolation>> MaxTransitionViolators();
+  // Every pin violating the max capacitance check, with the same
+  // ordering and failure behavior as MaxTransitionViolators.
+  Result<std::vector<ElectricalViolation>> MaxCapacitanceViolators();
+  // Every pin violating the max fanout check, with the same
+  // ordering and failure behavior as MaxTransitionViolators. A pin
+  // violating in more than one analysis mode appears once per
+  // violating mode, matching the upstream bulk check's count.
+  Result<std::vector<ElectricalViolation>> MaxFanoutViolators();
 
  private:
   struct Impl;
