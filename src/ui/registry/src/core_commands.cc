@@ -386,6 +386,824 @@ std::string CellTypesText(const std::map<std::string, int>& by_type) {
   return types;
 }
 
+// Mapped-netlist reader and DEF writer (unit F0, synth-to-PD
+// bridge).
+//
+// The bridge turns the mapped Verilog synth_map wrote (ABC's mapped
+// Verilog writer format, see ioWriteVerilog.c in the imported ABC
+// tree) into a DEF file the ODB facade can read back, so a design
+// synthesized in-session can reach floorplan without an ORFS run.
+// The reader is deliberately narrow: it accepts exactly the
+// constructs ABC's mapped writer emits, and fails fast naming the
+// line of anything else, so a netlist from another writer can
+// never be misread as a mapped design. Known limits, stated here
+// rather than hidden: ABC writes constant nets as `assign <net> =
+// 1'b0;` lines (unsupported: tie the constant off in the RTL),
+// drops feedthrough outputs from the module port list (a design
+// whose output is driven straight by an input loses that pin
+// here), and a gate line carrying a twin node's second output
+// surfaces as a duplicate pin and is rejected at the LEF check.
+// A gate must have exactly one output pin in the LEF, so
+// multi-output cells are rejected the same way.
+struct MappedGate {
+  std::string cell;
+  std::string instance;
+  // (pin, net) in written order; which pin is the output is
+  // decided by the LEF check, not by position.
+  std::vector<std::pair<std::string, std::string>> pins;
+};
+
+struct MappedNetlist {
+  std::string top;
+  std::vector<std::string> inputs;
+  std::vector<std::string> outputs;
+  // Internal nets, in wire-declaration order.
+  std::vector<std::string> wires;
+  std::vector<MappedGate> gates;
+};
+
+struct VerilogToken {
+  std::string text;
+  int line = 1;
+};
+
+Result<std::vector<VerilogToken>> TokenizeVerilog(
+    const std::string& text, const std::string& path) {
+  std::vector<VerilogToken> tokens;
+  std::size_t i = 0;
+  int line = 1;
+  auto fail = [&](const std::string& message) {
+    return Status::Error(
+        ErrorCode::kInvalidArgument,
+        "mapped Verilog " + path + " line " + std::to_string(line) +
+            ": " + message);
+  };
+  while (i < text.size()) {
+    const char c = text[i];
+    if (c == '\n') {
+      ++line;
+      ++i;
+      continue;
+    }
+    if (c == ' ' || c == '\t' || c == '\r') {
+      ++i;
+      continue;
+    }
+    if (c == '/' && i + 1 < text.size() && text[i + 1] == '/') {
+      while (i < text.size() && text[i] != '\n') ++i;
+      continue;
+    }
+    if (c == '\\') {
+      // Verilog escaped identifier: a backslash plus every
+      // character up to whitespace. ABC writes exactly this form
+      // for names holding characters outside [A-Za-z0-9_], and
+      // for names starting with a digit; the raw name is the
+      // token text.
+      const std::size_t start = i + 1;
+      std::size_t end = start;
+      while (end < text.size() && text[end] != ' ' &&
+             text[end] != '\t' && text[end] != '\r' &&
+             text[end] != '\n') {
+        ++end;
+      }
+      if (end == start) return fail("stray backslash");
+      tokens.push_back({text.substr(start, end - start), line});
+      i = end;
+      continue;
+    }
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+        c == '$') {
+      const std::size_t start = i;
+      while (i < text.size() &&
+             ((text[i] >= 'a' && text[i] <= 'z') ||
+              (text[i] >= 'A' && text[i] <= 'Z') ||
+              (text[i] >= '0' && text[i] <= '9') || text[i] == '_' ||
+              text[i] == '$')) {
+        ++i;
+      }
+      tokens.push_back({text.substr(start, i - start), line});
+      continue;
+    }
+    if (c >= '0' && c <= '9') {
+      const std::size_t start = i;
+      while (i < text.size() &&
+             ((text[i] >= '0' && text[i] <= '9') || text[i] == '\'' ||
+              (text[i] >= 'a' && text[i] <= 'z') ||
+              (text[i] >= 'A' && text[i] <= 'Z'))) {
+        ++i;
+      }
+      tokens.push_back({text.substr(start, i - start), line});
+      continue;
+    }
+    if (c == '(' || c == ')' || c == ',' || c == ';' || c == '.' ||
+        c == '=') {
+      tokens.push_back({std::string(1, c), line});
+      ++i;
+      continue;
+    }
+    return fail(std::string("unexpected character '") + c + "'");
+  }
+  return tokens;
+}
+
+// Reads one ABC mapped Verilog file. cell_set is the genlib cell
+// list from the mapping run: a line whose first token is a genlib
+// cell starts a gate instantiation, and any other statement shape
+// is an error. Port and wire lists may wrap across lines; gate
+// lines are one instantiation each, as ABC writes them.
+Result<MappedNetlist> ParseMappedVerilog(
+    const std::string& path, const std::set<std::string>& cell_set) {
+  std::ifstream in(path);
+  if (!in) {
+    return Status::Error(ErrorCode::kIoError,
+                         "could not read file: " + path);
+  }
+  std::stringstream buffer;
+  buffer << in.rdbuf();
+  if (in.bad()) {
+    return Status::Error(ErrorCode::kIoError,
+                         "could not read file: " + path);
+  }
+  const Result<std::vector<VerilogToken>> tokenized =
+      TokenizeVerilog(buffer.str(), path);
+  if (!tokenized.ok()) return tokenized.status();
+  const std::vector<VerilogToken>& tokens = tokenized.value();
+  std::size_t pos = 0;
+  auto at_end = [&]() { return pos >= tokens.size(); };
+  auto peek = [&]() -> const VerilogToken& { return tokens[pos]; };
+  auto fail_at = [&](const VerilogToken& token,
+                     const std::string& message) {
+    return Status::Error(
+        ErrorCode::kInvalidArgument,
+        "mapped Verilog " + path + " line " +
+            std::to_string(token.line) + ": " + message);
+  };
+  auto expect = [&](const std::string& text)
+      -> std::optional<Status> {
+    if (at_end() || peek().text != text) {
+      const std::string got =
+          at_end() ? std::string("end of file") : peek().text;
+      const int line = at_end() ? 0 : peek().line;
+      return Status::Error(
+          ErrorCode::kInvalidArgument,
+          "mapped Verilog " + path +
+              (line > 0 ? " line " + std::to_string(line) : "") +
+              ": expected '" + text + "', found '" + got + "'");
+    }
+    ++pos;
+    return std::nullopt;
+  };
+  auto read_list = [&](std::vector<std::string>* out,
+                       std::vector<std::size_t>* positions,
+                       const std::string& terminator)
+      -> std::optional<Status> {
+    // Reads identifiers separated by commas up to the terminator
+    // (';' for declarations, ')' for the module header list,
+    // which the caller then closes with ';'), recording each
+    // name's token position for error messages.
+    while (true) {
+      if (at_end()) {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "mapped Verilog " + path + ": unterminated list");
+      }
+      positions->push_back(pos);
+      out->push_back(peek().text);
+      ++pos;
+      if (at_end()) {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "mapped Verilog " + path + ": unterminated list");
+      }
+      if (peek().text == terminator) {
+        ++pos;
+        return std::nullopt;
+      }
+      if (peek().text != ",") {
+        return fail_at(peek(), "expected ',' or '" + terminator +
+                                   "' in list");
+      }
+      ++pos;
+    }
+  };
+
+  MappedNetlist netlist;
+  if (auto bad = expect("module")) return *bad;
+  if (at_end()) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "mapped Verilog " + path +
+                             ": module has no name");
+  }
+  netlist.top = peek().text;
+  ++pos;
+  if (auto bad = expect("(")) return *bad;
+  {
+    std::vector<std::string> header_ports;
+    std::vector<std::size_t> header_positions;
+    if (auto bad = read_list(&header_ports, &header_positions, ")")) {
+      return *bad;
+    }
+    if (auto bad = expect(";")) return *bad;
+    if (header_ports.empty()) {
+      return Status::Error(ErrorCode::kInvalidArgument,
+                           "mapped Verilog " + path +
+                               ": module has no ports");
+    }
+  }
+  std::set<std::string> declared;
+  auto declare = [&](const std::string& name, const VerilogToken& token)
+      -> std::optional<Status> {
+    if (!declared.insert(name).second) {
+      return fail_at(token, "duplicate net '" + name + "'");
+    }
+    return std::nullopt;
+  };
+  bool saw_endmodule = false;
+  while (!at_end() && !saw_endmodule) {
+    const VerilogToken& token = peek();
+    if (token.text == "endmodule") {
+      ++pos;
+      saw_endmodule = true;
+      break;
+    }
+    if (token.text == "input" || token.text == "output" ||
+        token.text == "wire") {
+      const std::string kind = token.text;
+      ++pos;
+      std::vector<std::string> names;
+      std::vector<std::size_t> positions;
+      if (auto bad = read_list(&names, &positions, ";")) return *bad;
+      for (std::size_t k = 0; k < names.size(); ++k) {
+        if (auto bad = declare(names[k], tokens[positions[k]])) {
+          return *bad;
+        }
+      }
+      if (kind == "input") {
+        netlist.inputs.insert(netlist.inputs.end(), names.begin(),
+                              names.end());
+      } else if (kind == "output") {
+        netlist.outputs.insert(netlist.outputs.end(), names.begin(),
+                               names.end());
+      } else {
+        netlist.wires.insert(netlist.wires.end(), names.begin(),
+                             names.end());
+      }
+      continue;
+    }
+    if (token.text == "assign") {
+      ++pos;
+      if (at_end()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path +
+                                 ": unterminated assign");
+      }
+      const VerilogToken& lhs = peek();
+      ++pos;
+      // ABC's writer emits `assign po_username<N> = <net>;` for
+      // every driven output; the name is never declared, and the
+      // net is the real output net. Skip those lines.
+      if (lhs.text.rfind("po_username", 0) == 0) {
+        if (auto bad = expect("=")) return *bad;
+        if (at_end()) {
+          return Status::Error(ErrorCode::kInvalidArgument,
+                               "mapped Verilog " + path +
+                                   ": unterminated assign");
+        }
+        ++pos;
+        if (auto bad = expect(";")) return *bad;
+        continue;
+      }
+      return fail_at(lhs, "constant or unexpected assign for net '" +
+                              lhs.text +
+                              "': the bridge takes gate netlists "
+                              "only, tie constants off in the RTL");
+    }
+    if (cell_set.count(token.text) != 0) {
+      MappedGate gate;
+      gate.cell = token.text;
+      ++pos;
+      if (at_end()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path +
+                                 ": gate has no instance name");
+      }
+      gate.instance = peek().text;
+      ++pos;
+      if (auto bad = expect("(")) return *bad;
+      while (true) {
+        if (at_end() || peek().text != ".") {
+          return Status::Error(
+              ErrorCode::kInvalidArgument,
+              "mapped Verilog " + path + ": gate '" + gate.instance +
+                  "' expects a '.pin(net)' connection");
+        }
+        ++pos;
+        if (at_end()) {
+          return Status::Error(ErrorCode::kInvalidArgument,
+                               "mapped Verilog " + path + ": gate '" +
+                                   gate.instance +
+                                   "' has an unterminated pin");
+        }
+        const std::string pin = peek().text;
+        ++pos;
+        if (auto bad = expect("(")) return *bad;
+        if (at_end()) {
+          return Status::Error(ErrorCode::kInvalidArgument,
+                               "mapped Verilog " + path + ": gate '" +
+                                   gate.instance +
+                                   "' has an unterminated pin");
+        }
+        const std::string net = peek().text;
+        ++pos;
+        if (auto bad = expect(")")) return *bad;
+        gate.pins.push_back({pin, net});
+        if (at_end()) {
+          return Status::Error(ErrorCode::kInvalidArgument,
+                               "mapped Verilog " + path + ": gate '" +
+                                   gate.instance +
+                                   "' is unterminated");
+        }
+        if (peek().text == ",") {
+          ++pos;
+          continue;
+        }
+        if (peek().text == ")") {
+          ++pos;
+          break;
+        }
+        return fail_at(peek(), "expected ',' or ')' in gate '" +
+                                   gate.instance + "'");
+      }
+      if (auto bad = expect(";")) return *bad;
+      netlist.gates.push_back(std::move(gate));
+      continue;
+    }
+    return fail_at(token, "unexpected statement '" + token.text +
+                              "': not an ABC mapped netlist");
+  }
+  if (!saw_endmodule) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "mapped Verilog " + path +
+                             ": no endmodule");
+  }
+  if (!at_end()) {
+    return fail_at(peek(), "unexpected content after endmodule");
+  }
+  if (netlist.inputs.empty() && netlist.outputs.empty() &&
+      netlist.gates.empty()) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "mapped Verilog " + path +
+                             ": empty netlist");
+  }
+  std::set<std::string> instances;
+  for (const MappedGate& gate : netlist.gates) {
+    if (!instances.insert(gate.instance).second) {
+      return Status::Error(ErrorCode::kInvalidArgument,
+                           "mapped Verilog " + path +
+                               ": duplicate instance '" + gate.instance +
+                               "'");
+    }
+    for (const auto& pin : gate.pins) {
+      if (declared.count(pin.second) == 0) {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "mapped Verilog " + path + ": gate '" + gate.instance +
+                "' connects undeclared net '" + pin.second + "'");
+      }
+    }
+  }
+  return netlist;
+}
+
+// One LEF macro: its size in microns and its signal pins with
+// directions. Parsed line by line: LEF is line-oriented enough
+// for generated libraries, and a line parser fails on structure
+// it does not recognize instead of guessing.
+struct LefMacro {
+  std::string name;
+  double width_um = 0;
+  double height_um = 0;
+  // Pin name to true when the pin is an output.
+  std::map<std::string, bool> pins;
+};
+
+struct LefData {
+  std::map<std::string, LefMacro> macros;
+  // First PORT layer seen in any macro pin, for DEF pin geometry.
+  std::string pin_layer;
+};
+
+std::string TrimLine(const std::string& line) {
+  const std::size_t first = line.find_first_not_of(" \t\r");
+  if (first == std::string::npos) return "";
+  const std::size_t last = line.find_last_not_of(" \t\r");
+  return line.substr(first, last - first + 1);
+}
+
+std::vector<std::string> SplitLine(const std::string& line) {
+  std::vector<std::string> words;
+  std::stringstream stream(line);
+  std::string word;
+  while (stream >> word) words.push_back(word);
+  return words;
+}
+
+bool ParseDoubleToken(const std::string& token, double* out) {
+  try {
+    std::size_t used = 0;
+    *out = std::stod(token, &used);
+    return used == token.size();
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+Result<LefData> ParseLefMacros(const std::string& path) {
+  std::ifstream in(path);
+  if (!in) {
+    return Status::Error(ErrorCode::kIoError,
+                         "could not read file: " + path);
+  }
+  LefData data;
+  std::string line;
+  int line_no = 0;
+  bool in_macro = false;
+  bool in_pin = false;
+  bool in_port = false;
+  LefMacro macro;
+  std::string pin_name;
+  bool pin_is_output = false;
+  bool pin_direction_seen = false;
+  auto fail = [&](const std::string& message) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "LEF " + path + " line " +
+                             std::to_string(line_no) + ": " + message);
+  };
+  while (std::getline(in, line)) {
+    ++line_no;
+    const std::size_t hash = line.find('#');
+    if (hash != std::string::npos) line = line.substr(0, hash);
+    const std::string trimmed = TrimLine(line);
+    if (trimmed.empty()) continue;
+    const std::vector<std::string> words = SplitLine(trimmed);
+    if (words.empty()) continue;
+    if (!in_macro) {
+      if (words[0] == "MACRO") {
+        if (words.size() < 2) return fail("MACRO has no name");
+        in_macro = true;
+        macro = LefMacro();
+        macro.name = words[1];
+      }
+      continue;
+    }
+    if (!in_pin) {
+      if (words[0] == "END" && words.size() >= 2 &&
+          words[1] == macro.name) {
+        if (macro.width_um <= 0 || macro.height_um <= 0) {
+          return fail("macro '" + macro.name +
+                      "' has no positive SIZE");
+        }
+        if (!data.macros.emplace(macro.name, macro).second) {
+          return fail("duplicate macro '" + macro.name + "'");
+        }
+        in_macro = false;
+        continue;
+      }
+      if (words[0] == "SIZE" && words.size() >= 4 &&
+          words[2] == "BY") {
+        if (!ParseDoubleToken(words[1], &macro.width_um) ||
+            !ParseDoubleToken(words[3], &macro.height_um)) {
+          return fail("macro '" + macro.name +
+                      "' has a non-numeric SIZE");
+        }
+        continue;
+      }
+      if (words[0] == "PIN") {
+        if (words.size() < 2) return fail("PIN has no name");
+        in_pin = true;
+        pin_name = words[1];
+        pin_is_output = false;
+        pin_direction_seen = false;
+        in_port = false;
+        continue;
+      }
+      continue;
+    }
+    if (words[0] == "END" && words.size() >= 2 &&
+        words[1] == pin_name) {
+      if (!pin_direction_seen) {
+        return fail("pin '" + pin_name + "' in macro '" + macro.name +
+                    "' has no DIRECTION");
+      }
+      macro.pins[pin_name] = pin_is_output;
+      in_pin = false;
+      in_port = false;
+      continue;
+    }
+    if (words[0] == "DIRECTION" && words.size() >= 2) {
+      if (words[1] == "INPUT") {
+        pin_is_output = false;
+        pin_direction_seen = true;
+      } else if (words[1] == "OUTPUT") {
+        pin_is_output = true;
+        pin_direction_seen = true;
+      } else if (words[1] == "INOUT") {
+        return fail("pin '" + pin_name + "' in macro '" + macro.name +
+                    "' is INOUT, the bridge takes input and output "
+                    "pins only");
+      }
+      continue;
+    }
+    if (words[0] == "PORT") {
+      in_port = true;
+      continue;
+    }
+    if (in_port && words[0] == "LAYER" && words.size() >= 2) {
+      if (data.pin_layer.empty()) data.pin_layer = words[1];
+      continue;
+    }
+    if (in_port && words[0] == "END") {
+      in_port = false;
+      continue;
+    }
+  }
+  if (in.bad()) {
+    return Status::Error(ErrorCode::kIoError,
+                         "could not read file: " + path);
+  }
+  if (in_macro) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "LEF " + path + ": unterminated macro '" +
+                             macro.name + "'");
+  }
+  if (data.macros.empty()) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "LEF " + path + ": no macros");
+  }
+  return data;
+}
+
+// Database units per micron from a tech LEF's UNITS section.
+Result<int> ParseLefDbu(const std::string& path) {
+  std::ifstream in(path);
+  if (!in) {
+    return Status::Error(ErrorCode::kIoError,
+                         "could not read file: " + path);
+  }
+  std::string line;
+  int line_no = 0;
+  bool in_units = false;
+  while (std::getline(in, line)) {
+    ++line_no;
+    const std::size_t hash = line.find('#');
+    if (hash != std::string::npos) line = line.substr(0, hash);
+    const std::vector<std::string> words =
+        SplitLine(TrimLine(line));
+    if (words.empty()) continue;
+    if (words[0] == "UNITS") {
+      in_units = true;
+      continue;
+    }
+    if (in_units && words[0] == "END") {
+      in_units = false;
+      continue;
+    }
+    if (in_units && words[0] == "DATABASE" && words.size() >= 4 &&
+        words[1] == "MICRONS") {
+      int dbu = 0;
+      const std::string& token = words[2];
+      const char* first = token.data();
+      const char* last = first + token.size();
+      const auto parsed = std::from_chars(first, last, dbu);
+      if (parsed.ec != std::errc() || parsed.ptr != last || dbu <= 0) {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "tech LEF " + path + " line " + std::to_string(line_no) +
+                ": DATABASE MICRONS is not a positive integer");
+      }
+      return dbu;
+    }
+  }
+  if (in.bad()) {
+    return Status::Error(ErrorCode::kIoError,
+                         "could not read file: " + path);
+  }
+  return Status::Error(ErrorCode::kInvalidArgument,
+                       "tech LEF " + path +
+                           ": no DATABASE MICRONS in UNITS");
+}
+
+// Writes the mapped netlist as DEF. The die area is a square at
+// 60 percent utilization over the summed macro areas, snapped up
+// to whole microns, unless the caller gives an explicit area.
+// Instances are unplaced: floorplan and place own placement.
+// Input pins sit on the left die edge, output pins on the right,
+// spread evenly; each carries a small PORT rectangle on the
+// LEF's first pin layer, because odb creates a placed BPin only
+// from port geometry. Nets list the driver connection first,
+// then the loads in gate order, so the file reads the same way
+// every run.
+struct DefWriteResult {
+  std::array<int, 4> die_area = {0, 0, 0, 0};
+  int nets = 0;
+};
+
+Result<DefWriteResult> WriteMappedDef(
+    const std::string& path, const MappedNetlist& netlist,
+    const LefData& lef, int dbu_per_micron,
+    const std::optional<std::array<int, 4>>& die_area_override) {
+  auto fail = [&](const std::string& message) {
+    return Status::Error(ErrorCode::kInvalidArgument, message);
+  };
+  if (lef.pin_layer.empty()) {
+    return fail("LEF has no pin PORT layer for DEF pin geometry");
+  }
+  // Semantic checks against the LEF: every gate cell exists, every
+  // pin exists, each pin appears at most once per gate, and each
+  // gate has exactly one output pin. The output pin of each gate
+  // is its driver, which the net checks below use.
+  std::map<std::string, std::string> net_driver;
+  std::map<std::string, std::string> gate_output_net;
+  std::map<std::string, std::string> gate_output_pin;
+  for (const MappedGate& gate : netlist.gates) {
+    const auto found = lef.macros.find(gate.cell);
+    if (found == lef.macros.end()) {
+      return fail("mapped cell '" + gate.cell + "' (instance '" +
+                  gate.instance +
+                  "') has no macro in the LEF: map with a Liberty "
+                  "whose cells the LEF provides");
+    }
+    const LefMacro& macro = found->second;
+    std::set<std::string> seen_pins;
+    std::string output_net;
+    std::string output_pin;
+    int output_pins = 0;
+    for (const auto& pin : gate.pins) {
+      if (!seen_pins.insert(pin.first).second) {
+        return fail("gate '" + gate.instance + "' connects pin '" +
+                    pin.first + "' twice");
+      }
+      const auto pin_found = macro.pins.find(pin.first);
+      if (pin_found == macro.pins.end()) {
+        return fail("gate '" + gate.instance + "' of cell '" +
+                    gate.cell + "' has no pin '" + pin.first +
+                    "' in the LEF");
+      }
+      if (pin_found->second) {
+        ++output_pins;
+        output_net = pin.second;
+        output_pin = pin.first;
+      }
+    }
+    if (output_pins != 1) {
+      return fail("gate '" + gate.instance + "' of cell '" +
+                  gate.cell + "' has " + std::to_string(output_pins) +
+                  " output pins, the bridge takes one");
+    }
+    gate_output_net[gate.instance] = output_net;
+    gate_output_pin[gate.instance] = output_pin;
+    const auto driver = net_driver.find(output_net);
+    if (driver != net_driver.end()) {
+      return fail("net '" + output_net + "' is driven by gates '" +
+                  driver->second + "' and '" + gate.instance + "'");
+    }
+    net_driver[output_net] = gate.instance;
+  }
+  std::set<std::string> input_set(netlist.inputs.begin(),
+                                  netlist.inputs.end());
+  std::set<std::string> output_set(netlist.outputs.begin(),
+                                   netlist.outputs.end());
+  for (const std::string& port : netlist.outputs) {
+    if (input_set.count(port) != 0) continue;
+    if (net_driver.count(port) == 0) {
+      return fail("output port '" + port +
+                  "' is driven by no gate: a feedthrough output is "
+                  "dropped by ABC's Verilog writer and has no DEF "
+                  "pin here");
+    }
+  }
+  for (const std::string& net : netlist.wires) {
+    if (net_driver.count(net) == 0) {
+      return fail("internal net '" + net +
+                  "' is driven by no gate");
+    }
+  }
+  double total_um2 = 0;
+  for (const MappedGate& gate : netlist.gates) {
+    const LefMacro& macro = lef.macros.at(gate.cell);
+    total_um2 += macro.width_um * macro.height_um;
+  }
+  std::array<int, 4> die = {0, 0, 0, 0};
+  if (die_area_override.has_value()) {
+    die = *die_area_override;
+    if (die[2] <= die[0] || die[3] <= die[1] || die[0] < 0 ||
+        die[1] < 0) {
+      return fail("-die_area must be a non-empty rectangle with "
+                  "non-negative origin");
+    }
+  } else {
+    const double side_um =
+        std::ceil(std::sqrt(total_um2 / 0.6));
+    const int side_dbu = static_cast<int>(side_um) * dbu_per_micron;
+    die = {0, 0, side_dbu, side_dbu};
+  }
+  const int half_rect = std::max(1, dbu_per_micron / 20);
+  std::ofstream out(path);
+  if (!out) {
+    return Status::Error(ErrorCode::kIoError,
+                         "could not write file: " + path);
+  }
+  out << "VERSION 5.8 ;\n";
+  out << "DIVIDERCHAR \"/\" ;\n";
+  out << "BUSBITCHARS \"[]\" ;\n";
+  out << "DESIGN " << netlist.top << " ;\n";
+  out << "UNITS DISTANCE MICRONS " << dbu_per_micron << " ;\n";
+  out << "DIEAREA ( " << die[0] << " " << die[1] << " ) ( " << die[2]
+      << " " << die[3] << " ) ;\n";
+  out << "\nCOMPONENTS " << netlist.gates.size() << " ;\n";
+  for (const MappedGate& gate : netlist.gates) {
+    out << "- " << gate.instance << " " << gate.cell << " ;\n";
+  }
+  out << "END COMPONENTS\n";
+  const auto pin_y = [&](std::size_t index, std::size_t count) {
+    return static_cast<int>((static_cast<long long>(index + 1) *
+                             (die[3] - die[1])) /
+                            static_cast<long long>(count + 1)) +
+           die[1];
+  };
+  out << "\nPINS "
+      << (netlist.inputs.size() + netlist.outputs.size()) << " ;\n";
+  for (std::size_t i = 0; i < netlist.inputs.size(); ++i) {
+    const std::string& name = netlist.inputs[i];
+    out << "- " << name << " + NET " << name
+        << " + DIRECTION INPUT + USE SIGNAL\n";
+    out << "  + PORT\n";
+    out << "  + LAYER " << lef.pin_layer << " ( " << -half_rect << " "
+        << -half_rect << " ) ( " << half_rect << " " << half_rect
+        << " )\n";
+    out << "  + PLACED ( " << die[0] << " "
+        << pin_y(i, netlist.inputs.size()) << " ) N ;\n";
+  }
+  for (std::size_t i = 0; i < netlist.outputs.size(); ++i) {
+    const std::string& name = netlist.outputs[i];
+    out << "- " << name << " + NET " << name
+        << " + DIRECTION OUTPUT + USE SIGNAL\n";
+    out << "  + PORT\n";
+    out << "  + LAYER " << lef.pin_layer << " ( " << -half_rect << " "
+        << -half_rect << " ) ( " << half_rect << " " << half_rect
+        << " )\n";
+    out << "  + PLACED ( " << die[2] << " "
+        << pin_y(i, netlist.outputs.size()) << " ) N ;\n";
+  }
+  out << "END PINS\n";
+  // Nets in first-use order: inputs, then internal nets in
+  // wire-declaration order, then outputs. Each net lists its
+  // driver connection first, then loads in gate order.
+  std::vector<std::string> nets;
+  nets.insert(nets.end(), netlist.inputs.begin(),
+              netlist.inputs.end());
+  nets.insert(nets.end(), netlist.wires.begin(), netlist.wires.end());
+  nets.insert(nets.end(), netlist.outputs.begin(),
+              netlist.outputs.end());
+  std::map<std::string, std::vector<std::string>> loads;
+  for (const MappedGate& gate : netlist.gates) {
+    for (const auto& pin : gate.pins) {
+      if (gate_output_net[gate.instance] == pin.second) continue;
+      loads[pin.second].push_back("( " + gate.instance + " " +
+                                  pin.first + " )");
+    }
+  }
+  out << "\nNETS " << nets.size() << " ;\n";
+  for (const std::string& net : nets) {
+    out << "- " << net;
+    if (input_set.count(net) != 0) {
+      out << " ( PIN " << net << " )";
+    } else {
+      const std::string& driver = net_driver[net];
+      out << " ( " << driver << " " << gate_output_pin[driver]
+          << " )";
+    }
+    for (const std::string& load : loads[net]) {
+      out << " " << load;
+    }
+    if (output_set.count(net) != 0) {
+      out << " ( PIN " << net << " )";
+    }
+    out << " + USE SIGNAL ;\n";
+  }
+  out << "END NETS\n";
+  out << "\nEND DESIGN\n";
+  out.flush();
+  if (!out) {
+    return Status::Error(ErrorCode::kIoError,
+                         "could not write file: " + path);
+  }
+  DefWriteResult result;
+  result.die_area = die;
+  result.nets = static_cast<int>(nets.size());
+  return result;
+}
+
 // File-list format (synthesis unit S4): one source entry per
 // line. Blank lines are ignored, and a line whose first
 // non-blank characters are '#' or '//' is a comment. An entry
@@ -4628,6 +5446,74 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return result;
       });
 
+  // read_lef and read_def (unit F0, the synth-to-PD bridge):
+  // the LEF/DEF half of the DEF round trip. read_lef adds one
+  // LEF file to the session database, creating it on the first
+  // call; read_def loads the DEF write_def wrote (or any DEF
+  // whose masters the loaded LEFs provide) into that database,
+  // creating the chip and top block. Together with write_def
+  // they carry a synthesized design into floorplan in one
+  // session, which import_odb alone cannot do: it only reopens
+  // a database produced elsewhere. A second design load is a
+  // configuration failure, not a silent replace.
+  add("read_lef", "read_lef <path>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 1, "read_lef <path>")) {
+          return *bad;
+        }
+        if (auto bad = CheckReadable(args[0])) return *bad;
+        if (ctx.timing.odb.has_value() &&
+            ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "design already loaded: eos::read_def or "
+              "eos::import_odb already loaded a design");
+        }
+        if (!ctx.timing.odb.has_value()) {
+          ctx.timing.odb.emplace();
+        }
+        const foundation::Status status =
+            ctx.timing.odb->ReadLef(args[0]);
+        if (!status.ok()) return FromStatus(status);
+        return CommandResult::Ok(
+            "path=" + args[0] +
+            " masters=" +
+            std::to_string(ctx.timing.odb->MasterCount()));
+      });
+
+  add("read_def", "read_def <path>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 1, "read_def <path>")) {
+          return *bad;
+        }
+        if (auto bad = CheckReadable(args[0])) return *bad;
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->MasterCount() == 0) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::read_lef first");
+        }
+        if (ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "design already loaded: eos::read_def or "
+              "eos::import_odb already loaded a design");
+        }
+        const foundation::Status status =
+            ctx.timing.odb->ReadDef(args[0]);
+        if (!status.ok()) return FromStatus(status);
+        return CommandResult::Ok(
+            "path=" + args[0] +
+            " design=" + ctx.timing.odb->TopBlockName() +
+            " instances=" +
+            std::to_string(ctx.timing.odb->InstanceCount()) +
+            " nets=" + std::to_string(ctx.timing.odb->NetCount()) +
+            " masters=" +
+            std::to_string(ctx.timing.odb->MasterCount()));
+      });
+
   add("floorplan",
       "floorplan [-die_area <lx> <ly> <ux> <uy>] "
       "[-core_area <lx> <ly> <ux> <uy>] [-site <name>]",
@@ -6624,6 +7510,168 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             "path=" + dest + " source=" + source_name +
             " cells=" + std::to_string(total_cells) +
             " types=" + types);
+      });
+
+  // write_def writes the mapped netlist as DEF (unit F0, the
+  // synth-to-PD bridge): the mapped Verilog synth_map wrote is
+  // parsed by the narrow reader above, checked against the cell
+  // LEF, and written out with an unplaced component per gate, a
+  // pin per top-level port, and one net per netlist net. The
+  // DEF it writes is what read_def loads into the session
+  // database; floorplan then runs on that database. The die
+  // area is computed from the LEF macro sizes unless -die_area
+  // gives one explicitly. The source netlist is the loop winner
+  // when an opt run exists, the mapped netlist otherwise, the
+  // same choice write_verilog makes.
+  add("write_def",
+      "write_def <path> -lef <path> -tlef <path> "
+      "[-die_area <lx> <ly> <ux> <uy>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        std::string dest;
+        std::string lef_path;
+        std::string tlef_path;
+        bool lef_seen = false;
+        bool tlef_seen = false;
+        std::optional<std::array<int, 4>> die_area;
+        bool die_seen = false;
+        for (std::size_t i = 0; i < args.size();) {
+          const std::string& flag = args[i];
+          if (flag == "-lef" || flag == "-tlef") {
+            const bool is_lef = flag == "-lef";
+            if ((is_lef && lef_seen) || (!is_lef && tlef_seen)) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option " + flag + " given twice");
+            }
+            if (i + 1 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option " + flag + " needs a value");
+            }
+            if (auto bad = CheckReadable(args[i + 1])) return *bad;
+            if (is_lef) {
+              lef_seen = true;
+              lef_path = args[i + 1];
+            } else {
+              tlef_seen = true;
+              tlef_path = args[i + 1];
+            }
+            i += 2;
+            continue;
+          }
+          if (flag == "-die_area") {
+            if (die_seen) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -die_area given twice");
+            }
+            if (i + 4 >= args.size()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "option -die_area needs four coordinates");
+            }
+            std::array<int, 4> area = {0, 0, 0, 0};
+            for (int k = 0; k < 4; ++k) {
+              if (!ParseCoord(args[i + 1 + k], area[k])) {
+                return CommandResult::Fail(
+                    Diag::kInvalidConfiguration,
+                    "option -die_area coordinate is not an integer: " +
+                        args[i + 1 + k]);
+              }
+            }
+            die_seen = true;
+            die_area = area;
+            i += 5;
+            continue;
+          }
+          if (flag.empty() || flag[0] == '-') {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown write_def option: " + flag);
+          }
+          if (!dest.empty()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "write_def takes one path");
+          }
+          dest = flag;
+          ++i;
+        }
+        if (dest.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::write_def <path> -lef <path> -tlef <path> "
+              "[-die_area <lx> <ly> <ux> <uy>]");
+        }
+        if (!lef_seen || !tlef_seen) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "write_def needs -lef and -tlef: the cell LEF for "
+              "macro sizes and the tech LEF for database units");
+        }
+        if (!ctx.synth.mapped) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no mapped design: eos::synth_map first");
+        }
+        const std::string source =
+            ctx.synth.opt_run ? ctx.synth.opt_verilog
+                              : ctx.synth.mapped_verilog;
+        const std::string source_name =
+            ctx.synth.opt_run ? "opt" : "mapped";
+        if (auto bad = CheckReadable(source)) return *bad;
+        std::set<std::string> cell_set;
+        {
+          std::size_t start = 0;
+          const std::string& cells = ctx.synth.mapped_genlib_cells;
+          while (start <= cells.size()) {
+            const std::size_t comma = cells.find(',', start);
+            const std::string cell = cells.substr(
+                start, comma == std::string::npos ? std::string::npos
+                                                  : comma - start);
+            if (!cell.empty()) cell_set.insert(cell);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+          }
+        }
+        const Result<MappedNetlist> parsed =
+            ParseMappedVerilog(source, cell_set);
+        if (!parsed.ok()) return FromStatus(parsed.status());
+        if (parsed.value().top != ctx.synth.top_cell) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "mapped netlist top '" + parsed.value().top +
+                  "' is not the session top '" + ctx.synth.top_cell +
+                  "'");
+        }
+        const Result<LefData> lef = ParseLefMacros(lef_path);
+        if (!lef.ok()) return FromStatus(lef.status());
+        const Result<int> dbu = ParseLefDbu(tlef_path);
+        if (!dbu.ok()) return FromStatus(dbu.status());
+        const Result<DefWriteResult> written = WriteMappedDef(
+            dest, parsed.value(), lef.value(), dbu.value(), die_area);
+        if (!written.ok()) return FromStatus(written.status());
+        std::map<std::string, int> by_type;
+        int total_cells = 0;
+        ScanMappedCells(source, cell_set, &by_type, &total_cells);
+        const std::string types = CellTypesText(by_type);
+        auto area_text = [](const std::array<int, 4>& area) {
+          return std::to_string(area[0]) + "," +
+                 std::to_string(area[1]) + "," +
+                 std::to_string(area[2]) + "," +
+                 std::to_string(area[3]);
+        };
+        return CommandResult::Ok(
+            "path=" + dest + " source=" + source_name +
+            " design=" + parsed.value().top +
+            " cells=" + std::to_string(total_cells) +
+            " types=" + types +
+            " die_area=" + area_text(written.value().die_area) +
+            " nets=" + std::to_string(written.value().nets) +
+            " pins=" +
+            std::to_string(parsed.value().inputs.size() +
+                           parsed.value().outputs.size()));
       });
 
   // check_equivalence proves two gate-level netlists
