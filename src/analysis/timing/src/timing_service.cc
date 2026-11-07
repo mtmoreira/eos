@@ -255,6 +255,86 @@ Result<CoverageResult> CoverageScene(const VerilogDesign& design,
   return out;
 }
 
+Result<QorResult> QorScene(const VerilogDesign& design,
+                           const SceneAnalysis& scene) {
+  StaEngine engine;
+  const Status prepared = PrepareEngine(engine, design, scene);
+  if (!prepared.ok()) return prepared;
+  QorResult out;
+  out.scenario = scene.scenario;
+  const auto add = [&out, &engine, &scene](const char* name,
+                                           Result<double> (StaEngine::*query)())
+      -> Status {
+    Result<double> value = (engine.*query)();
+    if (!value.ok()) return SceneError(scene, value.status());
+    out.metrics[name] = TimingMetric{value.value(), "ns"};
+    return Status::Ok();
+  };
+  Status status = add("worst_slack_ns", &StaEngine::WorstSlackNs);
+  if (!status.ok()) return status;
+  status = add("total_negative_slack_ns", &StaEngine::TotalNegativeSlackNs);
+  if (!status.ok()) return status;
+  status = add("worst_hold_slack_ns", &StaEngine::WorstHoldSlackNs);
+  if (!status.ok()) return status;
+  status = add("total_negative_hold_slack_ns",
+               &StaEngine::TotalNegativeHoldSlackNs);
+  if (!status.ok()) return status;
+  const auto add_electrical =
+      [&out, &engine, &scene](
+          const char* value_name, const char* unit,
+          const char* count_name, ElectricalCheck& check_out,
+          Result<ElectricalCheck> (StaEngine::*query)()) -> Status {
+    Result<ElectricalCheck> value = (engine.*query)();
+    if (!value.ok()) return SceneError(scene, value.status());
+    check_out = value.value();
+    out.metrics[value_name] = TimingMetric{value.value().worst_value, unit};
+    out.metrics[count_name] =
+        TimingMetric{static_cast<double>(value.value().violation_count),
+                     "pins"};
+    return Status::Ok();
+  };
+  status = add_electrical("max_transition_ns", "ns",
+                          "max_transition_violations",
+                          out.max_transition_check,
+                          &StaEngine::MaxTransitionCheck);
+  if (!status.ok()) return status;
+  status = add_electrical("max_capacitance_pf", "pF",
+                          "max_capacitance_violations",
+                          out.max_capacitance_check,
+                          &StaEngine::MaxCapacitanceCheck);
+  if (!status.ok()) return status;
+  status = add_electrical("max_fanout", "fanout", "max_fanout_violations",
+                          out.max_fanout_check,
+                          &StaEngine::MaxFanoutCheck);
+  if (!status.ok()) return status;
+  const auto add_groups =
+      [&out, &engine, &scene](
+          std::vector<PathGroupResult>& groups_out, CheckKind kind)
+      -> Status {
+    Result<std::vector<PathGroupSlack>> groups =
+        engine.PathGroupSlacks(kind);
+    if (!groups.ok()) return SceneError(scene, groups.status());
+    for (PathGroupSlack& group : groups.value()) {
+      groups_out.push_back(PathGroupResult{
+          std::move(group.name), std::move(group.endpoints)});
+    }
+    return Status::Ok();
+  };
+  status = add_groups(out.setup_groups, CheckKind::kSetup);
+  if (!status.ok()) return status;
+  status = add_groups(out.hold_groups, CheckKind::kHold);
+  if (!status.ok()) return status;
+  Result<CellAreaResult> cells = engine.CellArea();
+  if (!cells.ok()) return SceneError(scene, cells.status());
+  for (const CellTypeArea& row : cells.value().rows) {
+    out.cells.push_back(
+        CellTypeRow{row.cell, row.count, row.area});
+  }
+  out.total_cells = cells.value().total_cells;
+  out.total_area = cells.value().total_area;
+  return out;
+}
+
 }  // namespace
 
 Result<std::vector<SceneResult>> TimingService::Analyze(
@@ -387,6 +467,50 @@ Result<std::vector<CoverageResult>> TimingService::AnalyzeCoverage(
   const VerilogDesign design{netlist.string(), database.TopBlockName(),
                              sdc_path};
   return AnalyzeCoverage(design, scenes);
+}
+
+Result<std::vector<QorResult>> TimingService::AnalyzeQor(
+    const VerilogDesign& design,
+    const std::vector<SceneAnalysis>& scenes) {
+  if (design.verilog_path.empty() || design.top_cell.empty()) {
+    return Invalid("timing analysis needs a netlist and its top cell");
+  }
+  const Status valid = Validate(design.sdc_path, scenes);
+  if (!valid.ok()) return valid;
+  std::vector<QorResult> results;
+  for (const SceneAnalysis& scene : scenes) {
+    Result<QorResult> result = QorScene(design, scene);
+    if (!result.ok()) return result.status();
+    results.push_back(std::move(result).value());
+  }
+  return results;
+}
+
+Result<std::vector<QorResult>> TimingService::AnalyzeQor(
+    db::OdbDatabase& database, const std::string& sdc_path,
+    const std::vector<SceneAnalysis>& scenes) {
+  if (!database.has_top_block()) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "timing analysis of an ODB database with no "
+                         "top block");
+  }
+  // The netlist is a scratch product of the database, never a
+  // deliverable: it lives in the temp directory and is removed
+  // when this call returns, whatever the outcome.
+  const std::filesystem::path netlist =
+      std::filesystem::temp_directory_path() / "eos_timing_service_netlist.v";
+  const Status written = database.WriteVerilog(netlist.string());
+  if (!written.ok()) return written;
+  struct NetlistGuard {
+    std::filesystem::path path;
+    ~NetlistGuard() {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
+  } guard{netlist};
+  const VerilogDesign design{netlist.string(), database.TopBlockName(),
+                             sdc_path};
+  return AnalyzeQor(design, scenes);
 }
 
 }  // namespace eos::analysis

@@ -153,6 +153,39 @@ struct ScenePathReports {
   std::vector<PathReport> paths;
 };
 
+// One path group: its name and every constrained endpoint in it
+// (pin + worst slack), worst first. An endpoint appears in every
+// group it belongs to, so the union TNS counts it once and the
+// every-group TNS once per group.
+struct PathGroupResult {
+  std::string name;
+  std::vector<EndpointSlack> endpoints;
+};
+
+// One cell type's count and summed Liberty area in the design.
+struct CellTypeRow {
+  std::string cell;
+  std::size_t count = 0;
+  double area = 0.0;
+};
+
+// One scene's QoR data (Immediate unit 9, review item I9): the
+// per-group endpoint slacks for setup and hold, the cell census,
+// and the scalar metrics plus the three electrical checks, so the
+// report is one service call per scene and needs no second run.
+struct QorResult {
+  db::Scenario scenario;
+  TimingMetricMap metrics;
+  std::vector<PathGroupResult> setup_groups;
+  std::vector<PathGroupResult> hold_groups;
+  std::vector<CellTypeRow> cells;
+  std::size_t total_cells = 0;
+  double total_area = 0.0;
+  ElectricalCheck max_transition_check;
+  ElectricalCheck max_capacitance_check;
+  ElectricalCheck max_fanout_check;
+};
+
 class TimingService {
  public:
   // Analyzes the Verilog design under every scene, in the order
@@ -215,6 +248,24 @@ class TimingService {
   // form above runs on it. Fails as AnalyzeCoverage above plus
   // kInvalidState when the database has no top block.
   Result<std::vector<CoverageResult>> AnalyzeCoverage(
+      db::OdbDatabase& database, const std::string& sdc_path,
+      const std::vector<SceneAnalysis>& scenes);
+
+  // Reports one scene's QoR data under every scene (Immediate
+  // unit 9, review item I9): per-group endpoint slacks, the cell
+  // census, the scalar metrics and the three electrical checks.
+  // Each scene runs its own engine session, exactly as Analyze
+  // loads them. Fails as Analyze above.
+  Result<std::vector<QorResult>> AnalyzeQor(
+      const VerilogDesign& design,
+      const std::vector<SceneAnalysis>& scenes);
+
+  // Reports the QoR data of an imported ODB database under every
+  // scene. The database's top block is written to a temporary
+  // netlist exactly as Analyze does, and the Verilog form above
+  // runs on it. Fails as AnalyzeQor above plus kInvalidState
+  // when the database has no top block.
+  Result<std::vector<QorResult>> AnalyzeQor(
       db::OdbDatabase& database, const std::string& sdc_path,
       const std::vector<SceneAnalysis>& scenes);
 };
