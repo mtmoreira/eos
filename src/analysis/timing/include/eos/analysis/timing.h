@@ -136,6 +136,15 @@ struct PathReportRequest {
   std::optional<double> slack_lesser_than;
 };
 
+// One scene's analysis coverage: the scenario and its coverage
+// pins in the facade's CoveragePin shape, sorted by pin path name
+// then check type. Empty when the design defines no check at all
+// under the scene's constraints.
+struct CoverageResult {
+  db::Scenario scenario;
+  std::vector<CoveragePin> pins;
+};
+
 // One scene's path reports: the scenario and its worst paths in
 // the facade's PathReport shape, worst first. Empty when no
 // endpoint passes the request's selection.
@@ -189,6 +198,25 @@ class TimingService {
       db::OdbDatabase& database, const std::string& sdc_path,
       const std::vector<SceneAnalysis>& scenes,
       const PathReportRequest& request);
+
+  // Reports the analysis coverage of the Verilog design under
+  // every scene (Immediate unit 7, review item I4): one
+  // CoverageResult per scene, each with the coverage pins the
+  // facade enumerates for that scene. Each scene runs its own
+  // engine session, exactly as Analyze loads them. Fails as
+  // Analyze above.
+  Result<std::vector<CoverageResult>> AnalyzeCoverage(
+      const VerilogDesign& design,
+      const std::vector<SceneAnalysis>& scenes);
+
+  // Reports the analysis coverage of an imported ODB database
+  // under every scene. The database's top block is written to a
+  // temporary netlist exactly as Analyze does, and the Verilog
+  // form above runs on it. Fails as AnalyzeCoverage above plus
+  // kInvalidState when the database has no top block.
+  Result<std::vector<CoverageResult>> AnalyzeCoverage(
+      db::OdbDatabase& database, const std::string& sdc_path,
+      const std::vector<SceneAnalysis>& scenes);
 };
 
 }  // namespace eos::analysis

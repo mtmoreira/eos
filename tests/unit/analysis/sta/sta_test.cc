@@ -708,5 +708,287 @@ TEST(StaFacade, SlackBeforeLinkFails) {
   EXPECT_EQ(tns.status().code(), ErrorCode::kInvalidState);
 }
 
+// ---- analysis coverage (Immediate unit 7, review item I4) --------
+// The coverage probe: the facade's universe enumeration and tested
+// determination, exercised against the fixture variants. The clean
+// fixture has two setup and two hold checks (one per D pin); r1/D
+// is fed from the unclocked primary input d, so its checks are
+// untested with no clocked startpoint, while r2/D is fed from the
+// clocked r1/Q and is tested.
+const char kSdcOutputDelay[] =
+    "create_clock -name clk -period 10 [get_ports clk]\n"
+    "set_output_delay -clock clk -max 1.0 [get_ports q]\n"
+    "set_output_delay -clock clk -min 0.5 [get_ports q]\n";
+
+const char kSdcDataCheck[] =
+    "create_clock -name clk -period 10 [get_ports clk]\n"
+    "set_data_check -from [get_pins r1/Q] -to [get_pins r2/D] -setup "
+    "0.2\n"
+    "set_data_check -from [get_pins r1/Q] -to [get_pins r2/D] -hold "
+    "0.1\n";
+
+const char kSdcMinPulseWidth[] =
+    "create_clock -name clk -period 10 [get_ports clk]\n"
+    "set_min_pulse_width 1.0 [get_pins r1/CK]\n"
+    "set_min_pulse_width 1.0 [get_pins r2/CK]\n";
+
+// The gated-clock fixture: the same two flops, with the second
+// flop's clock gated by an AND2 whose enable is the primary input
+// e. The gating check lives on the enable pin of the gate itself
+// (g1/B), not on the port that drives it. The enable is fed from
+// the unclocked primary input, so its gating checks are untested
+// with no clocked startpoint.
+const char kLibertyGated[] = R"LIB(library (eos_fixture_gated) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) {
+      direction : input;
+      capacitance : 0.001;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (scalar) { values ("0.05"); }
+        fall_constraint (scalar) { values ("0.05"); }
+      }
+    }
+    pin (CK) {
+      direction : input;
+      capacitance : 0.001;
+      clock : true;
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+
+  cell (BUF) {
+    area : 2.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+
+  cell (AND2) {
+    area : 4.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (B) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A & B";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+const char kVerilogGated[] = R"V(module top (clk, e, d, q);
+  input clk, e, d;
+  output q;
+  wire n1, n2, gclk;
+
+  AND2 g1 (.A(clk), .B(e), .Y(gclk));
+  DFF r1 (.D(d), .CK(clk), .Q(n1));
+  BUF u1 (.A(n1), .Y(n2));
+  DFF r2 (.D(n2), .CK(gclk), .Q(q));
+endmodule
+)V";
+
+void LoadGatedFixture(StaEngine& engine, const TempDir& dir) {
+  ASSERT_TRUE(engine.ReadLiberty(dir.Write("cells.lib", kLibertyGated))
+                  .ok());
+  ASSERT_TRUE(engine.ReadVerilog(dir.Write("top.v", kVerilogGated))
+                  .ok());
+  ASSERT_TRUE(engine.LinkDesign("top").ok());
+  ASSERT_TRUE(engine.ReadSdc(dir.Write("top.sdc", kSdc)).ok());
+}
+
+const CoveragePin* FindCoverageRow(
+    const std::vector<CoveragePin>& rows, const std::string& pin,
+    const std::string& type) {
+  for (const CoveragePin& row : rows) {
+    if (row.pin == pin && row.check_type == type) return &row;
+  }
+  return nullptr;
+}
+
+void ExpectUntestedRow(const std::vector<CoveragePin>& rows,
+                       const std::string& pin, const std::string& type,
+                       const std::string& related,
+                       const std::string& reason) {
+  const CoveragePin* row = FindCoverageRow(rows, pin, type);
+  ASSERT_NE(row, nullptr) << pin << " " << type;
+  EXPECT_FALSE(row->tested);
+  EXPECT_EQ(row->related_pin, related);
+  EXPECT_EQ(row->untested_reason, reason);
+}
+
+void ExpectTestedRow(const std::vector<CoveragePin>& rows,
+                     const std::string& pin, const std::string& type,
+                     const std::string& related) {
+  const CoveragePin* row = FindCoverageRow(rows, pin, type);
+  ASSERT_NE(row, nullptr) << pin << " " << type;
+  EXPECT_TRUE(row->tested);
+  EXPECT_EQ(row->related_pin, related);
+  EXPECT_TRUE(row->untested_reason.empty());
+}
+
+TEST(StaFacade, AnalysisCoverageCleanFixture) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto coverage = engine.AnalysisCoverage();
+  ASSERT_TRUE(coverage.ok()) << coverage.status().message();
+  const std::vector<CoveragePin>& rows = coverage.value();
+  // Only the two D pins carry checks: nothing else in the design
+  // defines one, so no other check type appears.
+  EXPECT_EQ(rows.size(), 4u);
+  ExpectUntestedRow(rows, "r1/D", "setup", "r1/CK",
+                    "no_startpoint_clock");
+  ExpectUntestedRow(rows, "r1/D", "hold", "r1/CK",
+                    "no_startpoint_clock");
+  ExpectTestedRow(rows, "r2/D", "setup", "r2/CK");
+  ExpectTestedRow(rows, "r2/D", "hold", "r2/CK");
+  // Rows arrive sorted by pin then check type.
+  ASSERT_EQ(rows.size(), 4u);
+  EXPECT_EQ(rows[0].pin, "r1/D");
+  EXPECT_EQ(rows[0].check_type, "hold");
+  EXPECT_EQ(rows[1].check_type, "setup");
+  EXPECT_EQ(rows[2].pin, "r2/D");
+}
+
+TEST(StaFacade, AnalysisCoverageOutputDelay) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcOutputDelay);
+  const auto coverage = engine.AnalysisCoverage();
+  ASSERT_TRUE(coverage.ok()) << coverage.status().message();
+  const std::vector<CoveragePin>& rows = coverage.value();
+  EXPECT_EQ(rows.size(), 6u);
+  ExpectTestedRow(rows, "q", "out_setup", "clk");
+  ExpectTestedRow(rows, "q", "out_hold", "clk");
+  ExpectTestedRow(rows, "r2/D", "setup", "r2/CK");
+}
+
+TEST(StaFacade, AnalysisCoverageDataCheck) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcDataCheck);
+  const auto coverage = engine.AnalysisCoverage();
+  ASSERT_TRUE(coverage.ok()) << coverage.status().message();
+  const std::vector<CoveragePin>& rows = coverage.value();
+  EXPECT_EQ(rows.size(), 5u);
+  ExpectTestedRow(rows, "r2/D", "no-change", "r1/Q");
+  ExpectTestedRow(rows, "r2/D", "setup", "r2/CK");
+}
+
+TEST(StaFacade, AnalysisCoverageMinPulseWidth) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcMinPulseWidth);
+  const auto coverage = engine.AnalysisCoverage();
+  ASSERT_TRUE(coverage.ok()) << coverage.status().message();
+  const std::vector<CoveragePin>& rows = coverage.value();
+  EXPECT_EQ(rows.size(), 6u);
+  ExpectTestedRow(rows, "r1/CK", "min_pulse_width", "-");
+  ExpectTestedRow(rows, "r2/CK", "min_pulse_width", "-");
+  ExpectTestedRow(rows, "r2/D", "setup", "r2/CK");
+}
+
+TEST(StaFacade, AnalysisCoverageClockGating) {
+  TempDir dir;
+  StaEngine engine;
+  LoadGatedFixture(engine, dir);
+  const auto coverage = engine.AnalysisCoverage();
+  ASSERT_TRUE(coverage.ok()) << coverage.status().message();
+  const std::vector<CoveragePin>& rows = coverage.value();
+  EXPECT_EQ(rows.size(), 6u);
+  ExpectUntestedRow(rows, "g1/B", "clock_gating_setup", "g1/A",
+                    "no_startpoint_clock");
+  ExpectUntestedRow(rows, "g1/B", "clock_gating_hold", "g1/A",
+                    "no_startpoint_clock");
+  ExpectTestedRow(rows, "r2/D", "setup", "r2/CK");
+  ExpectTestedRow(rows, "r2/D", "hold", "r2/CK");
+}
+
+TEST(StaFacade, AnalysisCoverageBeforeLinkFails) {
+  StaEngine engine;
+  const auto coverage = engine.AnalysisCoverage();
+  EXPECT_FALSE(coverage.ok());
+  EXPECT_EQ(coverage.status().code(), ErrorCode::kInvalidState);
+}
+
 }  // namespace
 }  // namespace eos::analysis

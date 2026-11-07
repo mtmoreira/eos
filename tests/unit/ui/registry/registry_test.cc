@@ -70,7 +70,7 @@ TEST(Registry, CoreSetIsComplete) {
   // gui_show adds gui_show; Immediate unit 5 adds report_clock.
   // The panel rework adds synth_issues; Immediate unit 6 adds
   // report_constraint.
-  EXPECT_EQ(shell.registry.Names().size(), 75u);
+  EXPECT_EQ(shell.registry.Names().size(), 76u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -3311,6 +3311,181 @@ TEST(ReportConstraint, NoTimingSessionFails) {
       shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
           .ok);
   EXPECT_FALSE(shell.Run("report_constraint", {}).ok);
+}
+
+// ---- report_analysis_coverage (Immediate unit 7, review item I4) ---
+// The per-type summary and the per-pin detail form on the clean
+// two-flop fixture: r1/D setup and hold untested (no clocked
+// startpoint), r2/D setup and hold tested. The filters, the file
+// form, and the no-session failures.
+
+// The fixture design for the coverage command: the same
+// BuildReportConstraintDesign setup, one estimate scenario.
+TEST(ReportAnalysisCoverage, CleanDesignReportsSummaryAndDetail) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report = shell.Run("report_analysis_coverage", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("source=verilog"), std::string::npos);
+  EXPECT_NE(report.payload.find("scenes=1"), std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt checks=4 tested=2 "
+                                "untested=2 report=coverage_report_"
+                                "func_tt"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt type=setup tested=1 "
+                                "untested=1 percent=50.0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt type=hold tested=1 "
+                                "untested=1 percent=50.0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find(
+                "scene=func_tt pin=r1/D related=r1/CK type=setup "
+                "status=untested reason=no_startpoint_clock"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find(
+                "scene=func_tt pin=r1/D related=r1/CK type=hold "
+                "status=untested reason=no_startpoint_clock"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find(
+                "scene=func_tt pin=r2/D related=r2/CK type=setup "
+                "status=tested reason=-"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find(
+                "scene=func_tt pin=r2/D related=r2/CK type=hold "
+                "status=tested reason=-"),
+            std::string::npos);
+  // The clean fixture defines no other check type.
+  EXPECT_NE(report.payload.find(
+                "No checks defined: out_setup, out_hold, recovery, "
+                "removal, clock_gating_setup, clock_gating_hold, "
+                "no-change, min_pulse_width."),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "coverage_report_func_tt"),
+            nullptr);
+}
+
+TEST(ReportAnalysisCoverage, StatusDetailsFiltersDetailRows) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult tested = shell.Run(
+      "report_analysis_coverage", {"-status_details", "tested"});
+  ASSERT_TRUE(tested.ok) << tested.message;
+  EXPECT_NE(tested.payload.find("pin=r2/D"), std::string::npos);
+  EXPECT_EQ(tested.payload.find("pin=r1/D"), std::string::npos);
+  // The summary still counts the untested rows.
+  EXPECT_NE(tested.payload.find("scene=func_tt checks=4 tested=2 "
+                                "untested=2"),
+            std::string::npos);
+  const CommandResult untested = shell.Run(
+      "report_analysis_coverage", {"-status_details", "untested"});
+  ASSERT_TRUE(untested.ok) << untested.message;
+  EXPECT_NE(untested.payload.find("pin=r1/D"), std::string::npos);
+  EXPECT_EQ(untested.payload.find("pin=r2/D"), std::string::npos);
+}
+
+TEST(ReportAnalysisCoverage, CheckTypeFiltersDetailRows) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report = shell.Run("report_analysis_coverage",
+                                         {"-check_type", "hold"});
+  ASSERT_TRUE(report.ok) << report.message;
+  // The detail rows are filtered to hold only; the summary payload
+  // lines still count every type.
+  EXPECT_NE(report.payload.find("type=hold status="),
+            std::string::npos);
+  EXPECT_EQ(report.payload.find("type=setup status="),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt checks=4 tested=2 "
+                                "untested=2"),
+            std::string::npos);
+}
+
+TEST(ReportAnalysisCoverage, ExcludeUntestedDropsUntestedRows) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report =
+      shell.Run("report_analysis_coverage", {"-exclude_untested"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("pin=r2/D"), std::string::npos);
+  EXPECT_EQ(report.payload.find("pin=r1/D"), std::string::npos);
+  // The summary still counts the untested rows.
+  EXPECT_NE(report.payload.find("scene=func_tt checks=4 tested=2 "
+                                "untested=2"),
+            std::string::npos);
+}
+
+TEST(ReportAnalysisCoverage, RejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  EXPECT_FALSE(shell.Run("report_analysis_coverage", {"-bogus"}).ok);
+  EXPECT_FALSE(shell.Run("report_analysis_coverage", {"top"}).ok);
+  EXPECT_FALSE(shell.Run("report_analysis_coverage",
+                         {"-status_details", "all"})
+                   .ok);
+  EXPECT_FALSE(shell.Run("report_analysis_coverage",
+                         {"-check_type", "max_skew"})
+                   .ok);
+  EXPECT_FALSE(shell.Run("report_analysis_coverage",
+                         {"-scene", "func_xx"})
+                   .ok);
+}
+
+TEST(ReportAnalysisCoverage, SceneSelectsOneScenario) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_ss", "func", "ss", "estimate"})
+          .ok);
+  const std::string liberty = dir.Write("cells.lib", kTimingLiberty);
+  ASSERT_TRUE(shell.Run("read_liberty", {"tt", liberty}).ok);
+  ASSERT_TRUE(shell.Run("read_liberty", {"ss", liberty}).ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult report =
+      shell.Run("report_analysis_coverage", {"-scene", "func_ss"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scenes=1"), std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_ss"), std::string::npos);
+  EXPECT_EQ(report.payload.find("scene=func_tt"), std::string::npos);
+}
+
+TEST(ReportAnalysisCoverage, FileWritesReport) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const std::string file = dir.Path("coverage.txt");
+  const CommandResult report =
+      shell.Run("report_analysis_coverage", {"-file", file});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("file=" + file), std::string::npos);
+  std::ifstream in(file);
+  ASSERT_TRUE(in);
+  std::stringstream contents;
+  contents << in.rdbuf();
+  EXPECT_NE(contents.str().find("Check Type"), std::string::npos);
+  EXPECT_NE(contents.str().find("r1/D"), std::string::npos);
+  EXPECT_NE(contents.str().find("no_startpoint_clock"),
+            std::string::npos);
+}
+
+TEST(ReportAnalysisCoverage, NoTimingSessionFails) {
+  Shell shell;
+  EXPECT_FALSE(shell.Run("report_analysis_coverage", {}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  EXPECT_FALSE(shell.Run("report_analysis_coverage", {}).ok);
 }
 
 TEST(CoreCommands, HelpListsAndDescribesCommands) {

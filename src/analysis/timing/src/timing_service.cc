@@ -242,6 +242,19 @@ Result<ScenePathReports> ReportScene(const VerilogDesign& design,
   return out;
 }
 
+Result<CoverageResult> CoverageScene(const VerilogDesign& design,
+                                     const SceneAnalysis& scene) {
+  StaEngine engine;
+  const Status prepared = PrepareEngine(engine, design, scene);
+  if (!prepared.ok()) return prepared;
+  CoverageResult out;
+  out.scenario = scene.scenario;
+  Result<std::vector<CoveragePin>> pins = engine.AnalysisCoverage();
+  if (!pins.ok()) return SceneError(scene, pins.status());
+  out.pins = std::move(pins).value();
+  return out;
+}
+
 }  // namespace
 
 Result<std::vector<SceneResult>> TimingService::Analyze(
@@ -330,6 +343,50 @@ Result<std::vector<ScenePathReports>> TimingService::ReportPaths(
   const VerilogDesign design{netlist.string(), database.TopBlockName(),
                              sdc_path};
   return ReportPaths(design, scenes, request);
+}
+
+Result<std::vector<CoverageResult>> TimingService::AnalyzeCoverage(
+    const VerilogDesign& design,
+    const std::vector<SceneAnalysis>& scenes) {
+  if (design.verilog_path.empty() || design.top_cell.empty()) {
+    return Invalid("timing analysis needs a netlist and its top cell");
+  }
+  const Status valid = Validate(design.sdc_path, scenes);
+  if (!valid.ok()) return valid;
+  std::vector<CoverageResult> results;
+  for (const SceneAnalysis& scene : scenes) {
+    Result<CoverageResult> result = CoverageScene(design, scene);
+    if (!result.ok()) return result.status();
+    results.push_back(std::move(result).value());
+  }
+  return results;
+}
+
+Result<std::vector<CoverageResult>> TimingService::AnalyzeCoverage(
+    db::OdbDatabase& database, const std::string& sdc_path,
+    const std::vector<SceneAnalysis>& scenes) {
+  if (!database.has_top_block()) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "timing analysis of an ODB database with no "
+                         "top block");
+  }
+  // The netlist is a scratch product of the database, never a
+  // deliverable: it lives in the temp directory and is removed
+  // when this call returns, whatever the outcome.
+  const std::filesystem::path netlist =
+      std::filesystem::temp_directory_path() / "eos_timing_service_netlist.v";
+  const Status written = database.WriteVerilog(netlist.string());
+  if (!written.ok()) return written;
+  struct NetlistGuard {
+    std::filesystem::path path;
+    ~NetlistGuard() {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
+  } guard{netlist};
+  const VerilogDesign design{netlist.string(), database.TopBlockName(),
+                             sdc_path};
+  return AnalyzeCoverage(design, scenes);
 }
 
 }  // namespace eos::analysis

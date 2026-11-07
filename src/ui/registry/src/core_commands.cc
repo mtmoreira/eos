@@ -6663,6 +6663,272 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(payload);
       });
 
+  // ---- report_analysis_coverage (Immediate unit 7, review item I4)
+  // ------
+  // The coverage report: per check type, how many constrained pins
+  // the timing engine actually tested and how many it left
+  // untested, plus the per-pin detail form (PrimeTime T-2022.03
+  // ch. 18/19 shape: tested/untested counts and percents per check
+  // type, and the untested reason per pin). The check types EOS
+  // can express and the engine evaluates: setup, hold, out_setup,
+  // out_hold, recovery, removal, clock_gating_setup,
+  // clock_gating_hold, no-change, min_pulse_width. A type EOS
+  // cannot express (min_period, max_skew, clock_separation) is
+  // never reported as untested: it is named on the "no checks
+  // defined" line instead, and the full included/excluded table
+  // lives in docs/report-analysis-coverage.md. Tested means a
+  // constrained path end (or a min-pulse-width check) exists for
+  // the pin; untested reasons are constant_disabled,
+  // no_clock, no_startpoint_clock and no_paths, in that
+  // precedence. -status_details tested|untested and -check_type
+  // filter the detail table; -exclude_untested drops the untested
+  // rows from the detail table only, the summary still counts
+  // them. The command runs the analysis itself for the selected
+  // scenes (it does not reuse a previous run_timing: the session
+  // keeps no live engine), and registers one report binding per
+  // scene through session/reports, like report_constraint.
+  add("report_analysis_coverage",
+      "report_analysis_coverage [-status_details tested|untested] "
+      "[-check_type <type>] [-exclude_untested] [-scene <name>] "
+      "[-file <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        static const char* kCheckTypes[] = {
+            "setup",           "hold",
+            "out_setup",       "out_hold",
+            "recovery",        "removal",
+            "clock_gating_setup", "clock_gating_hold",
+            "no-change",       "min_pulse_width",
+        };
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-status_details", 1, false},
+                 {"-check_type", 1, false},
+                 {"-exclude_untested", 0, false},
+                 {"-scene", 1, false},
+                 {"-file", 1, false}},
+                "report_analysis_coverage", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "report_analysis_coverage: unexpected positional "
+              "argument: " +
+                  opts.Positionals()[0]);
+        }
+        std::optional<std::string> status_details;
+        if (opts.Seen("-status_details")) {
+          status_details = *opts.Value("-status_details");
+          if (*status_details != "tested" &&
+              *status_details != "untested") {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "report_analysis_coverage: -status_details must be "
+                "tested or untested, got: " +
+                    *status_details);
+          }
+        }
+        std::optional<std::string> check_type;
+        if (opts.Seen("-check_type")) {
+          check_type = *opts.Value("-check_type");
+          bool known = false;
+          for (const char* type : kCheckTypes) {
+            if (*check_type == type) known = true;
+          }
+          if (!known) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "report_analysis_coverage: unknown check type: " +
+                    *check_type +
+                    " (setup, hold, out_setup, out_hold, recovery, "
+                    "removal, clock_gating_setup, clock_gating_hold, "
+                    "no-change, min_pulse_width)");
+          }
+        }
+        const bool exclude_untested = opts.Has("-exclude_untested");
+        bool from_odb = false;
+        std::vector<analysis::SceneAnalysis> scenes;
+        if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          return *bad;
+        }
+        if (opts.Seen("-scene")) {
+          const std::string wanted = *opts.Value("-scene");
+          std::vector<analysis::SceneAnalysis> selected;
+          for (const analysis::SceneAnalysis& scene : scenes) {
+            if (scene.scenario.name == wanted) {
+              selected.push_back(scene);
+            }
+          }
+          if (selected.empty()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown scenario: " + wanted);
+          }
+          scenes = std::move(selected);
+        }
+        analysis::TimingService service;
+        const Result<std::vector<analysis::CoverageResult>> analyzed =
+            from_odb
+                ? service.AnalyzeCoverage(*ctx.timing.odb,
+                                          ctx.timing.sdc_path, scenes)
+                : service.AnalyzeCoverage(
+                      analysis::VerilogDesign{ctx.timing.verilog_path,
+                                              ctx.timing.top_cell,
+                                              ctx.timing.sdc_path},
+                      scenes);
+        if (!analyzed.ok()) return FromStatus(analyzed.status());
+        // One report binding per scene, registered through
+        // session/reports at the current ledger revision. The
+        // analysis completed, so the report's proof is pass: the
+        // coverage counts are the measured result, whatever their
+        // split.
+        std::string payload = std::string("source=") +
+                              (from_odb ? "odb" : "verilog") +
+                              " scenes=" +
+                              std::to_string(analyzed.value().size()) +
+                              " revision=" +
+                              std::to_string(
+                                  ctx.project.ledger.current_revision());
+        std::string text;
+        for (std::size_t i = 0; i < analyzed.value().size(); ++i) {
+          const analysis::SceneAnalysis& scene = scenes[i];
+          const analysis::CoverageResult& result = analyzed.value()[i];
+          const std::string report =
+              "coverage_report_" + result.scenario.name;
+          const Result<session::ArtifactId> artifact =
+              ctx.reports.RegisterReport(ctx.project, report,
+                                         session::ProofStatus::kPass,
+                                         "NLDM");
+          if (!artifact.ok()) return FromStatus(artifact.status());
+          // Per-type counts in the fixed type order. The detail
+          // rows arrive sorted by (pin, check type), so a row's
+          // type index is found by a linear scan of ten names.
+          struct TypeCounts {
+            std::size_t tested = 0;
+            std::size_t untested = 0;
+          };
+          std::vector<TypeCounts> counts(
+              sizeof(kCheckTypes) / sizeof(kCheckTypes[0]));
+          std::size_t total_tested = 0;
+          std::size_t total_untested = 0;
+          for (const analysis::CoveragePin& pin : result.pins) {
+            for (std::size_t t = 0; t < counts.size(); ++t) {
+              if (pin.check_type == kCheckTypes[t]) {
+                if (pin.tested) {
+                  ++counts[t].tested;
+                  ++total_tested;
+                } else {
+                  ++counts[t].untested;
+                  ++total_untested;
+                }
+                break;
+              }
+            }
+          }
+          payload += "\nscene=" + result.scenario.name +
+                     " checks=" +
+                     std::to_string(result.pins.size()) +
+                     " tested=" + std::to_string(total_tested) +
+                     " untested=" + std::to_string(total_untested) +
+                     " report=" + report + " artifact=" +
+                     std::to_string(artifact.value());
+          for (std::size_t t = 0; t < counts.size(); ++t) {
+            const std::size_t total =
+                counts[t].tested + counts[t].untested;
+            if (total == 0) continue;
+            const double percent =
+                static_cast<double>(counts[t].tested) * 100.0 /
+                static_cast<double>(total);
+            payload += "\nscene=" + result.scenario.name +
+                       " type=" + kCheckTypes[t] +
+                       " tested=" + std::to_string(counts[t].tested) +
+                       " untested=" +
+                       std::to_string(counts[t].untested) +
+                       " percent=" + FormatFixed(percent, 1);
+          }
+          text += "\nScene: " + result.scenario.name + "\n";
+          std::vector<std::vector<std::string>> summary;
+          summary.push_back({"Check Type", "Tested", "Untested",
+                             "Tested %"});
+          for (std::size_t t = 0; t < counts.size(); ++t) {
+            const std::size_t total =
+                counts[t].tested + counts[t].untested;
+            if (total == 0) continue;
+            const double percent =
+                static_cast<double>(counts[t].tested) * 100.0 /
+                static_cast<double>(total);
+            summary.push_back({kCheckTypes[t],
+                               std::to_string(counts[t].tested),
+                               std::to_string(counts[t].untested),
+                               FormatFixed(percent, 1)});
+          }
+          text += ReportClockRenderTable(std::move(summary));
+          std::string no_checks;
+          for (std::size_t t = 0; t < counts.size(); ++t) {
+            if (counts[t].tested + counts[t].untested == 0) {
+              if (!no_checks.empty()) no_checks += ", ";
+              no_checks += kCheckTypes[t];
+            }
+          }
+          if (!no_checks.empty()) {
+            text += "No checks defined: " + no_checks + ".\n";
+          }
+          // The detail table honors the filters; the summary
+          // above still counts every defined check.
+          const auto detail_shown =
+              [&](const analysis::CoveragePin& pin) {
+                if (check_type.has_value() &&
+                    pin.check_type != *check_type) {
+                  return false;
+                }
+                if (status_details.has_value() &&
+                    ((pin.tested && *status_details != "tested") ||
+                     (!pin.tested && *status_details != "untested"))) {
+                  return false;
+                }
+                if (exclude_untested && !pin.tested) return false;
+                return true;
+              };
+          std::vector<std::vector<std::string>> detail;
+          detail.push_back({"Constrained Pin", "Related Pin",
+                            "Check Type", "Untested Reason"});
+          for (const analysis::CoveragePin& pin : result.pins) {
+            if (!detail_shown(pin)) continue;
+            detail.push_back({pin.pin, pin.related_pin,
+                              pin.check_type,
+                              pin.tested ? "-"
+                                         : pin.untested_reason});
+            payload += "\nscene=" + result.scenario.name +
+                       " pin=" + pin.pin +
+                       " related=" + pin.related_pin +
+                       " type=" + pin.check_type +
+                       " status=" + (pin.tested ? "tested" : "untested") +
+                       " reason=" +
+                       (pin.tested ? "-" : pin.untested_reason);
+          }
+          text += ReportClockRenderTable(std::move(detail));
+        }
+        if (opts.Seen("-file")) {
+          const std::string file = *opts.Value("-file");
+          std::ofstream out(file);
+          if (!out) {
+            return CommandResult::Fail(Diag::kIoError,
+                                       "could not write file: " + file);
+          }
+          out << text;
+          out.close();
+          if (!out) {
+            return CommandResult::Fail(Diag::kIoError,
+                                       "could not write file: " + file);
+          }
+          payload += "\nfile=" + file;
+        }
+        payload += "\n" + text;
+        return CommandResult::Ok(payload);
+      });
+
   add("close_timing", "close_timing <max_iterations>",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {

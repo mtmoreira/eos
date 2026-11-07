@@ -402,6 +402,41 @@ TEST(TimingService, VerilogDesignAnalyzedPerScene) {
   }
 }
 
+// Analysis coverage (Immediate unit 7, review item I4): the
+// service runs one engine session per scene and returns the
+// facade's coverage pins, so the fixture's two setup and two hold
+// checks come back with r1/D untested (no clocked startpoint) and
+// r2/D tested.
+TEST(TimingService, AnalysisCoveragePerScene) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  const auto results = service.AnalyzeCoverage(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)});
+  ASSERT_TRUE(results.ok()) << results.status().message();
+  ASSERT_EQ(results.value().size(), 1u);
+  const CoverageResult& result = results.value()[0];
+  EXPECT_EQ(result.scenario.name, "func_tt");
+  ASSERT_EQ(result.pins.size(), 4u);
+  std::size_t tested = 0;
+  std::size_t untested = 0;
+  for (const CoveragePin& pin : result.pins) {
+    if (pin.tested) {
+      ++tested;
+      EXPECT_EQ(pin.pin, "r2/D");
+      EXPECT_TRUE(pin.untested_reason.empty());
+    } else {
+      ++untested;
+      EXPECT_EQ(pin.pin, "r1/D");
+      EXPECT_EQ(pin.untested_reason, "no_startpoint_clock");
+    }
+  }
+  EXPECT_EQ(tested, 2u);
+  EXPECT_EQ(untested, 2u);
+}
+
 TEST(TimingService, TightClockShowsViolationPerScene) {
   TempDir dir;
   const std::string liberty = dir.Write("cells.lib", kLiberty);
