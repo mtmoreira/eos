@@ -166,6 +166,15 @@ cmake --build build --target eos-gui -j$(sysctl -n hw.ncpu)
 The full build uses the same configure line with `cmake --build
 build` and no --target argument.
 
+For the guided version of the same build, run
+`scripts/build-macos.sh` from the repository root. It checks the
+prerequisites first, configures into `build-fresh`, builds
+`eos-gui` and `eos-gui-bundle`, and shows a progress bar with one
+line per stage, plus an ASCII EOS logo. The full build log goes to
+`gui-build.log` (overridable with `--log FILE`) and ends with an
+`exit=` line. The script never runs `git pull`, never asks for
+sudo, and never deletes anything.
+
 ### Linux (Debian/Ubuntu)
 
 ```
