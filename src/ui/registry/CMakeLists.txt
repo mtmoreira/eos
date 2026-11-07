@@ -6,6 +6,11 @@ target_include_directories(eda_ui_registry PUBLIC include)
 # registry links both: Yosys whole-archive, exactly as every other
 # Yosys consumer must, because its passes register through global
 # constructors a plain archive pull never includes.
+# write_sdc -compress writes gzip bytes through zlib (same pattern as
+# odb: ZLIB stays PRIVATE, no public registry header includes it).
+find_package(ZLIB REQUIRED)
+target_link_libraries(eda_ui_registry
+  PRIVATE ZLIB::ZLIB)
 target_link_libraries(eda_ui_registry
   PUBLIC eda_session_session eda_session_ledger eda_session_reports
          eda_session_flow
