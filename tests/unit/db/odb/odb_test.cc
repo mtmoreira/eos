@@ -142,6 +142,47 @@ TEST(Odb, ReadLefAndDefReportTopBlockAndCounts) {
   EXPECT_EQ(db.NetCount(), 3u);
 }
 
+// F0: a tech-only LEF (layers, no SITE or MACRO) reads cleanly as
+// the first LEF and the cell LEF then attaches to its technology.
+// OpenDB only creates the library on the first SITE or MACRO, so
+// without the tech-only handling the first read returned null
+// even though the technology loaded. The mock PDK splits tech and
+// cells this way.
+const char kTechOnlyLef[] = R"LEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+LAYER metal1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal1
+LAYER metal2
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal2
+END LIBRARY
+)LEF";
+
+TEST(Odb, ReadLefAcceptsTechOnlyLefThenCellLef) {
+  TempDir dir;
+  OdbDatabase db;
+  ASSERT_TRUE(db.ReadLef(dir.Write("tech.lef", kTechOnlyLef)).ok());
+  EXPECT_EQ(db.MasterCount(), 0u);
+  ASSERT_TRUE(db.ReadLef(dir.Write("cells.lef", kLef)).ok());
+  EXPECT_EQ(db.MasterCount(), 1u);
+  ASSERT_TRUE(db.ReadDef(dir.Write("top.def", kDef)).ok());
+  EXPECT_TRUE(db.has_top_block());
+  EXPECT_EQ(db.TopBlockName(), "top");
+  EXPECT_EQ(db.InstanceCount(), 2u);
+  EXPECT_EQ(db.NetCount(), 3u);
+}
+
 TEST(Odb, NetNamesEnumeratesEveryNet) {
   TempDir dir;
   OdbDatabase db;

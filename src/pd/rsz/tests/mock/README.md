@@ -39,7 +39,10 @@ engine feature be tested in CI without any real PDK file.
   in the LEF (no Liberty cell, so a load without timing is
   exercised).
 - `eos_mock.lef`: 40 macros (the 39 Liberty cells plus
-  `EM_LEFONLY`). Core height 3.2 um for all core cells.
+  `EM_LEFONLY`). Core height 3.2 um for all core cells. Row site
+  `em_site` (0.2 by 3.2 um, CLASS CORE), assigned to every macro,
+  added 2026-11-07 for the floorplan engine (unit F0): without a
+  site, InitFloorplan finds no row sites and fails.
 - `eos_mock.tlef`: 10 routing layers. Tech-derived wire scalars
   (R = RPERSQ / width, C = CPERSQDIST * width +
   2 * EDGECAPACITANCE, per the command formula):

@@ -297,17 +297,51 @@ TEST(AbcFacade, LibertyToGenlibEmitsOnlyQualifyingCells) {
   AbcEngine engine;
   const auto cells = engine.LibertyToGenlib(liberty, genlib);
   ASSERT_TRUE(cells.ok()) << cells.status().message();
-  ASSERT_EQ(cells.value().size(), 3u);
+  // F0 changed the table rule: a table arc now contributes its
+  // worst-case value instead of disqualifying the cell, so TABLED
+  // qualifies with delay 0.9. DFF stays out (sequential).
+  ASSERT_EQ(cells.value().size(), 4u);
   EXPECT_EQ(cells.value()[0], "AND2");
   EXPECT_EQ(cells.value()[1], "BUF");
   EXPECT_EQ(cells.value()[2], "INV");
+  EXPECT_EQ(cells.value()[3], "TABLED");
   const std::string text = ReadFile(genlib);
   EXPECT_NE(text.find("GATE AND2 2 Y=A*B;"), std::string::npos);
   EXPECT_NE(text.find("PIN * INV 1 999 0.6 0.0 0.6 0.0;"),
             std::string::npos);
   EXPECT_NE(text.find("GATE INV 1 Y=!A;"), std::string::npos);
+  EXPECT_NE(text.find("GATE TABLED 3 Y=A;"), std::string::npos);
+  EXPECT_NE(text.find("PIN * INV 1 999 0.9 0.0 0.9 0.0;"),
+            std::string::npos);
   EXPECT_EQ(text.find("DFF"), std::string::npos);
-  EXPECT_EQ(text.find("TABLED"), std::string::npos);
+}
+
+// F0: a real PDK Liberty quotes its directions and uses table
+// delays. Both must map: quoted "input"/"output" count as
+// directions, and a table arc contributes the maximum over its
+// values list (0.5 here, across two quoted value strings and a
+// lower cell_fall).
+TEST(AbcFacade, LibertyToGenlibAcceptsQuotedDirectionsAndTableDelays) {
+  TempDir dir;
+  const std::string liberty = dir.Write(
+      "quoted.lib",
+      "library (x) { cell (AND2Q) { area : 2.0; "
+      "pin (A) { direction : \"input\"; capacitance : 0.001; } "
+      "pin (B) { direction : \"input\"; capacitance : 0.001; } "
+      "pin (Y) { direction : \"output\"; function : \"A*B\"; "
+      "timing () { related_pin : \"A\"; "
+      "cell_rise (\"del_4_4\") { values (\"0.1, 0.5\", \"0.3\"); } "
+      "cell_fall (\"del_4_4\") { values (\"0.2\"); } } } } }\n");
+  const std::string genlib = dir.Path("quoted.genlib");
+  AbcEngine engine;
+  const auto cells = engine.LibertyToGenlib(liberty, genlib);
+  ASSERT_TRUE(cells.ok()) << cells.status().message();
+  ASSERT_EQ(cells.value().size(), 1u);
+  EXPECT_EQ(cells.value()[0], "AND2Q");
+  const std::string text = ReadFile(genlib);
+  EXPECT_NE(text.find("GATE AND2Q 2 Y=A*B;"), std::string::npos);
+  EXPECT_NE(text.find("PIN * INV 1 999 0.5 0.0 0.5 0.0;"),
+            std::string::npos);
 }
 
 TEST(AbcFacade, LibertyToGenlibAcceptsPlusAsOr) {

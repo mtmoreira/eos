@@ -267,6 +267,13 @@ add_test(NAME pd.rsz.mock.fallback_zero_drive
 add_executable(eda_ui_registry_unit_test ui/registry/registry_test.cc)
 target_link_libraries(eda_ui_registry_unit_test
   PRIVATE eda_ui_registry eda_db_checkpoint GTest::gtest GTest::gtest_main)
+# F0: the mock-PDK bridge test reads the demo design and the mock
+# PDK from the source tree, like the GUI icon check reads its
+# assets from a path. The defines carry quoted absolute paths.
+target_compile_definitions(eda_ui_registry_unit_test
+  PRIVATE
+    EOS_MOCK_PDK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../src/pd/rsz/tests/mock"
+    EOS_DEMO_SYNTH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/synth")
 add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test)
 
 if(TCL_FOUND)

@@ -229,6 +229,13 @@ LEF_ONLY = {"name": "EM_LEFONLY", "width": 2.0,
             "pins": [("CK", "input"), ("D", "input")]}
 
 HEIGHT = 3.2
+# Row site width (um). Every core macro width is a multiple of
+# this, so rows tile without gaps. Added for the floorplan
+# engine (unit F0, 2026-11-07): InitFloorplan finds its row
+# sites from the placed instances' masters, so a LEF with no
+# SITE fails floorplan with "No sites found".
+SITE_WIDTH = 0.2
+SITE_NAME = "em_site"
 
 # Tech layers: synthetic values, own names. Derived scalars via the
 # command formula R = RPERSQ / width, C = CPERSQDIST * width +
@@ -422,6 +429,10 @@ def emit_lef(path):
     out.append("VERSION 5.8 ;")
     out.append('BUSBITCHARS "[]" ;')
     out.append('DIVIDERCHAR "/" ;')
+    out.append("SITE %s" % SITE_NAME)
+    out.append("  CLASS CORE ;")
+    out.append("  SIZE %s BY %s ;" % (fmt(SITE_WIDTH), fmt(HEIGHT)))
+    out.append("END %s" % SITE_NAME)
     macros = [(c["name"], c["width"],
                [(p[0], p[1], p[6]) for p in c["pins"]])
               for c in CELLS]
@@ -432,6 +443,7 @@ def emit_lef(path):
         out.append("  CLASS CORE ;")
         out.append("  ORIGIN 0 0 ;")
         out.append("  SIZE %s BY %s ;" % (fmt(width), fmt(HEIGHT)))
+        out.append("  SITE %s ;" % SITE_NAME)
         out.append("  SYMMETRY X Y ;")
         for i, (pname, direction, is_clock) in enumerate(pins):
             x = 0.1 if direction == "input" else width - 0.3

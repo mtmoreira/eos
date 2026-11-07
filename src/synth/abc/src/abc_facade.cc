@@ -68,13 +68,14 @@ Status IoError(const std::string& what, const std::string& path) {
 // ---------------------------------------------------------------------------
 // The Liberty subset the genlib needs: per cell, its area, whether
 // it is sequential (an ff or latch block), and per pin the
-// direction, capacitance, combinational function, and scalar delay
-// (the maximum of the pin's cell_rise and cell_fall scalar values,
-// with table arcs flagged so the caller can refuse them). This is
-// the same subset and the same qualification the ECO cone
-// resynthesis converter uses internally; it is re-implemented
-// here rather than shared because that converter is internal to
-// the timing-eco module, which already depends on this facade.
+// direction, capacitance, combinational function, and one scalar
+// delay (the maximum of the pin's cell_rise and cell_fall values;
+// a table arc contributes the maximum over its values list, the
+// worst case, since the genlib carries one delay per gate). The
+// ECO cone resynthesis converter has its own copy of this subset
+// with the older scalar-only rule; it still refuses table arcs,
+// so the two converters differ on table-delay libraries by design
+// until that converter is revisited by its own unit.
 
 std::string TrimText(const std::string& text) {
   const std::size_t first = text.find_first_not_of(" \t\r\n");
@@ -170,7 +171,6 @@ struct LibPin {
   double capacitance = 0.0;
   std::string function;
   double delay = -1.0;
-  bool delay_is_table = false;
 };
 
 struct LibCell {
@@ -181,7 +181,15 @@ struct LibCell {
 };
 
 // One scalar delay value out of a pin's timing blocks: the maximum
-// cell_rise / cell_fall scalar; table arcs set delay_is_table.
+// cell_rise / cell_fall value. A scalar arc contributes its single
+// value; a table arc (del_4_4 and friends) contributes the maximum
+// over its values list, the worst case at the largest slew and load
+// in the table. The genlib needs one scalar per gate to rank the
+// mapper's choices, and the worst case is the conservative pick;
+// signoff STA still reads the full table through OpenSTA, so this
+// scalar never stands in for timing. (F0: the mock PDK and every
+// real PDK use table delays; the old rule that table arcs
+// disqualified a cell meant no realistic library could map.)
 void ParsePinTiming(const std::string& pin_block, LibPin* pin) {
   for (const char* arc : {"cell_rise", "cell_fall"}) {
     std::size_t pos = 0;
@@ -198,8 +206,37 @@ void ParsePinTiming(const std::string& pin_block, LibPin* pin) {
           TrimText(pin_block.substr(open_paren + 1,
                                     close_paren - open_paren - 1));
       if (model != "scalar") {
-        pin->delay_is_table = true;
-        pos = close_paren;
+        const std::size_t values = pin_block.find("values", close_paren);
+        if (values == std::string::npos) {
+          pos = close_paren;
+          continue;
+        }
+        const std::size_t list_open = pin_block.find('(', values);
+        const std::size_t list_close =
+            list_open == std::string::npos
+                ? std::string::npos
+                : pin_block.find(')', list_open + 1);
+        if (list_close == std::string::npos) {
+          pos = close_paren;
+          continue;
+        }
+        // The values list holds only numbers, commas, quotes,
+        // spaces, and line continuations, so every number in the
+        // span is a table entry; take the largest.
+        double best = -1.0;
+        for (std::size_t n = list_open + 1; n < list_close;) {
+          const char* first = pin_block.c_str() + n;
+          char* last = nullptr;
+          const double value = std::strtod(first, &last);
+          if (last == first) {
+            ++n;
+            continue;
+          }
+          best = std::max(best, value);
+          n = static_cast<std::size_t>(last - pin_block.c_str());
+        }
+        if (best >= 0.0) pin->delay = std::max(pin->delay, best);
+        pos = list_close;
         continue;
       }
       const std::size_t values = pin_block.find("values", close_paren);
@@ -485,8 +522,14 @@ Result<std::vector<std::string>> AbcEngine::LibertyToGenlib(
         const std::size_t colon = pin_block.find(':', at);
         const std::size_t semi = pin_block.find(';', at);
         if (colon != std::string::npos && semi != std::string::npos) {
-          const std::string dir_word =
+          std::string dir_word =
               TrimText(pin_block.substr(colon + 1, semi - colon - 1));
+          // Liberty allows the value quoted ("input"); strip a
+          // surrounding pair so quoted and unquoted agree.
+          if (dir_word.size() >= 2 && dir_word.front() == '"' &&
+              dir_word.back() == '"') {
+            dir_word = dir_word.substr(1, dir_word.size() - 2);
+          }
           pin.is_input = dir_word == "input" || dir_word == "inout";
           pin.is_output = dir_word == "output" || dir_word == "inout";
         }
@@ -518,7 +561,7 @@ Result<std::vector<std::string>> AbcEngine::LibertyToGenlib(
       }
     }
     if (outputs != 1 || output == nullptr || output->function.empty() ||
-        output->delay_is_table || output->delay < 0.0) {
+        output->delay < 0.0) {
       continue;
     }
     const auto function = LibertyFunctionToGenlib(output->function, cell);
@@ -534,7 +577,7 @@ Result<std::vector<std::string>> AbcEngine::LibertyToGenlib(
     return Status::Error(
         ErrorCode::kUnsupported,
         "no Liberty cell qualifies for genlib mapping (combinational, "
-        "one output pin, function over its inputs, scalar delay)");
+        "one output pin, function over its inputs, a delay value)");
   }
   {
     std::ofstream out(genlib_path);
