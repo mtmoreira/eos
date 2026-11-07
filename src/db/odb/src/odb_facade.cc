@@ -165,6 +165,19 @@ Status OdbDatabase::ReadLef(const std::string& path) {
         if (impl_->tech == nullptr) {
           impl_->tech = impl_->db->getTech();
         }
+      } else if (impl_->db->getTech() != nullptr) {
+        // A tech-only LEF (layers, no SITE or MACRO) reads cleanly
+        // but creates no library: OpenDB only creates the library
+        // on the first SITE or MACRO, so createTechAndLib returns
+        // null even though the technology is loaded. That is a
+        // successful tech load; the library comes with the next
+        // LEF, which createLib attaches to this tech. (F0: the
+        // mock PDK splits tech and cells this way.) A genuinely
+        // broken LEF destroys the tech on failure, so a surviving
+        // tech is the discriminator.
+        impl_->tech = impl_->db->getTech();
+        ++impl_->lef_count;
+        return Status::Ok();
       }
     } else {
       const std::string name = "eos_lib_" + std::to_string(impl_->lef_count);

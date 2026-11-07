@@ -70,8 +70,9 @@ TEST(Registry, CoreSetIsComplete) {
   // gui_show adds gui_show; Immediate unit 5 adds report_clock.
   // The panel rework adds synth_issues; Immediate unit 6 adds
   // report_constraint; Immediate unit 7 adds
-  // report_analysis_coverage; Immediate unit 8 adds write_sdc.
-  EXPECT_EQ(shell.registry.Names().size(), 77u);
+  // report_analysis_coverage; Immediate unit 8 adds write_sdc;
+  // F0 adds write_def, read_lef, and read_def.
+  EXPECT_EQ(shell.registry.Names().size(), 80u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -3718,6 +3719,416 @@ TEST(CoreCommands, FloorplanFailsFastWithoutMappedDesign) {
   ASSERT_FALSE(result.ok);
   EXPECT_EQ(result.diag, Diag::kUnclosedDesign);
   EXPECT_NE(result.message.find("no mapped design"), std::string::npos);
+}
+
+// F0: LEF and tech LEF for the synth-to-PD bridge tests. The cell
+// LEF mirrors the kSynthMapLiberty cells (AND2, OR2, INV, BUF)
+// with the same pin names, one site, and one routing layer for
+// pin geometry; the tech LEF carries the database units and two
+// routing layers. kBridgeLefNoBuf is the same LEF without the
+// BUF macro, for the missing-macro failure test.
+const char kBridgeLef[] = R"LEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+SITE core
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END core
+MACRO AND2
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.92 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END B
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.35 -0.05 0.45 0.05 ;
+    END
+  END Y
+END AND2
+MACRO OR2
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.92 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END B
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.35 -0.05 0.45 0.05 ;
+    END
+  END Y
+END OR2
+MACRO INV
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.92 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.35 -0.05 0.45 0.05 ;
+    END
+  END Y
+END INV
+MACRO BUF
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.92 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.35 -0.05 0.45 0.05 ;
+    END
+  END Y
+END BUF
+END LIBRARY
+)LEF";
+
+const char kBridgeTlef[] = R"TLEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+LAYER metal1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal1
+LAYER metal2
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal2
+END LIBRARY
+)TLEF";
+
+// The demo/synth optloop design, byte-identical to demo/synth/
+// optloop.v: a four-input AND through two association orders,
+// so the mapped netlist shares gates between the outputs.
+const char kBridgeOptloop[] = R"V(module optloop (a, b, c, d, y1, y2);
+  input a, b, c, d;
+  output y1, y2;
+  assign y1 = ((a & b) & c) & d;
+  assign y2 = ((a & c) & b) & d;
+endmodule
+)V";
+
+// F0: the full bridge chain on embedded fixtures. synth_map with
+// the fixture Liberty gives the README numbers (4 cells, AND2:3
+// and BUF:1); write_def turns that netlist into DEF with a die
+// area computed from the LEF macro sizes (4 gates at 0.92 by
+// 2.72 um, 60 percent utilization, 1000 database units per
+// micron: a 5 by 5 um die); read_lef plus read_def load it; and
+// floorplan runs on the loaded database with no import_odb step.
+TEST(CoreCommands, BridgeWritesDefAndFloorplanRuns) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kSynthMapLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optloop.v", kBridgeOptloop),
+                         "optloop"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-target", "area"});
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  EXPECT_NE(mapped.payload.find("cells=4"), std::string::npos);
+  EXPECT_NE(mapped.payload.find("types=AND2:3,BUF:1"),
+            std::string::npos);
+  const std::string lef = dir.Write("cells.lef", kBridgeLef);
+  const std::string tlef = dir.Write("tech.lef", kBridgeTlef);
+  const std::string def_path = dir.Path("optloop.def");
+  const CommandResult def = shell.Run(
+      "write_def", {def_path, "-lef", lef, "-tlef", tlef});
+  ASSERT_TRUE(def.ok) << def.message;
+  EXPECT_NE(def.payload.find("design=optloop"), std::string::npos);
+  EXPECT_NE(def.payload.find("cells=4"), std::string::npos);
+  EXPECT_NE(def.payload.find("types=AND2:3,BUF:1"),
+            std::string::npos);
+  EXPECT_NE(def.payload.find("die_area=0,0,5000,5000"),
+            std::string::npos);
+  EXPECT_NE(def.payload.find("nets=8"), std::string::npos);
+  EXPECT_NE(def.payload.find("pins=6"), std::string::npos);
+  const CommandResult tech = shell.Run("read_lef", {tlef});
+  ASSERT_TRUE(tech.ok) << tech.message;
+  EXPECT_NE(tech.payload.find("masters=0"), std::string::npos);
+  const CommandResult lib = shell.Run("read_lef", {lef});
+  ASSERT_TRUE(lib.ok) << lib.message;
+  EXPECT_NE(lib.payload.find("masters=4"), std::string::npos);
+  const CommandResult loaded = shell.Run("read_def", {def_path});
+  ASSERT_TRUE(loaded.ok) << loaded.message;
+  EXPECT_NE(loaded.payload.find("design=optloop"),
+            std::string::npos);
+  EXPECT_NE(loaded.payload.find("instances=4"),
+            std::string::npos);
+  EXPECT_NE(loaded.payload.find("nets=8"), std::string::npos);
+  const CommandResult floorplan = shell.Run("floorplan", {});
+  ASSERT_TRUE(floorplan.ok) << floorplan.message;
+  EXPECT_NE(floorplan.payload.find("die_area=0,0,5000,5000"),
+            std::string::npos);
+  EXPECT_NE(floorplan.payload.find("core_area=0,0,5000,5000"),
+            std::string::npos);
+  EXPECT_NE(floorplan.payload.find("rows=1"), std::string::npos);
+  EXPECT_NE(floorplan.payload.find("io_placed=6"),
+            std::string::npos);
+  EXPECT_NE(floorplan.payload.find("io_total=6"),
+            std::string::npos);
+}
+
+#ifdef EOS_MOCK_PDK_DIR
+// F0: the same chain on the real demo design and the mock PDK
+// from the source tree (paths come from compile definitions in
+// tests/unit/CMakeLists.txt). This is the chain the GUI console
+// demo runs, and it proves the mock Liberty maps, the mock LEF
+// provides every mapped cell and the row site floorplan needs,
+// and the written DEF loads and floorplans.
+TEST(CoreCommands, BridgeRunsOnMockPdk) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const std::string demo_dir = EOS_DEMO_SYNTH_DIR;
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", mock_dir + "/eos_mock.lib"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {demo_dir + "/optloop.v", "optloop"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-target", "area"});
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  const auto payload_number = [](const CommandResult& result,
+                                 const std::string& key) {
+    // Keys are space-separated fields; match the leading space so
+    // "cells=" never matches inside "genlib_cells=".
+    const std::string field = " " + key + "=";
+    const std::size_t at = result.payload.find(field);
+    EXPECT_NE(at, std::string::npos) << "missing " << key;
+    if (at == std::string::npos) return 0;
+    return std::stoi(result.payload.substr(at + field.size()));
+  };
+  const int cells = payload_number(mapped, "cells");
+  ASSERT_GT(cells, 0);
+  const std::string def_path = dir.Path("optloop.def");
+  const CommandResult def =
+      shell.Run("write_def",
+                {def_path, "-lef", mock_dir + "/eos_mock.lef",
+                 "-tlef", mock_dir + "/eos_mock.tlef"});
+  ASSERT_TRUE(def.ok) << def.message;
+  EXPECT_NE(def.payload.find("design=optloop"), std::string::npos);
+  EXPECT_EQ(payload_number(def, "cells"), cells);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.tlef"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.lef"})
+                    .ok);
+  const CommandResult loaded = shell.Run("read_def", {def_path});
+  ASSERT_TRUE(loaded.ok) << loaded.message;
+  EXPECT_NE(loaded.payload.find("design=optloop"),
+            std::string::npos);
+  EXPECT_EQ(payload_number(loaded, "instances"), cells);
+  const CommandResult floorplan = shell.Run("floorplan", {});
+  ASSERT_TRUE(floorplan.ok) << floorplan.message;
+  EXPECT_GT(payload_number(floorplan, "rows"), 0);
+  EXPECT_NE(floorplan.payload.find("die_area="),
+            std::string::npos);
+}
+#endif
+
+TEST(CoreCommands, WriteDefFailsFastWithoutMappedDesign) {
+  TimingTempDir dir;
+  Shell shell;
+  const CommandResult result =
+      shell.Run("write_def",
+                {dir.Path("out.def"), "-lef",
+                 dir.Write("cells.lef", kBridgeLef), "-tlef",
+                 dir.Write("tech.lef", kBridgeTlef)});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no mapped design"),
+            std::string::npos);
+}
+
+TEST(CoreCommands, WriteDefFailsFastWhenCellHasNoLefMacro) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kSynthMapLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optloop.v", kBridgeOptloop),
+                         "optloop"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  ASSERT_TRUE(shell.Run("synth_map", {"-target", "area"}).ok);
+  // The LEF below is kBridgeLef without the BUF macro: the
+  // mapped netlist needs BUF, so write_def must name it.
+  std::string no_buf = kBridgeLef;
+  const std::size_t at = no_buf.find("MACRO BUF\n");
+  ASSERT_NE(at, std::string::npos);
+  const std::size_t end = no_buf.find("END BUF\n", at);
+  ASSERT_NE(end, std::string::npos);
+  no_buf.erase(at, end + 8 - at);
+  const CommandResult result = shell.Run(
+      "write_def",
+      {dir.Path("out.def"), "-lef", dir.Write("nobuf.lef", no_buf),
+       "-tlef", dir.Write("tech.lef", kBridgeTlef)});
+  ASSERT_FALSE(result.ok);
+  EXPECT_NE(result.message.find("BUF"), std::string::npos);
+}
+
+TEST(CoreCommands, ReadDefFailsFastWithoutLef) {
+  TimingTempDir dir;
+  Shell shell;
+  const CommandResult result =
+      shell.Run("read_def", {dir.Path("no_such.def")});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kIoError);
+  const CommandResult no_tech =
+      shell.Run("read_def", {dir.Write("empty.def", "VERSION 5.8 ;\n")});
+  ASSERT_FALSE(no_tech.ok);
+  EXPECT_EQ(no_tech.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(no_tech.message.find("read_lef"), std::string::npos);
+}
+
+TEST(CoreCommands, ReadLefFailsFastAfterDesignLoaded) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kSynthMapLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optloop.v", kBridgeOptloop),
+                         "optloop"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  ASSERT_TRUE(shell.Run("synth_map", {"-target", "area"}).ok);
+  const std::string lef = dir.Write("cells.lef", kBridgeLef);
+  const std::string tlef = dir.Write("tech.lef", kBridgeTlef);
+  const std::string def_path = dir.Path("optloop.def");
+  ASSERT_TRUE(shell.Run("write_def", {def_path, "-lef", lef,
+                                      "-tlef", tlef})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_lef", {tlef}).ok);
+  ASSERT_TRUE(shell.Run("read_lef", {lef}).ok);
+  ASSERT_TRUE(shell.Run("read_def", {def_path}).ok);
+  const CommandResult again = shell.Run("read_lef", {lef});
+  ASSERT_FALSE(again.ok);
+  EXPECT_EQ(again.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(again.message.find("design already loaded"),
+            std::string::npos);
+  const CommandResult def_again = shell.Run("read_def", {def_path});
+  ASSERT_FALSE(def_again.ok);
+  EXPECT_EQ(def_again.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(CoreCommands, WriteDefRejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kSynthMapLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optloop.v", kBridgeOptloop),
+                         "optloop"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  ASSERT_TRUE(shell.Run("synth_map", {"-target", "area"}).ok);
+  const std::string lef = dir.Write("cells.lef", kBridgeLef);
+  const std::string tlef = dir.Write("tech.lef", kBridgeTlef);
+  const std::string def_path = dir.Path("out.def");
+  const CommandResult unknown = shell.Run(
+      "write_def", {def_path, "-lef", lef, "-tlef", tlef, "-bogus"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  const CommandResult dup_lef = shell.Run(
+      "write_def",
+      {def_path, "-lef", lef, "-lef", lef, "-tlef", tlef});
+  ASSERT_FALSE(dup_lef.ok);
+  EXPECT_EQ(dup_lef.diag, Diag::kInvalidConfiguration);
+  const CommandResult no_tlef =
+      shell.Run("write_def", {def_path, "-lef", lef});
+  ASSERT_FALSE(no_tlef.ok);
+  EXPECT_EQ(no_tlef.diag, Diag::kInvalidConfiguration);
+  const CommandResult bad_area = shell.Run(
+      "write_def",
+      {def_path, "-lef", lef, "-tlef", tlef, "-die_area", "0", "0",
+       "wide", "5000"});
+  ASSERT_FALSE(bad_area.ok);
+  EXPECT_EQ(bad_area.diag, Diag::kInvalidConfiguration);
+  const CommandResult empty_area = shell.Run(
+      "write_def",
+      {def_path, "-lef", lef, "-tlef", tlef, "-die_area", "0", "0",
+       "0", "5000"});
+  ASSERT_FALSE(empty_area.ok);
+  EXPECT_NE(empty_area.message.find("non-empty"),
+            std::string::npos);
 }
 
 TEST(CoreCommands, FloorplanRejectsBadOptions) {
