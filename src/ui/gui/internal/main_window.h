@@ -26,7 +26,7 @@ class QSplitter;
 
 namespace eos::ui {
 
-class BlockDiagram;
+class CenterView;
 class HierarchyBrowser;
 class PanelsView;
 
@@ -36,8 +36,8 @@ class MainWindow : public QMainWindow {
 
   // Re-reads step state, hierarchy, diagram, schematic, panels,
   // issues, and the log into the widgets. Called after any
-  // session change. The center always shows the block diagram;
-  // the schematic lives as a tab in the right panels.
+  // session change. The center shows the block diagram for a
+  // non-leaf level and the schematic for a leaf level.
   void Refresh();
 
   // Shows a hidden window again (U6): the terminal reopen
@@ -91,7 +91,7 @@ class MainWindow : public QMainWindow {
   QLabel* checkpoint_label_ = nullptr;
   QLabel* floorplan_label_ = nullptr;
   HierarchyBrowser* browser_ = nullptr;
-  BlockDiagram* diagram_ = nullptr;
+  CenterView* center_ = nullptr;
   PanelsView* panels_ = nullptr;
   QPlainTextEdit* console_ = nullptr;
   QLineEdit* entry_ = nullptr;

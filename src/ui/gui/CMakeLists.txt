@@ -23,6 +23,7 @@ if(Qt6_FOUND)
     src/main_window.cc
     src/hierarchy_browser.cc
     src/block_diagram.cc
+    src/center_view.cc
     src/schematic_diagram.cc
     src/panels_view.cc
     src/splash_screen.cc

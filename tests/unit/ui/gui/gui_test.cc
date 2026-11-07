@@ -32,6 +32,8 @@
 #include <QMouseEvent>
 
 #include "block_diagram.h"
+#include "center_view.h"
+#include "panels_view.h"
 #include "schematic_diagram.h"
 #endif
 
@@ -2027,6 +2029,8 @@ TEST(ConsoleEntry, SplitSegmentsDropsBlanks) {
 #ifdef EOS_GUI_HAVE_QT6
 
 using eos::ui::BlockDiagram;
+using eos::ui::CenterView;
+using eos::ui::PanelsView;
 using eos::ui::SchematicDiagram;
 
 // Widget rendering tests: both diagrams sit on a dark
@@ -2593,6 +2597,195 @@ TEST(BlockOutline, EmptyPlaceholderIsWhite) {
   ASSERT_EQ(texts.size(), 1u);
   EXPECT_EQ(texts[0]->text().toStdString(), "No design loaded.");
   EXPECT_EQ(texts[0]->brush().color(), Qt::white);
+}
+
+// A SessionView with the nested hierarchy, so the center can
+// switch between the block diagram (non-leaf levels) and the
+// schematic (the leaf adder module).
+struct CenterViewFixture {
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view;
+  CenterViewFixture() : view(registry, context) {
+    OutlineTestApp();
+    RegisterHierarchyCommand(registry, kNestedPayload, true);
+    RegisterBlocksCommand(registry, nullptr);
+    RegisterSchematicCommand(registry, nullptr);
+    context.synth.elaborated = true;
+    context.synth.top_cell = "top";
+    view.RefreshHierarchy();
+    view.RefreshDiagram();
+    view.RefreshSchematic();
+  }
+  void RefreshToLevel(const std::string& level) {
+    ASSERT_TRUE(view.SetDiagramLevel(level));
+    view.RefreshDiagram();
+    view.RefreshSchematic();
+  }
+};
+
+std::string CenterPlaceholderText(const QGraphicsScene* scene) {
+  const std::vector<QGraphicsSimpleTextItem*> texts =
+      OutlineSceneItems<QGraphicsSimpleTextItem>(scene);
+  if (texts.empty()) return "";
+  return texts[0]->text().toStdString();
+}
+
+TEST(CenterView, ShowsBlockDiagramForNonLeafLevel) {
+  CenterViewFixture fixture;
+  fixture.RefreshToLevel("top");
+  CenterView center(fixture.view);
+  center.Refresh();
+  EXPECT_FALSE(center.ShowingSchematic());
+  // The block diagram page renders the top level's blocks.
+  EXPECT_FALSE(OutlineSceneItems<QGraphicsPathItem>(
+                   center.Diagram()->Scene())
+                   .empty());
+  // The schematic page is the non-leaf placeholder.
+  EXPECT_EQ(CenterPlaceholderText(center.Schematic()->Scene()),
+            "No schematic for this level.");
+}
+
+TEST(CenterView, ShowsSchematicForLeafLevel) {
+  CenterViewFixture fixture;
+  fixture.RefreshToLevel("top/u_mid/u_add");
+  CenterView center(fixture.view);
+  center.Refresh();
+  EXPECT_TRUE(center.ShowingSchematic());
+  // The schematic page renders the adder gate: a generic $add
+  // draws as an outlined rectangle 64 high (the other rect is
+  // the transparent hover rect). The block diagram page has
+  // no diagram for the leaf module, so it shows its
+  // placeholder.
+  std::size_t outlined_gates = 0;
+  for (const QGraphicsRectItem* rect :
+       OutlineSceneItems<QGraphicsRectItem>(center.Schematic()->Scene())) {
+    if (rect->pen().style() == Qt::NoPen) continue;
+    if (std::abs(rect->rect().height() - 64) < 0.01) ++outlined_gates;
+  }
+  EXPECT_EQ(outlined_gates, 1u);
+  EXPECT_EQ(CenterPlaceholderText(center.Diagram()->Scene()),
+            "No diagram for this level.");
+}
+
+TEST(CenterView, SwitchingBackToNonLeafRestoresBlockDiagram) {
+  CenterViewFixture fixture;
+  fixture.RefreshToLevel("top/u_mid/u_add");
+  CenterView center(fixture.view);
+  center.Refresh();
+  ASSERT_TRUE(center.ShowingSchematic());
+  fixture.RefreshToLevel("top/u_mid");
+  center.Refresh();
+  EXPECT_FALSE(center.ShowingSchematic());
+  EXPECT_FALSE(OutlineSceneItems<QGraphicsPathItem>(
+                   center.Diagram()->Scene())
+                   .empty());
+}
+
+TEST(CenterView, HighlightGateForwardsToSchematicOnlyWhenLeaf) {
+  CenterViewFixture fixture;
+  fixture.RefreshToLevel("top/u_mid/u_add");
+  CenterView center(fixture.view);
+  center.show();
+  QApplication::processEvents();
+  center.Refresh();
+  QApplication::processEvents();
+  center.HighlightGate("add");
+  // The adder gate is a generic box, so its highlight is the
+  // blue outline on its rectangle, not a path.
+  std::size_t blue = 0;
+  for (const QGraphicsRectItem* rect :
+       OutlineSceneItems<QGraphicsRectItem>(center.Schematic()->Scene())) {
+    if (rect->pen().style() == Qt::NoPen) continue;
+    if (std::abs(rect->rect().height() - 64) > 0.01) continue;
+    if (rect->pen().color() == Qt::blue) {
+      ++blue;
+      EXPECT_EQ(rect->pen().widthF(), 2);
+    }
+  }
+  EXPECT_EQ(blue, 1u);
+  // At a non-leaf level the highlight is a no-op: the
+  // schematic stays on its placeholder.
+  fixture.RefreshToLevel("top");
+  center.Refresh();
+  center.HighlightGate("add");
+  EXPECT_EQ(CenterPlaceholderText(center.Schematic()->Scene()),
+            "No schematic for this level.");
+}
+
+TEST(PanelsView, HasFiveTabsWithoutSchematic) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  PanelsView panels(view);
+  ASSERT_EQ(panels.count(), 5);
+  EXPECT_EQ(panels.tabText(0).toStdString(), "Issues");
+  EXPECT_EQ(panels.tabText(1).toStdString(), "Sources");
+  EXPECT_EQ(panels.tabText(2).toStdString(), "Results");
+  EXPECT_EQ(panels.tabText(3).toStdString(), "Opt log");
+  EXPECT_EQ(panels.tabText(4).toStdString(), "Messages");
+}
+
+// An issue on the leaf adder module, so LocateIssue must
+// highlight its gate in the center schematic.
+const char kLeafIssuePayload[] =
+    "checked=hierarchy resolution\\n"
+    "netlist=elaborated\\n"
+    "issue severity=warning code=unconnected_port module=adder "
+    "path=top/u_mid/u_add target=add file= line=0 message=Port Y "
+    "of cell add is unconnected\\n";
+
+TEST(PanelsView, LocateIssueHighlightsGateInCenterSchematic) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kNestedPayload, true);
+  RegisterBlocksCommand(registry, nullptr);
+  RegisterSchematicCommand(registry, nullptr);
+  RegisterIssuesCommand(registry, kLeafIssuePayload, true);
+  CommandContext context;
+  context.synth.elaborated = true;
+  context.synth.top_cell = "top";
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  view.RefreshIssues();
+  PanelsView panels(view);
+  std::string highlighted;
+  panels.SetHighlightGateCallback(
+      [&highlighted](const std::string& target) { highlighted = target; });
+  bool refreshed = false;
+  panels.SetActionCallback([&refreshed]() { refreshed = true; });
+  panels.LocateIssue("top/u_mid/u_add", "add");
+  EXPECT_EQ(view.DiagramLevel(), "top/u_mid/u_add");
+  EXPECT_TRUE(view.DiagramLevelIsLeaf());
+  EXPECT_EQ(highlighted, "add");
+  EXPECT_TRUE(refreshed);
+}
+
+TEST(PanelsView, LocateIssueSkipsHighlightForNonLeafLevel) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kNestedPayload, true);
+  RegisterBlocksCommand(registry, nullptr);
+  RegisterSchematicCommand(registry, nullptr);
+  RegisterIssuesCommand(registry, kIssuesPayload, true);
+  CommandContext context;
+  context.synth.elaborated = true;
+  context.synth.top_cell = "top";
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  view.RefreshIssues();
+  PanelsView panels(view);
+  std::string highlighted;
+  panels.SetHighlightGateCallback(
+      [&highlighted](const std::string& target) { highlighted = target; });
+  bool refreshed = false;
+  panels.SetActionCallback([&refreshed]() { refreshed = true; });
+  panels.LocateIssue("top/u_mid", "u_add");
+  EXPECT_EQ(view.DiagramLevel(), "top/u_mid");
+  EXPECT_FALSE(view.DiagramLevelIsLeaf());
+  EXPECT_TRUE(highlighted.empty());
+  EXPECT_TRUE(refreshed);
 }
 
 #endif  // EOS_GUI_HAVE_QT6

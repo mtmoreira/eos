@@ -3996,8 +3996,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
   // dropped silently. With no design open every row skips as "no
   // design is open" and the file is the header plus the skip list.
   add("write_sdc",
-      {"write_sdc [-compress] <path>", "Emit the session constraint "
-                                       "set as one SDC file."},
+      "write_sdc [-compress] <path>",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
         SdcOptions opts;

@@ -36,23 +36,29 @@ stepper keeps only its per-step state, and the detailed outputs
 live in the panels. Messages are diagnostics only: a rejected
 dispatch records one line, a successful dispatch records none.
 Panel rework (after the natural level-based schematic layout):
-the schematic moves from the center into the right panel set
-as its own tab, so the center always shows the block diagram;
-the panels become six tabs (Issues, Sources, Results, Opt log,
-Messages, Schematic), and the stepper mapping changes to Read
-shows Sources, Elaborate shows Issues, Generic synth shows Opt
-log. The Issues tab shows the elaboration issues from the
+the center becomes one navigation stack: the block diagram
+for non-leaf levels, and the gate-level schematic for the
+leaf level, so the center shows the schematic exactly when
+the user descends to a leaf and the block diagram otherwise
+(the top level keeps its block view). The panels are five
+tabs (Issues, Sources, Results, Opt log, Messages), and the
+stepper mapping changes to Read shows Sources, Elaborate
+shows Issues, Generic synth shows Opt log. The Issues tab shows the elaboration issues from the
 synth_issues registry query (the check pass plus a design
 walk), severity ordered, with a header stating the counts and
 what was checked; clicking a row selects the instance in the
 hierarchy, descends the diagram to it, and highlights the
-offending gate in the schematic. The Floorplan stage label
+offending gate in the center schematic. The Floorplan stage label
 carries the error count while any error exists. The bottom row
 gains a single log window beside the console, showing all
 engine output with severity colors, severity filters, and a
 search box; the Messages tab keeps dispatch history only.
 Clicking a block in the diagram descends into it, and when the
-new level is a leaf the Schematic tab shows for it.
+new level is a leaf the center switches to the schematic for
+it. (Earlier this rework put the schematic in the right
+panels as its own tab; the owner's 2026-11-06 demo feedback
+moved it back to the center, so the center holds both views
+and the panels stay at five tabs.)
 U6 delivers console command entry plus session persistence: the
 console gains an entry line that takes one registry command per
 Return and dispatches it through the session, so the stepper,
