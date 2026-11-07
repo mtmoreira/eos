@@ -21,7 +21,9 @@ jobs:
       - name: Dependency graph check
         run: python3 tools/dep_graph.py check
       - name: Shell script syntax check
-        run: bash -n scripts/setup-macos.sh
+        run: |
+          bash -n scripts/setup-macos.sh
+          bash -n scripts/build-macos.sh
       - name: Checker unit tests
         run: python3 -m pytest tools/tests -q
 
