@@ -59,6 +59,8 @@ using eos::ui::HierarchyNode;
 using eos::ui::IssuesModel;
 using eos::ui::LiveStatsModel;
 using eos::ui::NetLabel;
+using eos::ui::LogicEquation;
+using eos::ui::OperatorGlyph;
 using eos::ui::PanelsModel;
 using eos::ui::SchematicGate;
 using eos::ui::SchematicLayout;
@@ -828,9 +830,90 @@ TEST(SchematicDisplay, SymbolSelectionPerType) {
   EXPECT_EQ(SymbolForType("$buf"), GateSymbol::kBuf);
   EXPECT_EQ(SymbolForType("$AND"), GateSymbol::kAnd);
   EXPECT_EQ(SymbolForType("and"), GateSymbol::kAnd);
+  EXPECT_EQ(SymbolForType("$mux"), GateSymbol::kMux);
+  EXPECT_EQ(SymbolForType("$pmux"), GateSymbol::kMux);
+  EXPECT_EQ(SymbolForType("$dff"), GateSymbol::kDff);
+  EXPECT_EQ(SymbolForType("$adff"), GateSymbol::kDff);
+  EXPECT_EQ(SymbolForType("$aldff"), GateSymbol::kDff);
+  EXPECT_EQ(SymbolForType("$sdff"), GateSymbol::kDff);
+  EXPECT_EQ(SymbolForType("$dffe"), GateSymbol::kDff);
+  EXPECT_EQ(SymbolForType("$dlatch"), GateSymbol::kLatch);
+  EXPECT_EQ(SymbolForType("$sr"), GateSymbol::kLatch);
+  EXPECT_EQ(SymbolForType("$logic_and"), GateSymbol::kAnd);
+  EXPECT_EQ(SymbolForType("$logic_or"), GateSymbol::kOr);
+  EXPECT_EQ(SymbolForType("$logic_not"), GateSymbol::kNot);
+  EXPECT_EQ(SymbolForType("$reduce_and"), GateSymbol::kAnd);
+  EXPECT_EQ(SymbolForType("$reduce_or"), GateSymbol::kOr);
+  EXPECT_EQ(SymbolForType("$reduce_xor"), GateSymbol::kXor);
+  EXPECT_EQ(SymbolForType("$reduce_xnor"), GateSymbol::kXnor);
+  EXPECT_EQ(SymbolForType("$tribuf"), GateSymbol::kBuf);
+  EXPECT_EQ(SymbolForType("$pos"), GateSymbol::kBuf);
+  // Arithmetic and comparison cells keep the rectangle
+  // shape; their operator glyph is a text line, not a shape.
   EXPECT_EQ(SymbolForType("$add"), GateSymbol::kGeneric);
-  EXPECT_EQ(SymbolForType("$dff"), GateSymbol::kGeneric);
+  EXPECT_EQ(SymbolForType("$eq"), GateSymbol::kGeneric);
+  EXPECT_EQ(SymbolForType("$mem"), GateSymbol::kGeneric);
   EXPECT_EQ(SymbolForType(""), GateSymbol::kGeneric);
+}
+
+TEST(SchematicDisplay, OperatorGlyphs) {
+  EXPECT_EQ(OperatorGlyph("$add"), "+");
+  EXPECT_EQ(OperatorGlyph("$sub"), "-");
+  EXPECT_EQ(OperatorGlyph("$neg"), "-");
+  EXPECT_EQ(OperatorGlyph("$mul"), "x");
+  EXPECT_EQ(OperatorGlyph("$div"), "/");
+  EXPECT_EQ(OperatorGlyph("$mod"), "%");
+  EXPECT_EQ(OperatorGlyph("$eq"), "=");
+  EXPECT_EQ(OperatorGlyph("$ne"), "!=");
+  EXPECT_EQ(OperatorGlyph("$lt"), "<");
+  EXPECT_EQ(OperatorGlyph("$gt"), ">");
+  EXPECT_EQ(OperatorGlyph("$le"), "<=");
+  EXPECT_EQ(OperatorGlyph("$ge"), ">=");
+  EXPECT_EQ(OperatorGlyph("$shl"), "<<");
+  EXPECT_EQ(OperatorGlyph("$sshl"), "<<");
+  EXPECT_EQ(OperatorGlyph("$shr"), ">>");
+  EXPECT_EQ(OperatorGlyph("$sshr"), ">>");
+  EXPECT_EQ(OperatorGlyph("$ADD"), "+");
+  EXPECT_EQ(OperatorGlyph("add"), "+");
+  EXPECT_EQ(OperatorGlyph("$and"), "");
+  EXPECT_EQ(OperatorGlyph("$mux"), "");
+  EXPECT_EQ(OperatorGlyph("$dff"), "");
+  EXPECT_EQ(OperatorGlyph("$mem"), "");
+  EXPECT_EQ(OperatorGlyph(""), "");
+}
+
+TEST(SchematicDisplay, LogicEquations) {
+  EXPECT_EQ(LogicEquation("$mem"), "Q = mem[A]");
+  EXPECT_EQ(LogicEquation("$memrd"), "Q = mem[A]");
+  EXPECT_EQ(LogicEquation("$memwr"), "mem[A] = D");
+  EXPECT_EQ(LogicEquation("$fsm"), "Y = f(state, in)");
+  EXPECT_EQ(LogicEquation("$lut"), "Y = lut(A)");
+  EXPECT_EQ(LogicEquation("$pow"), "Y = A ** B");
+  EXPECT_EQ(LogicEquation("$shift"), "Y = shift(A, B)");
+  EXPECT_EQ(LogicEquation("$MEM"), "Q = mem[A]");
+  EXPECT_EQ(LogicEquation("mem"), "Q = mem[A]");
+  EXPECT_EQ(LogicEquation("$and"), "");
+  EXPECT_EQ(LogicEquation("$add"), "");
+  EXPECT_EQ(LogicEquation("$mux"), "");
+  EXPECT_EQ(LogicEquation("$dff"), "");
+  EXPECT_EQ(LogicEquation(""), "");
+}
+
+TEST(SchematicDisplay, NoTypeHasBothGlyphAndEquation) {
+  // The third text line is one or the other, never both.
+  const std::vector<std::string> types = {
+      "$and", "$nand", "$or", "$nor", "$xor", "$xnor", "$not", "$buf",
+      "$mux", "$pmux", "$dff", "$adff", "$aldff", "$sdff", "$dlatch",
+      "$sr", "$logic_and", "$logic_or", "$logic_not", "$reduce_and",
+      "$reduce_or", "$reduce_xor", "$tribuf", "$pos", "$add", "$sub",
+      "$neg", "$mul", "$div", "$mod", "$eq", "$ne", "$lt", "$gt",
+      "$le", "$ge", "$shl", "$shr", "$sshl", "$sshr", "$mem",
+      "$memrd", "$memwr", "$fsm", "$lut", "$pow", "$shift"};
+  for (const std::string& type : types) {
+    EXPECT_TRUE(OperatorGlyph(type).empty() ||
+                LogicEquation(type).empty())
+        << "type: " << type;
+  }
 }
 
 TEST(SchematicDisplay, TypeLabelsDropDollarPrefix) {
@@ -2227,6 +2310,111 @@ void RegisterAluSchematic(CommandRegistry& registry) {
   EXPECT_TRUE(status.ok());
 }
 
+// A leaf module exercising the newer symbols: a $mux, a $adff
+// flip-flop, a $eq comparator, a $mem box with its equation,
+// and a $shl box with its glyph.
+const char kSchematicSymsPayload[] =
+    "module=syms\n"
+    "parent port=a direction=in\n"
+    "parent port=b direction=in\n"
+    "parent port=clk direction=in\n"
+    "parent port=en direction=in\n"
+    "parent port=y direction=out\n"
+    "parent port=q direction=out\n"
+    "parent port=e direction=out\n"
+    "parent port=s direction=out\n"
+    "gate instance=mux1 type=$mux ports=A:in,B:in,S:in,Y:out\n"
+    "gate instance=ff1 type=$adff ports=ARST:in,CLK:in,D:in,Q:out\n"
+    "gate instance=eq1 type=$eq ports=A:in,B:in,Y:out\n"
+    "gate instance=mem1 type=$mem "
+    "ports=RD_ADDR:in,RD_DATA:out,WR_DATA:in,WR_EN:in,CLK:in\n"
+    "gate instance=sh1 type=$shl ports=A:in,B:in,Y:out\n"
+    "net name=a gates=mux1:A,eq1:A,mem1:RD_ADDR,sh1:A terminals=a\n"
+    "net name=b gates=mux1:B,eq1:B,mem1:WR_DATA,sh1:B terminals=b\n"
+    "net name=clk gates=ff1:CLK,mem1:CLK terminals=clk\n"
+    "net name=en gates=mux1:S,ff1:ARST,mem1:WR_EN terminals=en\n"
+    "net name=m gates=mux1:Y,ff1:D terminals=\n"
+    "net name=y gates=ff1:Q terminals=y\n"
+    "net name=q gates=mem1:RD_DATA terminals=q\n"
+    "net name=e gates=eq1:Y terminals=e\n"
+    "net name=s gates=sh1:Y terminals=s\n";
+
+const char kOutlineSymsHierarchy[] =
+    "top=syms\n"
+    "node path=syms module=syms ports=a,b,clk,en,y,q,e,s\n";
+
+void RegisterSymsSchematic(CommandRegistry& registry) {
+  auto status = registry.Register(
+      "synth_schematic", "synth_schematic <module>",
+      [](CommandContext&, const std::vector<std::string>& args) {
+        if (args.size() == 1 && args[0] == "syms") {
+          return CommandResult::Ok(kSchematicSymsPayload);
+        }
+        return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                   "unknown module");
+      });
+  EXPECT_TRUE(status.ok());
+}
+
+// Builds the syms schematic in a diagram and returns the
+// scene, following the ClickHighlights fixture pattern.
+const QGraphicsScene* BuildSymsScene(CommandRegistry& registry,
+                                     CommandContext& context,
+                                     SessionView& view,
+                                     SchematicDiagram& diagram) {
+  RegisterHierarchyCommand(registry, kOutlineSymsHierarchy, true);
+  RegisterSymsSchematic(registry);
+  context.synth.elaborated = true;
+  view.RefreshHierarchy();
+  view.RefreshSchematic();
+  if (view.Schematic().Empty()) return nullptr;
+  diagram.show();
+  QApplication::processEvents();
+  diagram.Refresh();
+  QApplication::processEvents();
+  return diagram.Scene();
+}
+
+// The gate outline holding a type label: generic gates draw
+// as outlined rects, shaped gates as paths, both 64 high.
+QRectF SymsGateRectForLabel(const QGraphicsScene* scene,
+                            const std::string& label) {
+  QPointF at;
+  bool found = false;
+  for (const QGraphicsSimpleTextItem* text :
+       OutlineSceneItems<QGraphicsSimpleTextItem>(scene)) {
+    if (text->text().toStdString() == label) {
+      at = text->pos();
+      found = true;
+      break;
+    }
+  }
+  if (!found) return QRectF();
+  for (const QGraphicsRectItem* rect :
+       OutlineSceneItems<QGraphicsRectItem>(scene)) {
+    if (rect->pen().style() == Qt::NoPen) continue;
+    if (std::abs(rect->rect().height() - 64) > 0.01) continue;
+    if (rect->rect().contains(at)) return rect->rect();
+  }
+  for (const QGraphicsPathItem* path :
+       OutlineSceneItems<QGraphicsPathItem>(scene)) {
+    const QRectF bounds = path->path().boundingRect();
+    if (std::abs(bounds.height() - 64) > 0.01) continue;
+    if (bounds.contains(at)) return bounds;
+  }
+  return QRectF();
+}
+
+// The text item with exactly this text, or nullptr.
+const QGraphicsSimpleTextItem* SymsTextItem(
+    const QGraphicsScene* scene, const std::string& text) {
+  for (const QGraphicsSimpleTextItem* item :
+       OutlineSceneItems<QGraphicsSimpleTextItem>(scene)) {
+    if (item->text().toStdString() == text) return item;
+  }
+  return nullptr;
+}
+
 // Panel rework: the issues model parses a synth_issues
 // payload, sorts by severity, and counts per severity. The
 // payload lists the issues out of order on purpose: the
@@ -2671,6 +2859,146 @@ TEST(SchematicOutline, ClickHighlightsOnlyConeWiresAndPins) {
   EXPECT_EQ(terminal_color(kSchematicGateTop + 2 * row_pitch, false),
             Qt::blue);
   EXPECT_EQ(terminal_color(0, true), Qt::blue);
+}
+
+TEST(SchematicOutline, MuxDrawsTrapezoid) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  SchematicDiagram diagram(view);
+  const QGraphicsScene* scene =
+      BuildSymsScene(registry, context, view, diagram);
+  ASSERT_NE(scene, nullptr);
+  const QRectF mux_rect = SymsGateRectForLabel(scene, "MUX");
+  ASSERT_FALSE(mux_rect.isNull());
+  // The trapezoid: full height on the input (left) edge, a
+  // short centered segment on the output (right) edge. No
+  // point of the shape sits at the top or bottom of the
+  // right edge, and the left edge spans the full height.
+  bool found_shape = false;
+  for (const QGraphicsPathItem* path :
+       OutlineSceneItems<QGraphicsPathItem>(scene)) {
+    const QPainterPath& p = path->path();
+    if (std::abs(p.boundingRect().height() - 64) > 0.01) continue;
+    if (!p.boundingRect().contains(mux_rect.center())) continue;
+    found_shape = true;
+    std::set<std::pair<double, double>> points;
+    for (int i = 0; i < p.elementCount(); ++i) {
+      const QPainterPath::Element e = p.elementAt(i);
+      points.insert({e.x, e.y});
+    }
+    const double left = mux_rect.left();
+    const double right = mux_rect.right();
+    const double top = mux_rect.top();
+    const double bottom = mux_rect.bottom();
+    const double middle = mux_rect.center().y();
+    EXPECT_TRUE(points.count({left, top}) != 0);
+    EXPECT_TRUE(points.count({left, bottom}) != 0);
+    EXPECT_TRUE(points.count({right, middle - 12}) != 0);
+    EXPECT_TRUE(points.count({right, middle + 12}) != 0);
+    EXPECT_TRUE(points.count({right, top}) == 0);
+    EXPECT_TRUE(points.count({right, bottom}) == 0);
+    EXPECT_EQ(path->brush().style(), Qt::NoBrush);
+    EXPECT_EQ(path->pen().color(), Qt::white);
+  }
+  EXPECT_TRUE(found_shape);
+}
+
+TEST(SchematicOutline, DffDrawsClockTriangle) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  SchematicDiagram diagram(view);
+  const QGraphicsScene* scene =
+      BuildSymsScene(registry, context, view, diagram);
+  ASSERT_NE(scene, nullptr);
+  const QRectF ff_rect = SymsGateRectForLabel(scene, "ADFF");
+  ASSERT_FALSE(ff_rect.isNull());
+  // The flip-flop itself is a rectangle; the clock triangle
+  // is the only small triangular path in the scene: 10 wide,
+  // 12 high, its base on the left edge of the ADFF rect.
+  bool found_triangle = false;
+  for (const QGraphicsPathItem* path :
+       OutlineSceneItems<QGraphicsPathItem>(scene)) {
+    const QRectF bounds = path->path().boundingRect();
+    if (std::abs(bounds.width() - 10) > 0.01) continue;
+    if (std::abs(bounds.height() - 12) > 0.01) continue;
+    EXPECT_EQ(bounds.left(), ff_rect.left());
+    EXPECT_GE(bounds.center().y(), ff_rect.top());
+    EXPECT_LE(bounds.center().y(), ff_rect.bottom());
+    EXPECT_EQ(path->path().elementCount(), 4);
+    EXPECT_EQ(path->brush().style(), Qt::NoBrush);
+    EXPECT_EQ(path->pen().color(), Qt::white);
+    found_triangle = true;
+  }
+  EXPECT_TRUE(found_triangle);
+}
+
+TEST(SchematicOutline, OperatorGlyphAndEquationThirdLines) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  SchematicDiagram diagram(view);
+  const QGraphicsScene* scene =
+      BuildSymsScene(registry, context, view, diagram);
+  ASSERT_NE(scene, nullptr);
+  auto third_line_in_rect = [&](const std::string& text,
+                                const QRectF& rect) {
+    const QGraphicsSimpleTextItem* item = SymsTextItem(scene, text);
+    EXPECT_NE(item, nullptr) << "missing third line: " << text;
+    if (item == nullptr) return;
+    EXPECT_TRUE(rect.contains(item->pos()))
+        << "third line outside its gate: " << text;
+    EXPECT_LE(item->sceneBoundingRect().bottom(), rect.bottom() + 0.01)
+        << "third line overflows its gate: " << text;
+    EXPECT_EQ(item->brush().color(), Qt::white);
+  };
+  // Comparator glyph, memory equation, shift glyph: each on
+  // the third line of its own gate, inside the gate rect.
+  const QRectF eq_rect = SymsGateRectForLabel(scene, "EQ");
+  const QRectF mem_rect = SymsGateRectForLabel(scene, "MEM");
+  const QRectF shl_rect = SymsGateRectForLabel(scene, "SHL");
+  ASSERT_FALSE(eq_rect.isNull());
+  ASSERT_FALSE(mem_rect.isNull());
+  ASSERT_FALSE(shl_rect.isNull());
+  third_line_in_rect("=", eq_rect);
+  third_line_in_rect("Q = mem[A]", mem_rect);
+  third_line_in_rect("<<", shl_rect);
+}
+
+TEST(SchematicOutline, ArithmeticGlyphsOnAluBoxes) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kOutlineAluHierarchy, true);
+  RegisterAluSchematic(registry);
+  CommandContext context;
+  context.synth.elaborated = true;
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  view.RefreshSchematic();
+  ASSERT_FALSE(view.Schematic().Empty());
+  SchematicDiagram diagram(view);
+  diagram.show();
+  QApplication::processEvents();
+  diagram.Refresh();
+  QApplication::processEvents();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  const QRectF add_rect = SymsGateRectForLabel(scene, "ADD");
+  const QRectF sub_rect = SymsGateRectForLabel(scene, "SUB");
+  ASSERT_FALSE(add_rect.isNull());
+  ASSERT_FALSE(sub_rect.isNull());
+  const QGraphicsSimpleTextItem* plus = SymsTextItem(scene, "+");
+  const QGraphicsSimpleTextItem* minus = SymsTextItem(scene, "-");
+  ASSERT_NE(plus, nullptr);
+  ASSERT_NE(minus, nullptr);
+  EXPECT_TRUE(add_rect.contains(plus->pos()));
+  EXPECT_TRUE(sub_rect.contains(minus->pos()));
+  EXPECT_LE(plus->sceneBoundingRect().bottom(), add_rect.bottom() + 0.01);
+  EXPECT_LE(minus->sceneBoundingRect().bottom(), sub_rect.bottom() + 0.01);
 }
 
 TEST(BlockOutline, BlocksDrawWhiteOutlineWithoutFill) {

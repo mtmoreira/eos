@@ -64,7 +64,57 @@ GateSymbol SymbolForType(const std::string& type) {
   if (normalized == "xnor") return GateSymbol::kXnor;
   if (normalized == "not" || normalized == "inv") return GateSymbol::kNot;
   if (normalized == "buf") return GateSymbol::kBuf;
+  if (normalized == "mux" || normalized == "pmux")
+    return GateSymbol::kMux;
+  if (normalized == "dff" || normalized == "dffe" ||
+      normalized == "dffsr" || normalized == "dffsre" ||
+      normalized == "adff" || normalized == "adffe" ||
+      normalized == "aldff" || normalized == "aldffe" ||
+      normalized == "sdff" || normalized == "sdffce" ||
+      normalized == "sdffe")
+    return GateSymbol::kDff;
+  if (normalized == "dlatch" || normalized == "dlatchsr" ||
+      normalized == "sr")
+    return GateSymbol::kLatch;
+  if (normalized == "logic_and" || normalized == "reduce_and")
+    return GateSymbol::kAnd;
+  if (normalized == "logic_or" || normalized == "reduce_or")
+    return GateSymbol::kOr;
+  if (normalized == "logic_not") return GateSymbol::kNot;
+  if (normalized == "reduce_xor") return GateSymbol::kXor;
+  if (normalized == "reduce_xnor") return GateSymbol::kXnor;
+  if (normalized == "tribuf" || normalized == "pos")
+    return GateSymbol::kBuf;
   return GateSymbol::kGeneric;
+}
+
+std::string OperatorGlyph(const std::string& type) {
+  const std::string normalized = NormalizedType(type);
+  if (normalized == "add") return "+";
+  if (normalized == "sub" || normalized == "neg") return "-";
+  if (normalized == "mul") return "x";
+  if (normalized == "div") return "/";
+  if (normalized == "mod") return "%";
+  if (normalized == "eq") return "=";
+  if (normalized == "ne") return "!=";
+  if (normalized == "lt") return "<";
+  if (normalized == "gt") return ">";
+  if (normalized == "le") return "<=";
+  if (normalized == "ge") return ">=";
+  if (normalized == "shl" || normalized == "sshl") return "<<";
+  if (normalized == "shr" || normalized == "sshr") return ">>";
+  return "";
+}
+
+std::string LogicEquation(const std::string& type) {
+  const std::string normalized = NormalizedType(type);
+  if (normalized == "mem" || normalized == "memrd") return "Q = mem[A]";
+  if (normalized == "memwr") return "mem[A] = D";
+  if (normalized == "fsm") return "Y = f(state, in)";
+  if (normalized == "lut") return "Y = lut(A)";
+  if (normalized == "pow") return "Y = A ** B";
+  if (normalized == "shift") return "Y = shift(A, B)";
+  return "";
 }
 
 std::string DisplayType(const std::string& type) {

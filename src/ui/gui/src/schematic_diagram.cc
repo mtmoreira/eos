@@ -68,9 +68,13 @@ qreal LeftCurveX(qreal base, const QRectF& rect, qreal y) {
 // every shape is a white contour with no fill: a solid white
 // fill would be a white box on black. A dimmed gate (outside
 // the selected cone) outlines in grey; a selected gate
-// outlines in blue.
+// outlines in blue. control_y is the scene y of the
+// flip-flop clock or latch enable anchor, or -1 when the gate
+// has none: the control triangle straddles the left edge
+// there, apex pointing into the box.
 void DrawGateShape(QGraphicsScene* scene, const QRectF& rect,
-                   GateSymbol symbol, bool dimmed, bool selected) {
+                   GateSymbol symbol, bool dimmed, bool selected,
+                   double control_y = -1) {
   const qreal left = rect.left();
   const qreal right = rect.right();
   const qreal top = rect.top();
@@ -131,6 +135,42 @@ void DrawGateShape(QGraphicsScene* scene, const QRectF& rect,
       path.lineTo(right, middle);
       path.closeSubpath();
       add_shape(path);
+      break;
+    }
+    case GateSymbol::kMux: {
+      // Trapezoid, wide side at the inputs: the left edge is
+      // the full height, the right edge is a short centered
+      // segment, so the output anchor at mid-height still
+      // touches the shape and no anchor adjustment is needed.
+      constexpr qreal kMuxHalfOutput = 12;
+      QPainterPath path;
+      path.moveTo(left, top);
+      path.lineTo(right, middle - kMuxHalfOutput);
+      path.lineTo(right, middle + kMuxHalfOutput);
+      path.lineTo(left, bottom);
+      path.closeSubpath();
+      add_shape(path);
+      break;
+    }
+    case GateSymbol::kDff:
+    case GateSymbol::kLatch: {
+      // The IEEE rectangular symbol: an outline rectangle,
+      // with a small triangle on the control edge. The
+      // triangle straddles the left edge at the clock (or
+      // enable) anchor, apex pointing into the box.
+      auto* item = scene->addRect(rect);
+      item->setPen(pen);
+      item->setBrush(Qt::NoBrush);
+      if (control_y >= 0) {
+        constexpr qreal kControlHalf = 6;
+        constexpr qreal kControlDepth = 10;
+        QPainterPath triangle;
+        triangle.moveTo(left, control_y - kControlHalf);
+        triangle.lineTo(left + kControlDepth, control_y);
+        triangle.lineTo(left, control_y + kControlHalf);
+        triangle.closeSubpath();
+        add_shape(triangle);
+      }
       break;
     }
   }
@@ -448,16 +488,38 @@ void SchematicDiagram::RebuildScene() {
                       placement.height);
     gate_rects_[placement.instance] = rect;
     const bool in_cone = cone.count(placement.instance) != 0;
-    DrawGateShape(scene_, rect, SymbolForType(gate->type),
-                  highlighting && !in_cone,
-                  placement.instance == selected_);
+    const GateSymbol symbol = SymbolForType(gate->type);
+    // The control anchor for the clock/enable triangle:
+    // CLK for flip-flops, EN or G for latches. The $sr
+    // latch has no single control input, so it draws no
+    // triangle.
+    double control_y = -1;
+    if (symbol == GateSymbol::kDff || symbol == GateSymbol::kLatch) {
+      const std::string wanted =
+          symbol == GateSymbol::kDff ? "CLK" : "EN";
+      for (const SchematicPortAnchor& anchor : placement.ports) {
+        if (anchor.left_side &&
+            (anchor.name == wanted ||
+             (symbol == GateSymbol::kLatch && anchor.name == "G"))) {
+          control_y = anchor.y;
+          break;
+        }
+      }
+    }
+    DrawGateShape(scene_, rect, symbol, highlighting && !in_cone,
+                  placement.instance == selected_, control_y);
     const std::string instance_label = DisplayInstance(gate->instance);
     const std::string type_label = DisplayType(gate->type);
+    const std::string equation = LogicEquation(gate->type);
     const QString tooltip =
         instance_label.empty()
-            ? QString::fromStdString(type_label)
-            : QString::fromStdString(instance_label + " (" +
-                                     type_label + ")");
+            ? QString::fromStdString(
+                  equation.empty()
+                      ? type_label
+                      : type_label + ": " + equation)
+            : QString::fromStdString(
+                  instance_label + " (" + type_label + ")" +
+                  (equation.empty() ? "" : ": " + equation));
     // The tooltip belongs to the shape, but shapes are several
     // items; attach it to a transparent rect over the bounds
     // so hovering anywhere on the gate shows it.
@@ -492,6 +554,37 @@ void SchematicDiagram::RebuildScene() {
       type_text->setBrush(QBrush(Qt::white));
       type_text->setPos(center_x(type_metrics, type_label),
                         placement.y + 22);
+    }
+    // The third line: the operator glyph for arithmetic,
+    // comparison, and shift boxes, or the logic equation
+    // for a box with no standard symbol. One or the other,
+    // never both: OperatorGlyph and LogicEquation are
+    // disjoint by construction. It sits below the type
+    // label, still inside the 64-high gate rect.
+    const std::string glyph = OperatorGlyph(gate->type);
+    if (!glyph.empty()) {
+      QFont glyph_font;
+      glyph_font.setBold(true);
+      // 8pt like the equation line: the third line starts
+      // at +48 in a 64-high rect, so the default font's
+      // 17px line height overflows the rect by a pixel.
+      glyph_font.setPointSize(8);
+      QFontMetrics glyph_metrics(glyph_font);
+      auto* glyph_text =
+          scene_->addSimpleText(QString::fromStdString(glyph));
+      glyph_text->setFont(glyph_font);
+      glyph_text->setBrush(QBrush(Qt::white));
+      glyph_text->setPos(center_x(glyph_metrics, glyph), placement.y + 48);
+    } else if (!equation.empty()) {
+      QFont equation_font;
+      equation_font.setPointSize(8);
+      QFontMetrics equation_metrics(equation_font);
+      auto* equation_text = scene_->addSimpleText(
+          QString::fromStdString(equation));
+      equation_text->setFont(equation_font);
+      equation_text->setBrush(QBrush(Qt::white));
+      equation_text->setPos(center_x(equation_metrics, equation),
+                            placement.y + 48);
     }
   }
 
