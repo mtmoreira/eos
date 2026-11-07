@@ -42,7 +42,16 @@ struct SchematicGate {
 
 // The symbol the schematic widget draws for a gate type.
 // kGeneric is the fallback rectangle for any type with no
-// standard shape (adders, flip-flops, and anything else).
+// standard shape of its own: arithmetic and comparison boxes
+// carry their operator glyph as a third text line, and boxes
+// with no standard symbol at all carry their logic equation
+// (see OperatorGlyph and LogicEquation). Distinctive shapes
+// follow IEEE 91-1984: the D-shaped AND, the curved OR, the
+// triangle NOT/BUF, the trapezoid MUX, and the rectangle with
+// a clock triangle for flip-flops (the rectangle IS the
+// standard flip-flop symbol) and with an enable triangle for
+// latches. Reduction and multi-bit logic cells reuse the shape
+// of the operation they perform.
 enum class GateSymbol {
   kAnd,
   kNand,
@@ -52,14 +61,46 @@ enum class GateSymbol {
   kXnor,
   kNot,
   kBuf,
+  kMux,
+  kDff,
+  kLatch,
   kGeneric,
 };
 
 // Selects the symbol for a raw cell type such as $and or $not.
 // The match strips a leading '$' and ignores case, so $AND and
 // $and select the same symbol; $inv selects kNot like $not.
-// Any unrecognized type selects kGeneric.
+// $mux and $pmux select kMux; the flip-flop family ($dff,
+// $adff, $aldff, $sdff, and their enable/reset variants)
+// selects kDff; the latch family ($dlatch, $dlatchsr, $sr)
+// selects kLatch. $logic_and, $logic_or, $logic_not select the
+// shape of the operation, as do $reduce_and, $reduce_or,
+// $reduce_xor, and $reduce_xnor. $tribuf and $pos select kBuf:
+// a tri-state buffer is a triangle with an enable, and $pos is
+// the identity, a buffer. Any unrecognized type selects
+// kGeneric.
 GateSymbol SymbolForType(const std::string& type);
+
+// The operator glyph for an arithmetic, comparison, or shift
+// cell: the IEEE 91-1984 rectangular-shape qualifier drawn as
+// the gate's third text line, under the type label. "+" for
+// $add, "-" for $sub and $neg, "x" for $mul, "/" for $div, "%"
+// for $mod, "=" for $eq, "!=" for $ne, "<" for $lt, ">" for
+// $gt, "<=" for $le, ">=" for $ge, "<<" for $shl and $sshl,
+// ">>" for $shr and $sshr. Empty for every other type: gates
+// with a distinctive shape need no glyph, and boxes with no
+// standard qualifier carry their logic equation instead.
+std::string OperatorGlyph(const std::string& type);
+
+// The logic equation a box-only cell implements, drawn as the
+// gate's third text line under the type label, so a cell with
+// no standard symbol still shows what it computes. "Q =
+// mem[A]" for $mem and $memrd, "mem[A] = D" for $memwr, "Y =
+// f(state, in)" for $fsm, "Y = lut(A)" for $lut, "Y = A ** B"
+// for $pow, "Y = shift(A, B)" for $shift. Empty for every
+// other type, including every type with a symbol or an
+// operator glyph: no type carries both a glyph and an equation.
+std::string LogicEquation(const std::string& type);
 
 // The label the schematic widget shows for a raw cell type:
 // the type without its leading '$', uppercased, so $and shows
