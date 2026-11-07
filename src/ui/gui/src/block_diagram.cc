@@ -391,10 +391,11 @@ void BlockDiagram::OnBlockClicked(const std::string& instance) {
   // Click-to-expand: a single click selects the block AND
   // descends into it, exactly like a double-click. A block
   // the hierarchy does not hold (an unresolved or black-box
-  // cell) selects nothing and descends nowhere.
+  // cell) selects nothing and descends nowhere. The center
+  // view switches to the schematic when the new level is a
+  // leaf, on the refresh the action callback triggers.
   if (!view_.SelectHierarchyPath(path)) return;
   view_.SetDiagramLevel(path);
-  if (view_.DiagramLevelIsLeaf() && on_expand_) on_expand_();
   if (on_action_) on_action_();
 }
 

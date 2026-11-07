@@ -8,8 +8,9 @@
 // never Qt signals, so no Q_OBJECT here and no moc step is
 // needed. Gates are clickable: clicking one highlights its
 // fanin and fanout cones and dims the rest, clicking empty
-// space clears the highlight. The schematic lives as a tab in
-// the right panel set, so only the breadcrumb ascends.
+// space clears the highlight. The schematic lives in the
+// center panel when the level is a leaf (the block diagram
+// shows for non-leaf levels), so only the breadcrumb ascends.
 #ifndef EOS_UI_GUI_SCHEMATIC_DIAGRAM_H_
 #define EOS_UI_GUI_SCHEMATIC_DIAGRAM_H_
 

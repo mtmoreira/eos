@@ -147,11 +147,9 @@ class SessionView {
   void RefreshDiagram();
 
   // Gate-level schematic model, refreshed from the live session
-  // (see RefreshSchematic). The schematic is a tab in the right
-  // panel set, not the center: it shows the leaf level's
-  // schematic, and the model loads only when the diagram level
-  // is a leaf; otherwise the model is empty and the tab shows
-  // its placeholder.
+  // (see RefreshSchematic). The center panel shows the
+  // schematic when the diagram level is a leaf; otherwise the
+  // model is empty and the center shows the block diagram.
   const SchematicModel& Schematic() const { return schematic_; }
 
   // Whether the diagram level is a leaf: its hierarchy node

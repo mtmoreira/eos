@@ -36,16 +36,11 @@ class BlockDiagram : public QWidget {
 
   // Called after a diagram click changes the selection or the
   // level, so the main window can refresh. Unset by default:
-  // without it the diagram only updates the model.
+  // without it the diagram only updates the model. The center
+  // view switches to the schematic for a leaf level on the
+  // refresh, so no separate expand callback is needed.
   void SetActionCallback(std::function<void()> callback) {
     on_action_ = std::move(callback);
-  }
-
-  // Called after a click descends to a leaf level, so the
-  // main window can show the schematic tab for it. Unset by
-  // default: without it a click descends but shows no tab.
-  void SetExpandCallback(std::function<void()> callback) {
-    on_expand_ = std::move(callback);
   }
 
  protected:
@@ -81,7 +76,6 @@ class BlockDiagram : public QWidget {
   QGraphicsScene* scene_ = nullptr;
   QGraphicsView* view_widget_ = nullptr;
   std::function<void()> on_action_;
-  std::function<void()> on_expand_;
 };
 
 }  // namespace eos::ui

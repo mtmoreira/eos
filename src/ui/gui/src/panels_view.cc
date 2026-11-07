@@ -15,7 +15,6 @@
 #include "eos/ui/gui.h"
 #include "eos/ui/issues.h"
 #include "eos/ui/panels.h"
-#include "schematic_diagram.h"
 
 namespace eos::ui {
 
@@ -244,15 +243,10 @@ PanelsView::PanelsView(SessionView& view, QWidget* parent)
   messages_->setReadOnly(true);
   messages_layout->addWidget(messages_, 1);
   addTab(messages_tab, "Messages");
-  // Schematic tab: the gate-level schematic for the leaf
-  // level, moved here from the center so the center stays the
-  // block diagram. The schematic forwards its breadcrumb
-  // action through this view's action callback.
-  schematic_ = new SchematicDiagram(view_, this);
-  schematic_->SetActionCallback([this]() {
-    if (on_action_) on_action_();
-  });
-  addTab(schematic_, "Schematic");
+  // No Schematic tab here: the schematic lives in the center
+  // panel when the diagram level is a leaf. An issue click
+  // highlights the offending gate there through the highlight
+  // callback set by the main window.
   Refresh();
 }
 
@@ -263,7 +257,6 @@ void PanelsView::Refresh() {
   results_->setPlainText(QString::fromStdString(RenderResults(panels)));
   optlog_->setPlainText(QString::fromStdString(RenderOptLog(panels)));
   RefreshMessages();
-  schematic_->Refresh();
 }
 
 void PanelsView::RefreshIssues() {
@@ -311,15 +304,14 @@ void PanelsView::ShowTab(int index) {
   setCurrentIndex(index);
 }
 
-void PanelsView::ShowSchematicTab() { ShowTab(5); }
-
 void PanelsView::LocateIssue(const std::string& path,
                              const std::string& target) {
   if (!view_.SelectHierarchyPath(path)) return;
   if (!view_.SetDiagramLevel(path)) return;
   view_.RefreshSchematic();
-  if (view_.DiagramLevelIsLeaf()) schematic_->HighlightGate(target);
-  ShowSchematicTab();
+  if (view_.DiagramLevelIsLeaf() && on_highlight_gate_) {
+    on_highlight_gate_(target);
+  }
   if (on_action_) on_action_();
 }
 

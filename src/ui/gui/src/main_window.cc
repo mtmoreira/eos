@@ -26,6 +26,7 @@
 
 #include "eos/ui/gui.h"
 #include "block_diagram.h"
+#include "center_view.h"
 #include "hierarchy_browser.h"
 #include "panels_view.h"
 
@@ -98,11 +99,12 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   stepper_layout->addWidget(checkpoint_label_);
   layout->addWidget(stepper);
 
-  // Center row: hierarchy browser left, block diagram center,
-  // right panels right. The browser is U2; the diagram is U3
-  // and consumes the browser's selection. Clicking a block
-  // descends into it, and when the new level is a leaf the
-  // schematic tab shows for it.
+  // Center row: hierarchy browser left, center view center,
+  // right panels right. The browser is U2; the center is the
+  // block diagram for a non-leaf level and the gate-level
+  // schematic for a leaf level, and consumes the browser's
+  // selection. Clicking a block descends into it, and when the
+  // new level is a leaf the center switches to the schematic.
   auto* middle = new QSplitter(root);
   browser_ = new HierarchyBrowser(view_, middle);
   browser_->SetSelectionCallback([this]() {
@@ -110,16 +112,18 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
     Refresh();
   });
   middle->addWidget(browser_);
-  diagram_ = new BlockDiagram(view_, middle);
-  diagram_->SetActionCallback([this]() { Refresh(); });
-  diagram_->SetExpandCallback([this]() { panels_->ShowSchematicTab(); });
-  middle->addWidget(diagram_);
+  center_ = new CenterView(view_, middle);
+  center_->SetActionCallback([this]() { Refresh(); });
+  middle->addWidget(center_);
   // Right panels: issues, sources, results, optimization log,
-  // messages, and the schematic tab, rendered from the live
-  // session. An issue click or a schematic breadcrumb click
-  // refreshes the window through the action callback.
+  // and messages, rendered from the live session. An issue
+  // click highlights the offending gate in the center
+  // schematic; a schematic breadcrumb click refreshes the
+  // window through the action callback.
   panels_ = new PanelsView(view_, middle);
   panels_->SetActionCallback([this]() { Refresh(); });
+  panels_->SetHighlightGateCallback(
+      [this](const std::string& target) { center_->HighlightGate(target); });
   middle->addWidget(panels_);
   layout->addWidget(middle, 1);
 
@@ -280,7 +284,7 @@ void MainWindow::Refresh() {
   view_.RefreshIssues();
   view_.RefreshLog();
   browser_->Refresh();
-  diagram_->Refresh();
+  center_->Refresh();
   panels_->Refresh();
   RefreshSteps();
   RefreshConsole();
