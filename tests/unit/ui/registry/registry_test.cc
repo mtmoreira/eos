@@ -70,8 +70,12 @@ TEST(Registry, CoreSetIsComplete) {
   // gui_show adds gui_show; Immediate unit 5 adds report_clock.
   // The panel rework adds synth_issues; Immediate unit 6 adds
   // report_constraint; Immediate unit 7 adds
-  // report_analysis_coverage; Immediate unit 8 adds write_sdc.
-  EXPECT_EQ(shell.registry.Names().size(), 77u);
+  // report_analysis_coverage; Immediate unit 8 adds write_sdc;
+  // Immediate unit 9 adds report_qor, report_bottleneck, and
+  // set_bottleneck_capture (three commands: the two reports plus
+  // the capture setting the bottleneck report requires before
+  // the first timing update).
+  EXPECT_EQ(shell.registry.Names().size(), 80u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -83,6 +87,10 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("report_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_issues"), nullptr);
   EXPECT_NE(shell.registry.Find("report_constraint"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_analysis_coverage"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_qor"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_bottleneck"), nullptr);
+  EXPECT_NE(shell.registry.Find("set_bottleneck_capture"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -1883,6 +1891,9 @@ TEST(CoreCommands, SynthMapDelayJudgedByStaAndRunTimingReproducesIt) {
   EXPECT_TRUE(shell.ctx.synth.mapped);
   EXPECT_EQ(shell.ctx.synth.mapped_target, "delay");
   EXPECT_TRUE(shell.ctx.synth.mapped_timing_judged);
+  // Immediate unit 9: the successful mapping records its CPU
+  // time for report_qor's compile CPU.
+  EXPECT_GE(shell.ctx.synth.mapped_cpu_s, 0.0);
   EXPECT_EQ(shell.ctx.timing.verilog_path,
             shell.ctx.synth.mapped_verilog);
   std::ifstream genlib_in(shell.ctx.synth.mapped_genlib);
@@ -1922,6 +1933,12 @@ TEST(CoreCommands, SynthMapDelayJudgedByStaAndRunTimingReproducesIt) {
   EXPECT_NEAR(run_number("worst_slack_ns"),
               payload_number("worst_slack_ns"), 1e-6);
   EXPECT_NEAR(run_number("total_negative_slack_ns"), 0.0, 1e-6);
+  // Immediate unit 9: report_qor after the mapping records a
+  // compile CPU instead of n/a.
+  const CommandResult qor = shell.Run("report_qor", {});
+  ASSERT_TRUE(qor.ok) << qor.message;
+  EXPECT_NE(qor.payload.find("compile_cpu_s="), std::string::npos);
+  EXPECT_EQ(qor.payload.find("compile_cpu_s=n/a"), std::string::npos);
 }
 
 TEST(CoreCommands, SynthMapAreaWithExplicitLibertyAndNoTiming) {
@@ -3487,6 +3504,255 @@ TEST(ReportAnalysisCoverage, NoTimingSessionFails) {
       shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
           .ok);
   EXPECT_FALSE(shell.Run("report_analysis_coverage", {}).ok);
+}
+
+// QoR and bottleneck reports (Immediate unit 9, review item I9).
+TEST(ReportQor, CleanDesignReportsGroupsCellsAndDrc) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report = shell.Run("report_qor", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt setup_groups=1 "
+                                "hold_groups=1 union_tns=0 "
+                                "union_endpoints=0 every_group_tns=0 "
+                                "every_group_endpoints=0 "
+                                "hold_union_tns=0 hold_union_endpoints=0 "
+                                "hold_every_group_tns=0 "
+                                "hold_every_group_endpoints=0 cells=3 "
+                                "area=22 compile_cpu_s=n/a "
+                                "report=qor_report_func_tt"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt group=clk check=setup "
+                                "wns=9.4 tns=0 violating_paths=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt group=clk check=hold "
+                                "wns=0.45 tns=0 violating_paths=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt cell=DFF count=2 "
+                                "area=20"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt cell=BUF count=1 "
+                                "area=2"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt drc=max_transition "
+                                "violations=0 worst_slack=no limit"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Path groups (setup):"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Cells: 3, total area 22"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Compile CPU: n/a (no synthesis run "
+                                "in this session)"),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "qor_report_func_tt"),
+            nullptr);
+}
+
+TEST(ReportQor, TightClockUnionVsEveryGroup) {
+  // Two group_path commands both matching r2/D: the union TNS
+  // counts the endpoint once (-0.1), the every-group TNS once
+  // per group (-0.2).
+  TimingTempDir dir;
+  Shell shell;
+  const std::string sdc =
+      std::string(kTimingSdcTight) +
+      "group_path -name fast -to [get_pins r2/D]\n"
+      "group_path -name slow -to [get_pins r2/D]\n";
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, sdc.c_str());
+  const CommandResult report = shell.Run("report_qor", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("union_tns=-0.1 union_endpoints=1 "
+                                "every_group_tns=-0.2 "
+                                "every_group_endpoints=2"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt group=fast check=setup "
+                                "wns=-0.1 tns=-0.1 violating_paths=1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt group=slow check=setup "
+                                "wns=-0.1 tns=-0.1 violating_paths=1"),
+            std::string::npos);
+  // No clock-group row: the group_path exceptions take precedence.
+  EXPECT_EQ(report.payload.find("group=clk check=setup"),
+            std::string::npos);
+}
+
+TEST(ReportQor, RejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  EXPECT_FALSE(shell.Run("report_qor", {"-bogus"}).ok);
+  EXPECT_FALSE(shell.Run("report_qor", {"top"}).ok);
+  EXPECT_FALSE(shell.Run("report_qor", {"-scene", "func_xx"}).ok);
+}
+
+TEST(ReportQor, SceneSelectsOneScenario) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_ss", "func", "ss", "estimate"})
+          .ok);
+  const std::string liberty = dir.Write("cells.lib", kTimingLiberty);
+  ASSERT_TRUE(shell.Run("read_liberty", {"tt", liberty}).ok);
+  ASSERT_TRUE(shell.Run("read_liberty", {"ss", liberty}).ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult report =
+      shell.Run("report_qor", {"-scene", "func_ss"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_ss"), std::string::npos);
+  EXPECT_EQ(report.payload.find("scene=func_tt"), std::string::npos);
+}
+
+TEST(ReportQor, FileWritesReport) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const std::string file = dir.Path("qor.txt");
+  const CommandResult report = shell.Run("report_qor", {"-file", file});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("file=" + file), std::string::npos);
+  std::ifstream in(file);
+  ASSERT_TRUE(in);
+  std::stringstream contents;
+  contents << in.rdbuf();
+  EXPECT_NE(contents.str().find("Path groups (setup):"),
+            std::string::npos);
+  EXPECT_NE(contents.str().find("Cells: 3, total area 22"),
+            std::string::npos);
+}
+
+TEST(SetBottleneckCapture, AcceptsOnOffAndRejectsOther) {
+  Shell shell;
+  const CommandResult on = shell.Run("set_bottleneck_capture", {"on"});
+  ASSERT_TRUE(on.ok) << on.message;
+  EXPECT_NE(on.payload.find("bottleneck_capture=on"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.timing.bottleneck_capture);
+  const CommandResult off = shell.Run("set_bottleneck_capture", {"off"});
+  ASSERT_TRUE(off.ok) << off.message;
+  EXPECT_NE(off.payload.find("bottleneck_capture=off"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.timing.bottleneck_capture);
+  EXPECT_FALSE(shell.Run("set_bottleneck_capture", {"yes"}).ok);
+  EXPECT_FALSE(shell.Run("set_bottleneck_capture", {}).ok);
+  EXPECT_FALSE(shell.Run("set_bottleneck_capture", {"on", "off"}).ok);
+}
+
+TEST(ReportBottleneck, RequiresCaptureOn) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdcTight);
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  const CommandResult report = shell.Run("report_bottleneck", {});
+  ASSERT_FALSE(report.ok);
+  EXPECT_NE(report.message.find("bottleneck capture was off"),
+            std::string::npos);
+}
+
+TEST(ReportBottleneck, RequiresTimingRun) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdcTight);
+  ASSERT_TRUE(shell.Run("set_bottleneck_capture", {"on"}).ok);
+  const CommandResult report = shell.Run("report_bottleneck", {});
+  ASSERT_FALSE(report.ok);
+  EXPECT_NE(report.message.find("no timing results"),
+            std::string::npos);
+}
+
+TEST(ReportBottleneck, RanksViolatingCells) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdcTight);
+  ASSERT_TRUE(shell.Run("set_bottleneck_capture", {"on"}).ok);
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  const CommandResult report = shell.Run("report_bottleneck", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  // One violating path, through r1, u1 and r2: all three rank
+  // with one path each, ties broken by worst slack then name.
+  EXPECT_NE(report.payload.find("scene=all delay_type=max paths=1 "
+                                "cells=3 report=bottleneck_report_all"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=all rank=1 cell=r1 type=DFF "
+                                "paths=1 worst_slack=-0.1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=all rank=2 cell=r2 type=DFF "
+                                "paths=1 worst_slack=-0.1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=all rank=3 cell=u1 type=BUF "
+                                "paths=1 worst_slack=-0.1"),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "bottleneck_report_all"),
+            nullptr);
+}
+
+TEST(ReportBottleneck, MaxCellsLimitsRanking) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdcTight);
+  ASSERT_TRUE(shell.Run("set_bottleneck_capture", {"on"}).ok);
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  const CommandResult report =
+      shell.Run("report_bottleneck", {"-max_cells", "1"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("paths=1 cells=1"), std::string::npos);
+  EXPECT_NE(report.payload.find("rank=1 cell=r1"), std::string::npos);
+  EXPECT_EQ(report.payload.find("rank=2"), std::string::npos);
+}
+
+TEST(ReportBottleneck, HoldKindWithNoViolationsRanksEmpty) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdcTight);
+  ASSERT_TRUE(shell.Run("set_bottleneck_capture", {"on"}).ok);
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  const CommandResult report =
+      shell.Run("report_bottleneck", {"-delay_type", "min"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("delay_type=min paths=0 cells=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("(no violating paths captured)"),
+            std::string::npos);
+}
+
+TEST(ReportBottleneck, CaptureOffClearsStoredPaths) {
+  // A second run_timing with the capture off clears the saved
+  // paths, so the report fails instead of ranking stale data.
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdcTight);
+  ASSERT_TRUE(shell.Run("set_bottleneck_capture", {"on"}).ok);
+  ASSERT_TRUE(shell.Run("run_timing").ok);
+  ASSERT_TRUE(shell.Run("set_bottleneck_capture", {"off"}).ok);
+  ASSERT_TRUE(shell.Run("run_timing").ok);
+  const CommandResult report = shell.Run("report_bottleneck", {});
+  ASSERT_FALSE(report.ok);
+  EXPECT_NE(report.message.find("bottleneck capture was off"),
+            std::string::npos);
+}
+
+TEST(ReportBottleneck, RejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdcTight);
+  ASSERT_TRUE(shell.Run("set_bottleneck_capture", {"on"}).ok);
+  ASSERT_TRUE(shell.Run("run_timing").ok);
+  EXPECT_FALSE(shell.Run("report_bottleneck", {"-delay_type", "ave"}).ok);
+  EXPECT_FALSE(shell.Run("report_bottleneck", {"-max_cells", "0"}).ok);
+  EXPECT_FALSE(shell.Run("report_bottleneck", {"-max_cells", "x"}).ok);
+  EXPECT_FALSE(shell.Run("report_bottleneck", {"-scene", "func_xx"}).ok);
+  EXPECT_FALSE(shell.Run("report_bottleneck", {"top"}).ok);
 }
 
 TEST(CoreCommands, HelpListsAndDescribesCommands) {

@@ -19,6 +19,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -435,6 +436,107 @@ TEST(TimingService, AnalysisCoveragePerScene) {
   }
   EXPECT_EQ(tested, 2u);
   EXPECT_EQ(untested, 2u);
+}
+
+// QoR data (Immediate unit 9, review item I9): one service call
+// per scene returns the per-group endpoint slacks, the cell
+// census and area, the scalar metrics and the three electrical
+// checks, so report_qor needs no second run.
+TEST(TimingService, AnalyzeQorReportsGroupsCellsAndDrc) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells_elec.lib", kLibertyElectrical);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  const auto results = service.AnalyzeQor(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)});
+  ASSERT_TRUE(results.ok()) << results.status().message();
+  ASSERT_EQ(results.value().size(), 1u);
+  const QorResult& result = results.value()[0];
+  EXPECT_EQ(result.scenario.name, "func_tt");
+  const auto metric = [&result](const std::string& name,
+                                const std::string& unit) {
+    const auto it = result.metrics.find(name);
+    EXPECT_NE(it, result.metrics.end()) << "missing metric " << name;
+    if (it == result.metrics.end()) return 0.0;
+    EXPECT_EQ(it->second.unit, unit) << "metric " << name;
+    return it->second.value;
+  };
+  EXPECT_NEAR(metric("worst_slack_ns", "ns"), 9.4, 1e-6);
+  EXPECT_NEAR(metric("total_negative_slack_ns", "ns"), 0.0, 1e-9);
+  EXPECT_NEAR(metric("worst_hold_slack_ns", "ns"), 0.45, 1e-6);
+  ASSERT_EQ(result.setup_groups.size(), 1u);
+  EXPECT_EQ(result.setup_groups[0].name, "clk");
+  ASSERT_EQ(result.setup_groups[0].endpoints.size(), 1u);
+  EXPECT_EQ(result.setup_groups[0].endpoints[0].pin, "r2/D");
+  EXPECT_NEAR(result.setup_groups[0].endpoints[0].slack_ns, 9.4, 1e-6);
+  ASSERT_EQ(result.hold_groups.size(), 1u);
+  EXPECT_EQ(result.hold_groups[0].name, "clk");
+  ASSERT_EQ(result.hold_groups[0].endpoints.size(), 1u);
+  EXPECT_NEAR(result.hold_groups[0].endpoints[0].slack_ns, 0.45, 1e-6);
+  EXPECT_EQ(result.total_cells, 3u);
+  EXPECT_NEAR(result.total_area, 22.0, 1e-9);
+  ASSERT_EQ(result.cells.size(), 2u);
+  EXPECT_EQ(result.cells[0].cell, "DFF");
+  EXPECT_EQ(result.cells[0].count, 2u);
+  EXPECT_NEAR(result.cells[0].area, 20.0, 1e-9);
+  EXPECT_EQ(result.cells[1].cell, "BUF");
+  EXPECT_EQ(result.cells[1].count, 1u);
+  EXPECT_NEAR(result.cells[1].area, 2.0, 1e-9);
+  EXPECT_TRUE(result.max_transition_check.has_limit);
+  EXPECT_EQ(result.max_transition_check.violation_count, 1u);
+  EXPECT_NEAR(result.max_transition_check.worst_slack, -0.01, 1e-6);
+  EXPECT_NEAR(metric("max_transition_violations", "pins"), 1.0, 1e-9);
+  EXPECT_TRUE(result.max_capacitance_check.has_limit);
+  EXPECT_EQ(result.max_capacitance_check.violation_count, 1u);
+  EXPECT_TRUE(result.max_fanout_check.has_limit);
+  EXPECT_EQ(result.max_fanout_check.violation_count, 1u);
+}
+
+TEST(TimingService, AnalyzeQorUnionTnsEqualsMetricsTns) {
+  // The I9 worked example, at the service level: two group_path
+  // commands both matching r2/D put the endpoint in both named
+  // groups, so the union TNS (each endpoint once) is -0.1 and
+  // equals the scalar total_negative_slack_ns, while the
+  // every-group TNS (once per group) is -0.2.
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  const std::string sdc =
+      std::string(kSdcTight) +
+      "group_path -name fast -to [get_pins r2/D]\n"
+      "group_path -name slow -to [get_pins r2/D]\n";
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", sdc)};
+  TimingService service;
+  const auto results = service.AnalyzeQor(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)});
+  ASSERT_TRUE(results.ok()) << results.status().message();
+  ASSERT_EQ(results.value().size(), 1u);
+  const QorResult& result = results.value()[0];
+  ASSERT_EQ(result.setup_groups.size(), 2u);
+  EXPECT_EQ(result.setup_groups[0].name, "fast");
+  EXPECT_EQ(result.setup_groups[1].name, "slow");
+  std::map<std::string, double> by_pin;
+  double every_group_tns = 0.0;
+  for (const PathGroupResult& group : result.setup_groups) {
+    ASSERT_EQ(group.endpoints.size(), 1u);
+    EXPECT_EQ(group.endpoints[0].pin, "r2/D");
+    EXPECT_NEAR(group.endpoints[0].slack_ns, -0.1, 1e-6 * 0.1 + 1e-7);
+    by_pin[group.endpoints[0].pin] = group.endpoints[0].slack_ns;
+    every_group_tns += group.endpoints[0].slack_ns;
+  }
+  double union_tns = 0.0;
+  for (const auto& entry : by_pin) union_tns += entry.second;
+  EXPECT_NEAR(union_tns, -0.1, 1e-6 * 0.1 + 1e-7);
+  EXPECT_NEAR(every_group_tns, -0.2, 1e-6 * 0.2 + 1e-7);
+  const auto metric = result.metrics.find("total_negative_slack_ns");
+  ASSERT_NE(metric, result.metrics.end());
+  EXPECT_NEAR(metric->second.value, union_tns, 1e-9);
+  ASSERT_EQ(result.hold_groups.size(), 2u);
+  for (const PathGroupResult& group : result.hold_groups) {
+    ASSERT_EQ(group.endpoints.size(), 1u);
+    EXPECT_NEAR(group.endpoints[0].slack_ns, 0.45, 1e-6);
+  }
 }
 
 TEST(TimingService, TightClockShowsViolationPerScene) {
