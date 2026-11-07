@@ -69,8 +69,9 @@ TEST(Registry, CoreSetIsComplete) {
   // nine M27 commands; Immediate unit 4 adds check_timing;
   // gui_show adds gui_show; Immediate unit 5 adds report_clock.
   // The panel rework adds synth_issues; Immediate unit 6 adds
-  // report_constraint.
-  EXPECT_EQ(shell.registry.Names().size(), 76u);
+  // report_constraint; Immediate unit 7 adds
+  // report_analysis_coverage; Immediate unit 8 adds write_sdc.
+  EXPECT_EQ(shell.registry.Names().size(), 77u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -5067,6 +5068,335 @@ TEST(SdcCommands, MaxTimeBorrowStoresValue) {
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
     EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
   }
+}
+
+// ---- write_sdc (Immediate unit 8, review item I5) ------------------
+// One file, the session constraint set, explicit get_* collections
+// for every target. The tests pin the exact emitted text, the merge
+// rules, the skip reporting, the failure modes, -compress, and the
+// STA round-trip against the hand-written fixture SDC.
+
+// Reads a whole text file back into a string.
+static std::string ReadTextFile(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  std::ostringstream out;
+  out << in.rdbuf();
+  return out.str();
+}
+
+// The standard authoring design: ports clk, clk2, d, q, out; one
+// dff instance u1 with pins u1/CK, u1/D, u1/Q on nets.
+static void BuildWriteSdcDesign(Shell& shell) {
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk2", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"d", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"q", "out"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"out", "out"}).ok);
+  ASSERT_TRUE(shell.Run("create_cell", {"dff"}).ok);
+  ASSERT_TRUE(shell.Run("create_instance", {"u1", "dff"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"clk_net"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"n1"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"n2"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u1", "CK", "clk_net"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u1", "D", "n1"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u1", "Q", "n2"}).ok);
+}
+
+TEST(WriteSdc, EmptySetWritesHeaderOnly) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string path = dir.Path("empty.sdc");
+  const CommandResult written = shell.Run("write_sdc", {path});
+  ASSERT_TRUE(written.ok) << written.message;
+  EXPECT_EQ(written.payload, "sdc=" + path + " constraints=0 skipped=0");
+  const std::string text = ReadTextFile(path);
+  EXPECT_NE(text.find("# EOS write_sdc: single-scenario form"),
+            std::string::npos);
+  EXPECT_NE(text.find("# scenario: (none)"), std::string::npos);
+  EXPECT_NE(text.find("# 0 constraints emitted, 0 rows skipped."),
+            std::string::npos);
+  EXPECT_EQ(text.find("create_clock"), std::string::npos);
+  // A second write is byte-identical: no timestamp is written.
+  const std::string again_path = dir.Path("empty2.sdc");
+  ASSERT_TRUE(shell.Run("write_sdc", {again_path}).ok);
+  EXPECT_EQ(text, ReadTextFile(again_path));
+}
+
+TEST(WriteSdc, EmitsAllElevenKinds) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildWriteSdcDesign(shell);
+  ASSERT_TRUE(shell.Run("create_clock",
+                        {"-period", "10", "-waveform", "0", "5", "-name",
+                         "sys", "clk"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "sys",
+                         "-divide_by", "2", "-name", "div", "out"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("set_clock_gating_check",
+                        {"-setup", "0.1", "-hold", "0.2", "-high", "clk"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("set_data_check",
+                        {"-from", "d", "-to", "q", "-setup", "1"})
+                  .ok);
+  ASSERT_TRUE(
+      shell.Run("set_min_pulse_width", {"0.3", "-low", "u1/CK"}).ok);
+  ASSERT_TRUE(shell.Run("set_sense", {"-positive", "-clock", "sys", "clk"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("set_ideal_network", {"-no_propagate", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("set_ideal_latency", {"1.5", "-rise", "-min", "clk"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("set_ideal_transition", {"0.25", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("group_path",
+                        {"-name", "grp", "-from", "d", "-through", "u1/CK",
+                         "-to", "q", "-weight", "2", "-critical_range",
+                         "0.5"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("set_max_time_borrow", {"0.4", "clk"}).ok);
+  const std::string path = dir.Path("all.sdc");
+  const CommandResult written = shell.Run("write_sdc", {path});
+  ASSERT_TRUE(written.ok) << written.message;
+  EXPECT_EQ(written.payload, "sdc=" + path + " constraints=11 skipped=0");
+  const std::string text = ReadTextFile(path);
+  EXPECT_NE(text.find("create_clock -period 10 -waveform {0 5} -name sys "
+                      "[get_ports clk]\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("create_generated_clock -source [get_ports clk] "
+                      "-master_clock sys -divide_by 2 -name div "
+                      "[get_ports out]\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("set_clock_gating_check -setup 0.1 -hold 0.2 -high "
+                      "[get_ports clk]\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("set_data_check -from [get_ports d] -to [get_ports "
+                      "q] -setup 1\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("set_min_pulse_width -low 0.3 [get_pins u1/CK]\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("set_sense -type clock -positive -clock {sys} "
+                      "[get_ports clk]\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("set_ideal_network -no_propagate [get_ports clk]\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("set_ideal_latency -rise -min 1.5 [get_ports clk]\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("set_ideal_transition 0.25 [get_ports clk]\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("group_path -name grp -from [get_ports d] -through "
+                      "[get_pins u1/CK] -to [get_ports q] -weight 2 "
+                      "-critical_range 0.5\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("set_max_time_borrow 0.4 [get_ports clk]\n"),
+            std::string::npos);
+}
+
+TEST(WriteSdc, ClockMergingAndAdd) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildWriteSdcDesign(shell);
+  ASSERT_TRUE(shell.Run("create_clock",
+                        {"-period", "10", "-name", "sys", "clk", "clk2"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("create_clock",
+                        {"-period", "20", "-name", "sys", "-add", "clk"})
+                  .ok);
+  const std::string path = dir.Path("merged.sdc");
+  const CommandResult written = shell.Run("write_sdc", {path});
+  ASSERT_TRUE(written.ok) << written.message;
+  EXPECT_EQ(written.payload, "sdc=" + path + " constraints=3 skipped=0");
+  const std::string text = ReadTextFile(path);
+  // Same name and parameters merge into one line over both targets.
+  EXPECT_NE(text.find("create_clock -period 10 -name sys "
+                      "[get_ports {clk clk2}]\n"),
+            std::string::npos);
+  // The -add row keeps its own line, with -add, in id order after it.
+  EXPECT_NE(text.find("create_clock -period 20 -name sys -add "
+                      "[get_ports clk]\n"),
+            std::string::npos);
+  // The unmerged single-target form must not appear.
+  EXPECT_EQ(text.find("create_clock -period 10 -name sys [get_ports clk]\n"),
+            std::string::npos);
+}
+
+TEST(WriteSdc, GroupPathMergesByName) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildWriteSdcDesign(shell);
+  ASSERT_TRUE(shell.Run("group_path", {"-name", "grp", "-from", "d", "-to",
+                                       "q", "-to", "out"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("group_path",
+                        {"-name", "starts", "-from", "d", "-from", "clk"})
+                  .ok);
+  const std::string path = dir.Path("groups.sdc");
+  const CommandResult written = shell.Run("write_sdc", {path});
+  ASSERT_TRUE(written.ok) << written.message;
+  EXPECT_EQ(written.payload, "sdc=" + path + " constraints=4 skipped=0");
+  const std::string text = ReadTextFile(path);
+  EXPECT_NE(text.find("group_path -name grp -from [get_ports d] -to "
+                      "[get_ports {q out}]\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("group_path -name starts -from [get_ports {d clk}]\n"),
+            std::string::npos);
+}
+
+TEST(WriteSdc, DataCheckWithBothMarginsSplits) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildWriteSdcDesign(shell);
+  // Different setup and hold margins: upstream takes one margin
+  // with -setup/-hold as flags, so the row emits two lines.
+  ASSERT_TRUE(shell.Run("set_data_check", {"-from", "d", "-to", "q",
+                                           "-setup", "1", "-hold", "0.5"})
+                  .ok);
+  // Equal margins emit one line with both flags.
+  ASSERT_TRUE(shell.Run("set_data_check", {"-from", "d", "-to", "q",
+                                           "-setup", "0.5", "-hold", "0.5"})
+                  .ok);
+  const std::string path = dir.Path("data-check.sdc");
+  const CommandResult written = shell.Run("write_sdc", {path});
+  ASSERT_TRUE(written.ok) << written.message;
+  EXPECT_EQ(written.payload, "sdc=" + path + " constraints=2 skipped=0");
+  const std::string text = ReadTextFile(path);
+  EXPECT_NE(text.find("set_data_check -from [get_ports d] -to [get_ports "
+                      "q] -setup 1\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("set_data_check -from [get_ports d] -to [get_ports "
+                      "q] -hold 0.5\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("set_data_check -from [get_ports d] -to [get_ports "
+                      "q] -setup -hold 0.5\n"),
+            std::string::npos);
+}
+
+TEST(WriteSdc, SkipsAreReportedNeverSilent) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildWriteSdcDesign(shell);
+  ASSERT_TRUE(shell.Run("bind_clock", {"sys", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("create_clock", {"-period", "10", "missing"}).ok);
+  ASSERT_TRUE(shell.Run("create_clock", {"-period", "10", "clk_net"}).ok);
+  ASSERT_TRUE(shell.Run("add_constraint", {"false_path", "fp1", "clk"}).ok);
+  const std::string path = dir.Path("skipped.sdc");
+  const CommandResult written = shell.Run("write_sdc", {path});
+  ASSERT_TRUE(written.ok) << written.message;
+  EXPECT_NE(written.payload.find("constraints=0 skipped=4"),
+            std::string::npos);
+  EXPECT_NE(written.payload.find("skipped: clock sys clk (construction "
+                                 "record, not an SDC clock)"),
+            std::string::npos);
+  EXPECT_NE(written.payload.find("skipped: clock missing missing "
+                                 "(unresolved target)"),
+            std::string::npos);
+  EXPECT_NE(written.payload.find("skipped: clock clk_net clk_net (clock "
+                                 "target is not a port or pin)"),
+            std::string::npos);
+  EXPECT_NE(written.payload.find("skipped: false_path fp1 clk (no stored "
+                                 "parameters)"),
+            std::string::npos);
+  const std::string text = ReadTextFile(path);
+  EXPECT_EQ(text.find("create_clock"), std::string::npos);
+  EXPECT_NE(text.find("# Skipped rows (not emitted):"), std::string::npos);
+  EXPECT_NE(text.find("#   skipped: clock sys clk (construction record, "
+                      "not an SDC clock)"),
+            std::string::npos);
+}
+
+TEST(WriteSdc, FailureModes) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildWriteSdcDesign(shell);
+  const CommandResult unknown =
+      shell.Run("write_sdc", {"-bogus", "out.sdc"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  const CommandResult extra = shell.Run("write_sdc", {"a.sdc", "b.sdc"});
+  ASSERT_FALSE(extra.ok);
+  EXPECT_EQ(extra.diag, Diag::kInvalidConfiguration);
+  const CommandResult none = shell.Run("write_sdc", {});
+  ASSERT_FALSE(none.ok);
+  EXPECT_EQ(none.diag, Diag::kInvalidConfiguration);
+  const CommandResult unwritable =
+      shell.Run("write_sdc", {"/nonexistent-dir-xyz/out.sdc"});
+  ASSERT_FALSE(unwritable.ok);
+  EXPECT_EQ(unwritable.diag, Diag::kIoError);
+}
+
+TEST(WriteSdc, CompressWritesGzip) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildWriteSdcDesign(shell);
+  ASSERT_TRUE(shell.Run("create_clock", {"-period", "10", "clk"}).ok);
+  const std::string path = dir.Path("out.sdc.gz");
+  const CommandResult written =
+      shell.Run("write_sdc", {"-compress", path});
+  ASSERT_TRUE(written.ok) << written.message;
+  EXPECT_EQ(written.payload, "sdc=" + path + " constraints=1 skipped=0");
+  std::ifstream in(path, std::ios::binary);
+  ASSERT_TRUE(in.good());
+  char magic[2] = {0, 0};
+  in.read(magic, 2);
+  EXPECT_EQ(static_cast<unsigned char>(magic[0]), 0x1f);
+  EXPECT_EQ(static_cast<unsigned char>(magic[1]), 0x8b);
+}
+
+TEST(WriteSdc, RoundTripMatchesHandWrittenSdc) {
+  TimingTempDir dir;
+  Shell author;
+  BuildWriteSdcDesign(author);
+  ASSERT_TRUE(author.Run("create_clock", {"-period", "10", "clk"}).ok);
+  const std::string path = dir.Path("roundtrip.sdc");
+  ASSERT_TRUE(author.Run("write_sdc", {path}).ok);
+  // A fresh shell reads the emitted file and runs timing on it: the
+  // slack must match the hand-written fixture SDC exactly.
+  Shell reader;
+  ASSERT_TRUE(
+      reader.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(reader.Run("read_liberty",
+                         {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(reader.Run("read_verilog",
+                         {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(reader.Run("read_sdc", {path}).ok);
+  const CommandResult run = reader.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  const auto payload_number = [&run](const std::string& key) {
+    const std::size_t at = run.payload.find(key + "=");
+    EXPECT_NE(at, std::string::npos) << "missing " << key;
+    if (at == std::string::npos) return 0.0;
+    return std::stod(run.payload.substr(at + key.size() + 1));
+  };
+  EXPECT_NEAR(payload_number("worst_slack_ns"), 9.4, 1e-6);
+  EXPECT_NEAR(payload_number("worst_hold_slack_ns"), 0.45, 1e-6);
+}
+
+TEST(WriteSdc, CompressedRoundTripThroughSta) {
+  TimingTempDir dir;
+  Shell author;
+  BuildWriteSdcDesign(author);
+  ASSERT_TRUE(author.Run("create_clock", {"-period", "10", "clk"}).ok);
+  const std::string path = dir.Path("timing.sdc.gz");
+  ASSERT_TRUE(author.Run("write_sdc", {"-compress", path}).ok);
+  Shell reader;
+  ASSERT_TRUE(
+      reader.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(reader.Run("read_liberty",
+                         {"tt", dir.Write("cells.lib", kTimingLiberty)})
+                    .ok);
+  ASSERT_TRUE(reader.Run("read_verilog",
+                         {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(reader.Run("read_sdc", {path}).ok);
+  const CommandResult run = reader.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  const std::size_t at = run.payload.find("worst_slack_ns=");
+  ASSERT_NE(at, std::string::npos);
+  EXPECT_NEAR(std::stod(run.payload.substr(at + 15)), 9.4, 1e-6);
 }
 
 // ---- check_timing (Immediate unit 4, review item I1) ----------------

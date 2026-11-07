@@ -186,7 +186,10 @@ group_path -name <group> [-from <obj>...] [-to <obj>...]
 ```
 
 Stores one `group_path` row per endpoint, all named with the group
-name, with `group`, `from` (space-joined), `through`
+name, with `group`, `endpoint` (`to`, `through`, or `from`: which
+list the rows bind to, stored since Immediate unit 8 so `write_sdc`
+can rebuild the line; older rows derive it by set equality),
+`from` (space-joined), `through`
 (space-joined), `weight`, and `critical_range` as parameters.
 `-name` is required; at least one of `-from` / `-to` / `-through`
 is required; `-critical_range` must not be negative; positional
@@ -240,3 +243,5 @@ need temp-file SDC materialization or engine text-input support.
   Immediate unit 4 adds `check_timing`, 70 to 71.
   Immediate unit 5 adds `report_clock`, 72 to 73.
   Immediate unit 6 adds `report_constraint`, 74 to 75.
+  Immediate unit 7 adds `report_analysis_coverage`, 75 to 76.
+  Immediate unit 8 adds `write_sdc`, 76 to 77.

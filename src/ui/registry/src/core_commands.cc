@@ -37,6 +37,7 @@
 #include <vector>
 
 #include <unistd.h>
+#include <zlib.h>
 
 
 namespace eos::ui {
@@ -1363,6 +1364,809 @@ void ReplaceNamed(CommandContext& ctx, db::ConstraintKind kind,
     if (c.kind == kind && c.name == name) dead.push_back(c.id);
   }
   for (db::ConstraintId id : dead) ctx.project.constraints.Remove(id);
+}
+
+// ---- write_sdc (Immediate unit 8, review item I5) --------------------
+// The writer emits the session constraint set as one SDC file, the
+// single-scenario form: one file, the active scenario's view. It is
+// a FROM-SCRATCH writer over ctx.project.constraints, not an exposure
+// of the engine's WriteSdc.cc: the engine writer runs on file-origin
+// constraints and drops positive set_clock_gating_check rows and the
+// ideal commands (docs/read-sdc-audit.md section 8), while this one
+// emits every row the session can express. File-origin constraints
+// that were never authored in the session stay in their source file;
+// that boundary is stated in docs/write-sdc.md, not hidden.
+//   - One SDC command per stored row, in constraint-id order,
+//     except clocks and group_path, which merge by name (upstream
+//     replace semantics: a second create_clock or group_path with
+//     the same name replaces the first unless -add is given).
+//   - Targets render as explicit get_* collections for their bound
+//     kind, so no wildcard or -of_objects form survives into the
+//     file. A row whose target cannot be rendered is skipped and
+//     reported, never guessed.
+//   - No timestamp is written, so repeated writes are
+//     byte-identical (repeatable-reports discipline, unit 1).
+
+// One bound target rendered as an explicit SDC object expression.
+struct WriteSdcTarget {
+  std::string expr;  // e.g. [get_ports clk]
+  std::string name;  // the bare object name
+  ObjectKind kind = ObjectKind::kNone;
+};
+
+// A name that cannot be addressed unambiguously in SDC: glob
+// characters stay active inside a get_* pattern even when quoted,
+// and list-structure characters would split the argument. Such a
+// row is skipped, never guessed.
+bool WriteSdcNameIsAddressable(const std::string& name) {
+  return name.find_first_of("*?[]{}$;\"\\ \t") == std::string::npos;
+}
+
+// Resolves one stored name to its design object, in the store's
+// resolution order (ports, then nets, then instances, then pin
+// paths), and renders it as an explicit get_* expression. Returns
+// nullopt when the name resolves to nothing or cannot be addressed.
+std::optional<WriteSdcTarget> WriteSdcResolveName(
+    const db::Design& design, const std::string& name) {
+  if (!WriteSdcNameIsAddressable(name)) return std::nullopt;
+  WriteSdcTarget out;
+  out.name = name;
+  ObjectId id = design.Find(ObjectKind::kPort, name);
+  if (!id.is_null()) {
+    out.kind = ObjectKind::kPort;
+    out.expr = "[get_ports " + name + "]";
+    return out;
+  }
+  id = design.Find(ObjectKind::kNet, name);
+  if (!id.is_null()) {
+    out.kind = ObjectKind::kNet;
+    out.expr = "[get_nets " + name + "]";
+    return out;
+  }
+  id = design.Find(ObjectKind::kInstance, name);
+  if (!id.is_null()) {
+    out.kind = ObjectKind::kInstance;
+    out.expr = "[get_cells " + name + "]";
+    return out;
+  }
+  id = design.Find(ObjectKind::kPin, name);
+  if (!id.is_null()) {
+    out.kind = ObjectKind::kPin;
+    out.expr = "[get_pins " + name + "]";
+    return out;
+  }
+  return std::nullopt;
+}
+
+// Renders one stored row's target from its bound object id, so a
+// name shared by two kinds still addresses the object the row bound
+// to. Returns nullopt with the reason in `why` when the row cannot
+// be emitted as an unambiguous object.
+std::optional<WriteSdcTarget> WriteSdcTargetOf(const db::Design& design,
+                                               const db::Constraint& c,
+                                               std::string& why) {
+  if (c.status == db::BindingStatus::kEmpty) {
+    why = "empty target";
+    return std::nullopt;
+  }
+  if (c.status != db::BindingStatus::kBound) {
+    why = "unresolved target";
+    return std::nullopt;
+  }
+  const ObjectId id = c.bound_object;
+  WriteSdcTarget out;
+  if (const db::PortRecord* port = design.FindPort(id)) {
+    out.kind = ObjectKind::kPort;
+    out.name = port->name;
+    out.expr = "[get_ports " + port->name + "]";
+  } else if (const db::PinRecord* pin = design.FindPin(id)) {
+    out.kind = ObjectKind::kPin;
+    out.name = pin->name;
+    out.expr = "[get_pins " + pin->name + "]";
+  } else if (const db::NetRecord* net = design.FindNet(id)) {
+    out.kind = ObjectKind::kNet;
+    out.name = net->name;
+    out.expr = "[get_nets " + net->name + "]";
+  } else if (const db::InstanceRecord* inst = design.FindInstance(id)) {
+    out.kind = ObjectKind::kInstance;
+    out.name = inst->name;
+    out.expr = "[get_cells " + inst->name + "]";
+  } else {
+    why = "bound object has no readable kind";
+    return std::nullopt;
+  }
+  if (!WriteSdcNameIsAddressable(out.name)) {
+    why = "name cannot be addressed unambiguously";
+    return std::nullopt;
+  }
+  return out;
+}
+
+// Renders several targets as one SDC object argument. One object:
+// its collection. Several of one kind: one get_* call over a braced
+// name list. Several of mixed kinds: a bare braced name list, which
+// the upstream resolvers expand per name (a repeated option key
+// overwrites upstream, so a flag per kind is not expressible).
+std::string WriteSdcObjectList(
+    const std::vector<WriteSdcTarget>& targets) {
+  if (targets.empty()) return "";
+  if (targets.size() == 1) return targets[0].expr;
+  bool same_kind = true;
+  for (std::size_t i = 1; i < targets.size(); ++i) {
+    if (targets[i].kind != targets[0].kind) same_kind = false;
+  }
+  if (same_kind) {
+    const char* getter = targets[0].kind == ObjectKind::kPort
+                             ? "get_ports"
+                             : (targets[0].kind == ObjectKind::kPin
+                                    ? "get_pins"
+                                    : (targets[0].kind == ObjectKind::kNet
+                                           ? "get_nets"
+                                           : "get_cells"));
+    std::string out = "[" + std::string(getter) + " {";
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+      if (i != 0) out += " ";
+      out += targets[i].name;
+    }
+    out += "}]";
+    return out;
+  }
+  std::string out = "{";
+  for (std::size_t i = 0; i < targets.size(); ++i) {
+    if (i != 0) out += " ";
+    out += targets[i].name;
+  }
+  out += "}";
+  return out;
+}
+
+// Splits a space-joined parameter list (group_path -from/-through,
+// set_sense -clock) back into names.
+std::vector<std::string> WriteSdcSplitList(const std::string& joined) {
+  std::vector<std::string> out;
+  std::istringstream in(joined);
+  std::string item;
+  while (in >> item) out.push_back(item);
+  return out;
+}
+
+// The parameter signature: rows group together for merging only
+// when kind, name, and the full ordered parameter list match.
+std::string WriteSdcParamsSig(const db::Constraint& c) {
+  std::string sig;
+  for (const auto& pair : c.params) {
+    if (!sig.empty()) sig += ";";
+    sig += pair.first + "=" + pair.second;
+  }
+  return sig;
+}
+
+// One emitted SDC line, tagged with the first constraint id it
+// carries so lines sort back into constraint order after the
+// per-kind passes.
+struct WriteSdcLine {
+  std::size_t first_id = 0;
+  std::string text;
+};
+
+// One skipped row, with the reason named.
+struct WriteSdcSkip {
+  std::size_t id = 0;
+  std::string kind;
+  std::string name;
+  std::string target;
+  std::string reason;
+};
+
+struct WriteSdcPlan {
+  std::vector<WriteSdcLine> lines;
+  std::vector<WriteSdcSkip> skipped;
+  // Rows carried into the file (total rows minus skipped rows).
+  std::size_t emitted = 0;
+};
+
+// One clock group: rows sharing kind, name, and parameters, merged
+// into one create_clock / create_generated_clock line.
+struct WriteSdcClockGroup {
+  db::ConstraintKind kind = db::ConstraintKind::kClock;
+  std::string name;
+  std::vector<std::pair<std::string, std::string>> params;
+  std::optional<WriteSdcTarget> source;
+  std::vector<WriteSdcTarget> targets;
+  std::size_t first_id = 0;
+  bool add = false;
+};
+
+// One group_path group: rows sharing the group name, merged into
+// one group_path line. The from/through lists and the endpoint role
+// come from the first row's parameters.
+struct WriteSdcPathGroup {
+  std::vector<std::pair<std::string, std::string>> params;
+  std::vector<WriteSdcTarget> targets;
+  std::size_t first_id = 0;
+};
+
+// Renders one clock group as a single SDC line.
+std::string WriteSdcClockLine(const WriteSdcClockGroup& group) {
+  const auto param = [&group](const std::string& key) {
+    for (const auto& pair : group.params) {
+      if (pair.first == key) return pair.second;
+    }
+    return std::string();
+  };
+  std::string line;
+  if (group.kind == db::ConstraintKind::kClock) {
+    line = "create_clock -period " + param("period_ns");
+    if (!param("waveform_rise_ns").empty() &&
+        !param("waveform_fall_ns").empty()) {
+      line += " -waveform {" + param("waveform_rise_ns") + " " +
+              param("waveform_fall_ns") + "}";
+    }
+  } else {
+    line = "create_generated_clock -source " + group.source->expr;
+    if (!param("master_clock").empty()) {
+      line += " -master_clock " + param("master_clock");
+    }
+    if (!param("divide_by").empty()) {
+      line += " -divide_by " + param("divide_by");
+    }
+    if (!param("multiply_by").empty()) {
+      line += " -multiply_by " + param("multiply_by");
+    }
+    if (param("invert") == "1") line += " -invert";
+    if (param("combinational") == "1") line += " -combinational";
+  }
+  const bool need_name =
+      group.add || group.targets.size() > 1 ||
+      group.name != group.targets[0].name;
+  if (need_name) line += " -name " + group.name;
+  if (group.add) line += " -add";
+  line += " " + WriteSdcObjectList(group.targets);
+  return line;
+}
+
+// Plans the file: which rows emit, which lines they form, and which
+// rows skip with what reason. The design may be null (no design
+// open): then every row skips as "no design is open".
+WriteSdcPlan WriteSdcPlanFor(const db::Design* design,
+                             const db::ConstraintSet& constraints) {
+  WriteSdcPlan plan;
+  const std::vector<db::Constraint>& rows = constraints.all();
+  auto skip = [&plan](const db::Constraint& c, const std::string& reason) {
+    plan.skipped.push_back(WriteSdcSkip{
+        c.id, ConstraintKindWord(c.kind), c.name, c.target_spec, reason});
+  };
+  if (design == nullptr) {
+    for (const db::Constraint& c : rows) {
+      skip(c, "no design is open");
+    }
+    return plan;
+  }
+  // Clocks and generated clocks merge by (kind, name, parameters).
+  std::map<std::string, WriteSdcClockGroup> clock_groups;
+  std::set<std::string> clock_names_seen;
+  // group_path merges by name.
+  std::map<std::string, WriteSdcPathGroup> path_groups;
+  for (const db::Constraint& c : rows) {
+    if (c.kind != db::ConstraintKind::kClock &&
+        c.kind != db::ConstraintKind::kGeneratedClock &&
+        c.kind != db::ConstraintKind::kGroupPath) {
+      continue;
+    }
+    if (c.kind == db::ConstraintKind::kClock &&
+        !c.Param("period_ns").has_value()) {
+      skip(c, "construction record, not an SDC clock");
+      continue;
+    }
+    std::string why;
+    std::optional<WriteSdcTarget> target =
+        WriteSdcTargetOf(*design, c, why);
+    if (!target.has_value()) {
+      skip(c, why);
+      continue;
+    }
+    if (c.kind == db::ConstraintKind::kGroupPath) {
+      WriteSdcPathGroup& group = path_groups[c.name];
+      if (group.targets.empty()) {
+        group.params = c.params;
+        group.first_id = c.id;
+      }
+      group.targets.push_back(*target);
+      continue;
+    }
+    // Clock targets are ports or pins only; upstream create_clock
+    // takes pins and ports, never a net or a cell.
+    if (target->kind != ObjectKind::kPort &&
+        target->kind != ObjectKind::kPin) {
+      skip(c, "clock target is not a port or pin");
+      continue;
+    }
+    std::optional<WriteSdcTarget> source;
+    if (c.kind == db::ConstraintKind::kGeneratedClock) {
+      const std::optional<std::string> src = c.Param("source");
+      if (!src.has_value()) {
+        skip(c, "generated clock has no source");
+        continue;
+      }
+      source = WriteSdcResolveName(*design, *src);
+      if (!source.has_value()) {
+        skip(c, "unresolvable source");
+        continue;
+      }
+      if (source->kind != ObjectKind::kPort &&
+          source->kind != ObjectKind::kPin) {
+        skip(c, "source is not a pin or port");
+        continue;
+      }
+    }
+    const std::string key = std::string(ConstraintKindWord(c.kind)) + "|" +
+                            c.name + "|" + WriteSdcParamsSig(c);
+    auto it = clock_groups.find(key);
+    if (it == clock_groups.end()) {
+      WriteSdcClockGroup group;
+      group.kind = c.kind;
+      group.name = c.name;
+      group.params = c.params;
+      group.source = source;
+      group.first_id = c.id;
+      group.add = clock_names_seen.count(c.name) != 0;
+      clock_names_seen.insert(c.name);
+      group.targets.push_back(*target);
+      clock_groups.emplace(key, std::move(group));
+    } else {
+      it->second.targets.push_back(*target);
+    }
+  }
+  // Render the clock groups in first-row order.
+  std::vector<const WriteSdcClockGroup*> ordered_clocks;
+  for (const auto& pair : clock_groups) {
+    ordered_clocks.push_back(&pair.second);
+  }
+  std::sort(ordered_clocks.begin(), ordered_clocks.end(),
+            [](const WriteSdcClockGroup* a, const WriteSdcClockGroup* b) {
+              return a->first_id < b->first_id;
+            });
+  for (const WriteSdcClockGroup* group : ordered_clocks) {
+    plan.lines.push_back(
+        WriteSdcLine{group->first_id, WriteSdcClockLine(*group)});
+  }
+  // Render the group_path groups in first-row order.
+  std::vector<const WriteSdcPathGroup*> ordered_paths;
+  for (const auto& pair : path_groups) {
+    ordered_paths.push_back(&pair.second);
+  }
+  std::sort(ordered_paths.begin(), ordered_paths.end(),
+            [](const WriteSdcPathGroup* a, const WriteSdcPathGroup* b) {
+              return a->first_id < b->first_id;
+            });
+  for (const WriteSdcPathGroup* group : ordered_paths) {
+    const auto param = [&group](const std::string& key) {
+      for (const auto& pair : group->params) {
+        if (pair.first == key) return pair.second;
+      }
+      return std::string();
+    };
+    // The endpoint role: stored since unit 8; older rows derive it
+    // from the lists (targets equal the from list, the through list,
+    // or neither, in which case they are the -to list).
+    std::string role = param("endpoint");
+    if (role.empty()) {
+      const std::vector<std::string> from_names =
+          WriteSdcSplitList(param("from"));
+      const std::vector<std::string> through_names =
+          WriteSdcSplitList(param("through"));
+      const std::set<std::string> target_names = [&group] {
+        std::set<std::string> names;
+        for (const WriteSdcTarget& t : group->targets) {
+          names.insert(t.name);
+        }
+        return names;
+      }();
+      const auto same_set = [](const std::vector<std::string>& list,
+                               const std::set<std::string>& set) {
+        if (list.size() != set.size()) return false;
+        for (const std::string& item : list) {
+          if (set.count(item) == 0) return false;
+        }
+        return true;
+      };
+      role = same_set(from_names, target_names)
+                 ? "from"
+                 : (same_set(through_names, target_names) ? "through"
+                                                          : "to");
+    }
+    // Resolve the recorded lists; a name that no longer resolves
+    // skips the whole group rather than emitting a line the reader
+    // would fail on.
+    const auto resolve_list =
+        [&design](const std::string& joined,
+                  std::vector<WriteSdcTarget>& out, std::string& bad) {
+          for (const std::string& name : WriteSdcSplitList(joined)) {
+            std::optional<WriteSdcTarget> resolved =
+                WriteSdcResolveName(*design, name);
+            if (!resolved.has_value()) {
+              bad = name;
+              return false;
+            }
+            out.push_back(*resolved);
+          }
+          return true;
+        };
+    std::vector<WriteSdcTarget> from_targets;
+    std::vector<WriteSdcTarget> through_targets;
+    std::string bad;
+    bool ok = true;
+    if (role != "from" && !param("from").empty()) {
+      ok = resolve_list(param("from"), from_targets, bad);
+    }
+    if (ok && role != "through" && !param("through").empty()) {
+      ok = resolve_list(param("through"), through_targets, bad);
+    }
+    if (!ok) {
+      for (const db::Constraint& c : rows) {
+        if (c.kind == db::ConstraintKind::kGroupPath &&
+            c.name == param("group")) {
+          skip(c, "unresolvable object " + bad);
+        }
+      }
+      continue;
+    }
+    std::string line = "group_path -name " + param("group");
+    if (role == "from") {
+      line += " -from " + WriteSdcObjectList(group->targets);
+    } else if (!from_targets.empty()) {
+      line += " -from " + WriteSdcObjectList(from_targets);
+    }
+    if (role == "through") {
+      line += " -through " + WriteSdcObjectList(group->targets);
+    } else if (!through_targets.empty()) {
+      line += " -through " + WriteSdcObjectList(through_targets);
+    }
+    if (role == "to") {
+      line += " -to " + WriteSdcObjectList(group->targets);
+    }
+    if (!param("weight").empty()) {
+      line += " -weight " + param("weight");
+    }
+    if (!param("critical_range").empty()) {
+      line += " -critical_range " + param("critical_range");
+    }
+    plan.lines.push_back(WriteSdcLine{group->first_id, line});
+  }
+  // Every other emittable kind: one line per row, in id order.
+  for (const db::Constraint& c : rows) {
+    const auto param = [&c](const std::string& key) {
+      return c.Param(key);
+    };
+    switch (c.kind) {
+      case db::ConstraintKind::kClock:
+      case db::ConstraintKind::kGeneratedClock:
+      case db::ConstraintKind::kGroupPath:
+        break;
+      case db::ConstraintKind::kClockGatingCheck: {
+        if (!param("setup_ns").has_value() &&
+            !param("hold_ns").has_value()) {
+          skip(c, "no stored parameters");
+          break;
+        }
+        std::string why;
+        std::optional<WriteSdcTarget> target =
+            WriteSdcTargetOf(*design, c, why);
+        if (!target.has_value()) {
+          skip(c, why);
+          break;
+        }
+        std::string line = "set_clock_gating_check";
+        if (param("setup_ns").has_value()) {
+          line += " -setup " + *param("setup_ns");
+        }
+        if (param("hold_ns").has_value()) {
+          line += " -hold " + *param("hold_ns");
+        }
+        const std::string edge = param("edge").value_or("both");
+        if (edge == "high") {
+          line += " -high";
+        } else if (edge == "low") {
+          line += " -low";
+        }
+        line += " " + target->expr;
+        plan.lines.push_back(WriteSdcLine{c.id, line});
+        break;
+      }
+      case db::ConstraintKind::kDataCheck: {
+        if (!param("from").has_value() ||
+            (!param("setup_ns").has_value() &&
+             !param("hold_ns").has_value())) {
+          skip(c, "no stored parameters");
+          break;
+        }
+        std::string why;
+        std::optional<WriteSdcTarget> target =
+            WriteSdcTargetOf(*design, c, why);
+        if (!target.has_value()) {
+          skip(c, why);
+          break;
+        }
+        std::optional<WriteSdcTarget> from =
+            WriteSdcResolveName(*design, *param("from"));
+        if (!from.has_value()) {
+          skip(c, "unresolvable from");
+          break;
+        }
+        // Upstream takes one margin with -setup/-hold as flags, so
+        // a row with both margins at different values emits two
+        // lines; equal values emit one line with both flags.
+        const bool has_setup = param("setup_ns").has_value();
+        const bool has_hold = param("hold_ns").has_value();
+        const bool split = has_setup && has_hold &&
+                           *param("setup_ns") != *param("hold_ns");
+        const auto emit = [&](bool setup_flag, bool hold_flag,
+                              const std::string& margin) {
+          std::string line = "set_data_check -from " + from->expr +
+                             " -to " + target->expr;
+          if (setup_flag) line += " -setup";
+          if (hold_flag) line += " -hold";
+          line += " " + margin;
+          plan.lines.push_back(WriteSdcLine{c.id, line});
+        };
+        if (split) {
+          emit(true, false, *param("setup_ns"));
+          emit(false, true, *param("hold_ns"));
+        } else if (has_setup) {
+          emit(true, has_hold, *param("setup_ns"));
+        } else {
+          emit(false, true, *param("hold_ns"));
+        }
+        break;
+      }
+      case db::ConstraintKind::kMinPulseWidth: {
+        if (!param("value_ns").has_value()) {
+          skip(c, "no stored parameters");
+          break;
+        }
+        std::string why;
+        std::optional<WriteSdcTarget> target =
+            WriteSdcTargetOf(*design, c, why);
+        if (!target.has_value()) {
+          skip(c, why);
+          break;
+        }
+        std::string line = "set_min_pulse_width";
+        const std::string edge = param("edge").value_or("both");
+        if (edge == "high") {
+          line += " -high";
+        } else if (edge == "low") {
+          line += " -low";
+        }
+        line += " " + *param("value_ns") + " " + target->expr;
+        plan.lines.push_back(WriteSdcLine{c.id, line});
+        break;
+      }
+      case db::ConstraintKind::kSense: {
+        if (!param("sense").has_value()) {
+          skip(c, "no stored parameters");
+          break;
+        }
+        std::string why;
+        std::optional<WriteSdcTarget> target =
+            WriteSdcTargetOf(*design, c, why);
+        if (!target.has_value()) {
+          skip(c, why);
+          break;
+        }
+        // Clock names are recorded, not bound: they must name a
+        // clock row in this set, or the reader would warn and apply
+        // the sense to no clock.
+        std::vector<std::string> clocks;
+        if (param("sense_clocks").has_value()) {
+          clocks = WriteSdcSplitList(*param("sense_clocks"));
+        }
+        bool unknown_clock = false;
+        for (const std::string& clock : clocks) {
+          bool found = false;
+          for (const db::Constraint& other : rows) {
+            if ((other.kind == db::ConstraintKind::kClock ||
+                 other.kind == db::ConstraintKind::kGeneratedClock) &&
+                other.name == clock) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            skip(c, "unknown clock " + clock);
+            unknown_clock = true;
+            break;
+          }
+        }
+        if (unknown_clock) break;
+        std::string line = "set_sense -type clock";
+        const std::string sense = *param("sense");
+        if (sense == "positive") {
+          line += " -positive";
+        } else if (sense == "negative") {
+          line += " -negative";
+        } else {
+          line += " -stop_propagation";
+        }
+        if (!clocks.empty()) {
+          line += " -clock {";
+          for (std::size_t i = 0; i < clocks.size(); ++i) {
+            if (i != 0) line += " ";
+            line += clocks[i];
+          }
+          line += "}";
+        }
+        line += " " + target->expr;
+        plan.lines.push_back(WriteSdcLine{c.id, line});
+        break;
+      }
+      case db::ConstraintKind::kIdealNetwork: {
+        std::string why;
+        std::optional<WriteSdcTarget> target =
+            WriteSdcTargetOf(*design, c, why);
+        if (!target.has_value()) {
+          skip(c, why);
+          break;
+        }
+        std::string line = "set_ideal_network";
+        if (param("no_propagate").value_or("") == "1") {
+          line += " -no_propagate";
+        }
+        line += " " + target->expr;
+        plan.lines.push_back(WriteSdcLine{c.id, line});
+        break;
+      }
+      case db::ConstraintKind::kIdealLatency:
+      case db::ConstraintKind::kIdealTransition: {
+        if (!param("value_ns").has_value()) {
+          skip(c, "no stored parameters");
+          break;
+        }
+        std::string why;
+        std::optional<WriteSdcTarget> target =
+            WriteSdcTargetOf(*design, c, why);
+        if (!target.has_value()) {
+          skip(c, why);
+          break;
+        }
+        std::string line =
+            c.kind == db::ConstraintKind::kIdealLatency
+                ? "set_ideal_latency"
+                : "set_ideal_transition";
+        const std::string edge = param("edge").value_or("both");
+        if (edge == "rise") {
+          line += " -rise";
+        } else if (edge == "fall") {
+          line += " -fall";
+        }
+        const std::string delay = param("delay").value_or("both");
+        if (delay == "min") {
+          line += " -min";
+        } else if (delay == "max") {
+          line += " -max";
+        }
+        line += " " + *param("value_ns") + " " + target->expr;
+        plan.lines.push_back(WriteSdcLine{c.id, line});
+        break;
+      }
+      case db::ConstraintKind::kMaxTimeBorrow: {
+        if (!param("value_ns").has_value()) {
+          skip(c, "no stored parameters");
+          break;
+        }
+        std::string why;
+        std::optional<WriteSdcTarget> target =
+            WriteSdcTargetOf(*design, c, why);
+        if (!target.has_value()) {
+          skip(c, why);
+          break;
+        }
+        plan.lines.push_back(WriteSdcLine{
+            c.id, "set_max_time_borrow " + *param("value_ns") + " " +
+                      target->expr});
+        break;
+      }
+      default:
+        // Kinds no command stores parameters for (input/output
+        // delay, false path, multicycle, max/min delay, case
+        // analysis): the row carries no semantics to emit, and
+        // fabricating a command from a name and a target would be
+        // a lie.
+        skip(c, "no stored parameters");
+        break;
+    }
+  }
+  std::sort(plan.lines.begin(), plan.lines.end(),
+            [](const WriteSdcLine& a, const WriteSdcLine& b) {
+              return a.first_id < b.first_id;
+            });
+  std::sort(plan.skipped.begin(), plan.skipped.end(),
+            [](const WriteSdcSkip& a, const WriteSdcSkip& b) {
+              return a.id < b.id;
+            });
+  plan.emitted = rows.size() - plan.skipped.size();
+  return plan;
+}
+
+// Renders the planned file text: header, one command per line, and
+// the skip list as a footer so the file alone documents what it
+// omits. No timestamp: repeated writes are byte-identical.
+std::string WriteSdcRender(
+    const WriteSdcPlan& plan,
+    const std::vector<const db::Scenario*>& scenarios) {
+  std::string text =
+      "# EOS write_sdc: single-scenario form (Immediate unit 8, review "
+      "item I5)\n";
+  text += "# scenario: ";
+  if (scenarios.empty()) {
+    text += "(none)\n";
+  } else {
+    for (std::size_t i = 0; i < scenarios.size(); ++i) {
+      if (i != 0) text += ", ";
+      text += scenarios[i]->name;
+    }
+    text += "\n";
+  }
+  text += "# The constraint set is shared by all scenarios in this "
+          "increment, so\n";
+  text += "# this one file carries every scenario's constraints. No "
+          "per-scenario\n";
+  text += "# state exists to lose in a merge; per-scenario files "
+          "follow the\n";
+  text += "# MMMC view model (not built yet). No timestamp is written, "
+          "so\n";
+  text += "# repeated writes are byte-identical.\n";
+  text += "# " + std::to_string(plan.emitted) + " constraints emitted, " +
+          std::to_string(plan.skipped.size()) + " rows skipped.\n";
+  if (!plan.lines.empty()) {
+    text += "\n";
+    for (const WriteSdcLine& line : plan.lines) {
+      text += line.text + "\n";
+    }
+  }
+  if (!plan.skipped.empty()) {
+    text += "\n# Skipped rows (not emitted):\n";
+    for (const WriteSdcSkip& skip : plan.skipped) {
+      text += "#   skipped: " + skip.kind + " " + skip.name + " " +
+              skip.target + " (" + skip.reason + ")\n";
+    }
+  }
+  return text;
+}
+
+// Writes the text to path, gzipped when compress is set. Returns
+// false with the reason in `why` when the file cannot be written.
+bool WriteSdcWriteFile(const std::string& path, const std::string& text,
+                       bool compress, std::string& why) {
+  if (!compress) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+      why = "could not write file: " + path;
+      return false;
+    }
+    out << text;
+    out.flush();
+    if (!out) {
+      why = "could not write file: " + path;
+      return false;
+    }
+    return true;
+  }
+  gzFile gz = gzopen(path.c_str(), "wb");
+  if (gz == nullptr) {
+    why = "could not write file: " + path;
+    return false;
+  }
+  const int written =
+      gzwrite(gz, text.data(), static_cast<unsigned int>(text.size()));
+  const int closed = gzclose(gz);
+  if (written < 0 ||
+      static_cast<std::size_t>(written) != text.size() ||
+      closed != Z_OK) {
+    why = "could not write file: " + path;
+    return false;
+  }
+  return true;
 }
 
 // ---- check_timing (Immediate unit 4, review item I1) -----------------
@@ -3103,6 +3907,15 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         };
         std::vector<std::pair<std::string, std::string>> params;
         params.emplace_back("group", *opts.Value("-name"));
+        // The endpoint role is stored so write_sdc can rebuild the
+        // group_path line: the rows' targets are the -to, -through,
+        // or -from list, and the role is not always recoverable from
+        // the lists alone (a -from list can equal the -to list).
+        params.emplace_back(
+            "endpoint",
+            !tos.empty()
+                ? "to"
+                : (!throughs.empty() ? "through" : "from"));
         if (!froms.empty()) params.emplace_back("from", join(froms));
         if (!throughs.empty()) {
           params.emplace_back("through", join(throughs));
@@ -3168,6 +3981,62 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(StoreTargets(
             ctx, db::ConstraintKind::kMaxTimeBorrow, targets, names,
             params));
+      });
+
+  // write_sdc [-compress] <path>
+  //
+  // Immediate unit 8, review item I5: the single-scenario form.
+  // Emits the session constraint set as one SDC file: one line per
+  // stored row (clocks and group_path merge by name, upstream
+  // replace semantics), explicit get_* collections for every target,
+  // no wildcards, no -of_objects. Needs no Liberty and no STA run:
+  // it reads ctx.project.constraints, like check_timing. Never
+  // mutates session state. A row the file cannot express is skipped
+  // and reported, in the payload and in the file's own footer, never
+  // dropped silently. With no design open every row skips as "no
+  // design is open" and the file is the header plus the skip list.
+  add("write_sdc",
+      {"write_sdc [-compress] <path>", "Emit the session constraint "
+                                       "set as one SDC file."},
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args, {{"-compress", 0, false}}, "write_sdc", opts)) {
+          return *bad;
+        }
+        if (opts.Positionals().size() != 1) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "write_sdc: expected exactly one output path; usage: "
+              "write_sdc [-compress] <path>");
+        }
+        const std::string path = opts.Positionals()[0];
+        const db::Design* design = ctx.project.design.has_value()
+                                        ? &*ctx.project.design
+                                        : nullptr;
+        const WriteSdcPlan plan =
+            WriteSdcPlanFor(design, ctx.project.constraints);
+        std::vector<const db::Scenario*> scenarios;
+        for (const db::Scenario* s :
+             ctx.project.scenarios.ActiveScenarios()) {
+          scenarios.push_back(s);
+        }
+        const std::string text = WriteSdcRender(plan, scenarios);
+        std::string why;
+        if (!WriteSdcWriteFile(path, text, opts.Has("-compress"), why)) {
+          return CommandResult::Fail(Diag::kIoError, why);
+        }
+        std::string payload = "sdc=" + path +
+                              " constraints=" +
+                              std::to_string(plan.emitted) +
+                              " skipped=" +
+                              std::to_string(plan.skipped.size());
+        for (const WriteSdcSkip& skip : plan.skipped) {
+          payload += "\nskipped: " + skip.kind + " " + skip.name + " " +
+                     skip.target + " (" + skip.reason + ")";
+        }
+        return CommandResult::Ok(payload);
       });
 
   add("rebind_constraints", "rebind_constraints",
