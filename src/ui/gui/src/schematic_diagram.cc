@@ -148,9 +148,12 @@ void DrawGateShape(QGraphicsScene* scene, const QRectF& rect,
 // wire on the input side and points outward on the output
 // side. White contour, no fill, like the gates. The anchor is
 // the point on the arrowhead where the net attaches: the tip
-// for an input, the base center for an output.
+// for an input, the base center for an output. The color
+// follows the cone: white with no selection, blue when the
+// terminal is in the cone, grey when a selection is active
+// and it is not.
 void DrawTerminalArrow(QGraphicsScene* scene, const QPointF& anchor,
-                       bool input_side) {
+                       bool input_side, const QColor& color) {
   const qreal size = kSchematicTerminalSize;
   const qreal half = size / 2;
   QPainterPath path;
@@ -164,13 +167,28 @@ void DrawTerminalArrow(QGraphicsScene* scene, const QPointF& anchor,
     path.lineTo(anchor.x() + size, anchor.y());
   }
   path.closeSubpath();
-  scene->addPath(path, QPen(Qt::white, 1), Qt::NoBrush);
+  scene->addPath(path, QPen(color, 1), Qt::NoBrush);
 }
 
 std::string LastComponent(const std::string& path) {
   const std::size_t slash = path.rfind('/');
   if (slash == std::string::npos) return path;
   return path.substr(slash + 1);
+}
+
+// True when the point lies on the axis-aligned segment from a
+// to b. Branch dots sit on route segments, so this decides
+// whether a dot belongs to a cone path.
+bool PointOnSegment(const QPointF& point, const SchematicPoint& a,
+                    const SchematicPoint& b) {
+  const double x = point.x();
+  const double y = point.y();
+  if (a.x == b.x) {
+    return x == a.x && y >= std::min(a.y, b.y) &&
+           y <= std::max(a.y, b.y);
+  }
+  return y == a.y && x >= std::min(a.x, b.x) &&
+         x <= std::max(a.x, b.x);
 }
 
 }  // namespace
@@ -360,6 +378,35 @@ void SchematicDiagram::RebuildScene() {
   }
   const bool highlighting = !selected_.empty();
 
+  // The cone paths: the net paths whose wire carries a cone
+  // signal. Per path, not per net: a shared net lights only
+  // its cone branches, so a sibling load on the same net stays
+  // grey.
+  const std::set<std::pair<std::string, std::size_t>> cone_paths =
+      highlighting
+          ? ConeNetPaths(schematic, layout, selected_)
+          : std::set<std::pair<std::string, std::size_t>>();
+  // Terminals in the cone: a parent port the cone touches, as
+  // the driver of a cone path or its load.
+  std::set<std::string> cone_terminals;
+  std::map<std::string, const SchematicNetRoute*> route_of;
+  for (const SchematicNetRoute& route : layout.nets) {
+    route_of[route.name] = &route;
+  }
+  for (const auto& entry : cone_paths) {
+    const auto found = route_of.find(entry.first);
+    if (found == route_of.end()) continue;
+    if (entry.second >= found->second->path_ends.size()) continue;
+    const SchematicNetPathEnds& ends =
+        found->second->path_ends[entry.second];
+    if (!ends.driver_terminal.empty()) {
+      cone_terminals.insert(ends.driver_terminal);
+    }
+    if (!ends.load_terminal.empty()) {
+      cone_terminals.insert(ends.load_terminal);
+    }
+  }
+
   // Shape-aware endpoints: input wires touch the OR-family
   // curves, not the bounding edge, and output wires touch the
   // inversion bubble, not the shape edge. Routes end at the
@@ -456,8 +503,13 @@ void SchematicDiagram::RebuildScene() {
   // point where a net attaches: the tip for an input, the base
   // center for an output.
   for (const SchematicTerminalPlacement& terminal : layout.terminals) {
+    const QColor color =
+        !highlighting
+            ? Qt::white
+            : (cone_terminals.count(terminal.name) != 0 ? Qt::blue
+                                                        : Qt::gray);
     DrawTerminalArrow(scene_, QPointF(terminal.x, terminal.y),
-                      terminal.input_side);
+                      terminal.input_side, color);
     const qreal x = terminal.input_side
                         ? terminal.x - kSchematicTerminalSize
                         : terminal.x;
@@ -476,29 +528,26 @@ void SchematicDiagram::RebuildScene() {
 
   // Nets: the layout's orthogonal polylines, one per load,
   // with a dot at every true branch point. Labels carry the
-  // net name and, for a bus, its width. A net in the selected
+  // net name and, for a bus, its width. A path in the selected
   // cone draws blue; with a selection active, the rest draw
-  // grey. Structural only: no timing annotation is drawn.
+  // grey. Two passes when highlighting, grey first: a segment
+  // shared by a cone path and a sibling path ends blue, and a
+  // segment only a sibling path uses stays grey. Structural
+  // only: no timing annotation is drawn.
   for (const SchematicNetRoute& route : layout.nets) {
-    bool in_cone = false;
-    if (highlighting) {
-      for (const SchematicNet& net : schematic.Nets()) {
-        if (net.name != route.name) continue;
-        for (const SchematicNetEndpoint& endpoint : net.endpoints) {
-          if (cone.count(endpoint.gate) != 0) in_cone = true;
-        }
-      }
-    }
-    const QPen pen = !highlighting
-                         ? QPen(Qt::black, 1)
-                         : (in_cone ? QPen(Qt::blue, 2)
-                                    : QPen(Qt::lightGray, 1));
+    auto path_pen = [&](std::size_t index) {
+      if (!highlighting) return QPen(Qt::black, 1);
+      return cone_paths.count({route.name, index}) != 0
+                 ? QPen(Qt::blue, 2)
+                 : QPen(Qt::lightGray, 1);
+    };
     auto adjust = [&](const QPointF& point) {
       const auto found = shape_anchors.find(
           {point.x(), point.y()});
       return found == shape_anchors.end() ? point : found->second;
     };
-    for (const std::vector<SchematicPoint>& path : route.paths) {
+    auto draw_path = [&](const std::vector<SchematicPoint>& path,
+                         const QPen& pen) {
       for (std::size_t i = 1; i < path.size(); ++i) {
         QPointF a(path[i - 1].x, path[i - 1].y);
         QPointF b(path[i].x, path[i].y);
@@ -506,8 +555,41 @@ void SchematicDiagram::RebuildScene() {
         if (i + 1 == path.size()) b = adjust(b);
         scene_->addLine(QLineF(a, b), pen);
       }
+    };
+    for (int pass = 0; pass < (highlighting ? 2 : 1); ++pass) {
+      for (std::size_t i = 0; i < route.paths.size(); ++i) {
+        const bool in_cone =
+            cone_paths.count({route.name, i}) != 0;
+        if (highlighting && in_cone == (pass == 0)) continue;
+        draw_path(route.paths[i], path_pen(i));
+      }
     }
     for (const SchematicPoint& dot : route.branch_dots) {
+      // A dot is in the cone when a cone path runs through it:
+      // the branch point where a cone branch splits from its
+      // siblings lights with the cone.
+      bool dot_in_cone = false;
+      if (highlighting) {
+        for (const auto& entry : cone_paths) {
+          if (entry.first != route.name) continue;
+          if (entry.second >= route.paths.size()) continue;
+          const std::vector<SchematicPoint>& path =
+              route.paths[entry.second];
+          for (std::size_t i = 1; i < path.size(); ++i) {
+            if (PointOnSegment(QPointF(dot.x, dot.y), path[i - 1],
+                               path[i])) {
+              dot_in_cone = true;
+              break;
+            }
+          }
+          if (dot_in_cone) break;
+        }
+      }
+      const QPen pen =
+          !highlighting
+              ? QPen(Qt::black, 1)
+              : (dot_in_cone ? QPen(Qt::blue, 2)
+                             : QPen(Qt::lightGray, 1));
       auto* item = scene_->addEllipse(
           QRectF(dot.x - 3, dot.y - 3, 6, 6), pen, QBrush(pen.color()));
       Q_UNUSED(item);

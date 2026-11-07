@@ -617,6 +617,50 @@ std::set<std::string> FanoutCone(const SchematicModel& model,
   return cone;
 }
 
+std::set<std::pair<std::string, std::size_t>> ConeNetPaths(
+    const SchematicModel& model, const SchematicLayout& layout,
+    const std::string& instance) {
+  std::set<std::pair<std::string, std::size_t>> in_cone;
+  if (model.FindGate(instance) == nullptr) return in_cone;
+  const std::set<std::string> fanin = FaninCone(model, instance);
+  const std::set<std::string> fanout = FanoutCone(model, instance);
+  std::set<std::string> cone = fanin;
+  cone.insert(fanout.begin(), fanout.end());
+  cone.insert(instance);
+  std::set<std::string> fanin_side = fanin;
+  fanin_side.insert(instance);
+  std::set<std::string> fanout_side = fanout;
+  fanout_side.insert(instance);
+  for (const SchematicNetRoute& route : layout.nets) {
+    for (std::size_t i = 0; i < route.paths.size(); ++i) {
+      if (i >= route.path_ends.size()) continue;
+      const SchematicNetPathEnds& ends = route.path_ends[i];
+      bool hit = false;
+      if (!ends.load_gate.empty() && !ends.driver_gate.empty()) {
+        // Gate to gate: in the cone only when both ends are
+        // cone gates, so a cone gate's branch to a sibling
+        // load stays out.
+        hit = cone.count(ends.load_gate) != 0 &&
+              cone.count(ends.driver_gate) != 0;
+      } else if (!ends.load_gate.empty() &&
+                 !ends.driver_terminal.empty()) {
+        // A primary input feeds the cone only on the fanin
+        // side: an input to a fanout gate comes from outside
+        // the cone.
+        hit = fanin_side.count(ends.load_gate) != 0;
+      } else if (!ends.load_terminal.empty() &&
+                 !ends.driver_gate.empty()) {
+        // A cone gate drives the cone only on the fanout side:
+        // a fanin gate's side output to a parent port is not
+        // in the cone.
+        hit = fanout_side.count(ends.driver_gate) != 0;
+      }
+      if (hit) in_cone.insert({route.name, i});
+    }
+  }
+  return in_cone;
+}
+
 SchematicLayout ComputeSchematicLayout(const SchematicModel& model,
                                        double gate_width) {
   SchematicLayout layout;
@@ -810,6 +854,12 @@ SchematicLayout ComputeSchematicLayout(const SchematicModel& model,
     bool terminal_input;
     int column;
     int row;
+    // Identity for the path-ends record: a gate anchor names
+    // its gate and port, a terminal anchor its parent port.
+    // The other field stays empty.
+    std::string gate;
+    std::string port;
+    std::string terminal;
   };
   auto column_left = [&](int column) {
     if (column < 0) return kSchematicInputX;
@@ -837,6 +887,8 @@ SchematicLayout ComputeSchematicLayout(const SchematicModel& model,
       anchor.terminal_input = false;
       anchor.column = found->second->level;
       anchor.row = found->second->row;
+      anchor.gate = instance;
+      anchor.port = port_name;
       return true;
     }
     return false;
@@ -872,12 +924,23 @@ SchematicLayout ComputeSchematicLayout(const SchematicModel& model,
         ++seen;
       }
       anchor.row = static_cast<int>(seen);
+      anchor.terminal = terminal_name;
       anchors.push_back(anchor);
     }
     if (anchors.empty()) continue;
     SchematicNetRoute route;
     route.name = net.name;
     route.label = NetLabel(net);
+    // The endpoints of one path, from its driving anchor to
+    // its load anchor, recorded beside the polyline.
+    auto make_ends = [](const RouteAnchor& from, const RouteAnchor& to) {
+      SchematicNetPathEnds ends;
+      ends.driver_gate = from.gate;
+      ends.driver_terminal = from.terminal;
+      ends.load_gate = to.gate;
+      ends.load_terminal = to.terminal;
+      return ends;
+    };
     if (anchors.size() == 1) {
       const RouteAnchor& anchor = anchors[0];
       std::vector<SchematicPoint> path;
@@ -889,6 +952,7 @@ SchematicLayout ComputeSchematicLayout(const SchematicModel& model,
                                      : kSchematicStubLength),
                             anchor.point.y});
       route.paths.push_back(std::move(path));
+      route.path_ends.push_back(make_ends(anchor, anchor));
       layout.nets.push_back(std::move(route));
       continue;
     }
@@ -944,6 +1008,7 @@ SchematicLayout ComputeSchematicLayout(const SchematicModel& model,
         AppendPoint(path, load.point);
       }
       route.paths.push_back(std::move(path));
+      route.path_ends.push_back(make_ends(start, load));
     }
     // Branch dots: a point where three or more wire ends
     // meet. Count rays per candidate point over the deduplicated

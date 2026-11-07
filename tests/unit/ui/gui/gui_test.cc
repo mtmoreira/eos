@@ -44,6 +44,7 @@ using eos::ui::CommandRegistry;
 using eos::ui::CommandResult;
 using eos::ui::BreadcrumbPaths;
 using eos::ui::ComputeSchematicLayout;
+using eos::ui::ConeNetPaths;
 using eos::ui::DiagramBlock;
 using eos::ui::DiagramModel;
 using eos::ui::DiagramNet;
@@ -69,6 +70,7 @@ using eos::ui::SessionView;
 using eos::ui::StepStatus;
 using eos::ui::SymbolForType;
 using eos::ui::kSchematicColumnGap;
+using eos::ui::kSchematicGateGap;
 using eos::ui::kSchematicGateHeight;
 using eos::ui::kSchematicGateTop;
 using eos::ui::kSchematicGateX;
@@ -711,6 +713,31 @@ const char kSchematicFanoutPayload[] =
     "net name=y gates=g2:Y terminals=y\n"
     "net name=z gates=g3:Y terminals=z\n";
 
+// A hier_alu-shaped case: one shared input net feeds the
+// selected ADD and three sibling gates, and all four feed one
+// PMUX, so clicking ADD must light only the ADD branch of
+// each shared net, the ADD branch into the PMUX, and the
+// PMUX output, while the sibling branches stay out.
+const char kSchematicAluPayload[] =
+    "module=alu\n"
+    "parent port=op direction=in\n"
+    "parent port=x direction=in\n"
+    "parent port=y direction=in\n"
+    "parent port=z direction=out\n"
+    "gate instance=add type=$add ports=A:in,B:in,Y:out\n"
+    "gate instance=and type=$and ports=A:in,B:in,Y:out\n"
+    "gate instance=sub type=$sub ports=A:in,B:in,Y:out\n"
+    "gate instance=xor type=$xor ports=A:in,B:in,Y:out\n"
+    "gate instance=mux type=$pmux ports=A:in,B:in,C:in,D:in,S:in,Y:out\n"
+    "net name=op gates=mux:S terminals=op\n"
+    "net name=x gates=add:A,and:A,sub:A,xor:A terminals=x\n"
+    "net name=y gates=add:B,and:B,sub:B,xor:B terminals=y\n"
+    "net name=sadd gates=add:Y,mux:A terminals=\n"
+    "net name=sand gates=and:Y,mux:B terminals=\n"
+    "net name=ssub gates=sub:Y,mux:C terminals=\n"
+    "net name=sxor gates=xor:Y,mux:D terminals=\n"
+    "net name=z gates=mux:Y terminals=z\n";
+
 TEST(SchematicModel, ParsesLeafPayload) {
   SchematicModel model;
   ASSERT_TRUE(model.LoadPayload(kSchematicLeafPayload));
@@ -1117,6 +1144,53 @@ TEST(SchematicLayout, FaninFanoutCones) {
   EXPECT_TRUE(FanoutCone(model, "g_y1").empty());
   EXPECT_TRUE(FaninCone(model, "nope").empty());
   EXPECT_TRUE(FanoutCone(model, "nope").empty());
+}
+
+TEST(SchematicLayout, ConeNetPathsHighlightsOnlyConePaths) {
+  SchematicModel model;
+  ASSERT_TRUE(model.LoadPayload(kSchematicAluPayload));
+  const SchematicLayout layout =
+      ComputeSchematicLayout(model, kSchematicMinGateWidth);
+  // The layout records one path end per path, in path order.
+  const auto* x_route = [&layout]() {
+    for (const auto& route : layout.nets) {
+      if (route.name == "x") return &route;
+    }
+    return static_cast<const decltype(&layout.nets[0])>(nullptr);
+  }();
+  ASSERT_NE(x_route, nullptr);
+  ASSERT_EQ(x_route->paths.size(), 4u);
+  ASSERT_EQ(x_route->path_ends.size(), 4u);
+  EXPECT_EQ(x_route->path_ends[0].driver_terminal, "x");
+  EXPECT_EQ(x_route->path_ends[0].load_gate, "add");
+  EXPECT_EQ(x_route->path_ends[1].load_gate, "and");
+  EXPECT_EQ(x_route->path_ends[2].load_gate, "sub");
+  EXPECT_EQ(x_route->path_ends[3].load_gate, "xor");
+  // Clicking ADD: only the ADD branch of each shared input
+  // net, the ADD branch into the PMUX, and the PMUX output.
+  // The sibling branches, the sibling branches into the PMUX,
+  // and the op select into the PMUX stay out.
+  EXPECT_EQ(ConeNetPaths(model, layout, "add"),
+            (std::set<std::pair<std::string, std::size_t>>{
+                {"sadd", 0}, {"x", 0}, {"y", 0}, {"z", 0}}));
+  // Clicking the PMUX lights its whole fanin: every input
+  // branch, including the shared nets' sibling branches.
+  std::set<std::pair<std::string, std::size_t>> mux_paths;
+  for (const char* net : {"op", "x", "y", "sadd", "sand", "ssub",
+                          "sxor", "z"}) {
+    const auto* route = [&layout, net]() {
+      for (const auto& candidate : layout.nets) {
+        if (candidate.name == net) return &candidate;
+      }
+      return static_cast<const decltype(&layout.nets[0])>(nullptr);
+    }();
+    ASSERT_NE(route, nullptr) << "net: " << net;
+    for (std::size_t i = 0; i < route->paths.size(); ++i) {
+      mux_paths.insert({net, i});
+    }
+  }
+  EXPECT_EQ(ConeNetPaths(model, layout, "mux"), mux_paths);
+  EXPECT_TRUE(ConeNetPaths(model, layout, "nope").empty());
 }
 
 TEST(SchematicModel, RejectsMalformedPayloads) {
@@ -2136,6 +2210,23 @@ void RegisterTwoGateSchematic(CommandRegistry& registry) {
   EXPECT_TRUE(status.ok());
 }
 
+const char kOutlineAluHierarchy[] =
+    "top=alu\n"
+    "node path=alu module=alu ports=op,x,y,z\n";
+
+void RegisterAluSchematic(CommandRegistry& registry) {
+  auto status = registry.Register(
+      "synth_schematic", "synth_schematic <module>",
+      [](CommandContext&, const std::vector<std::string>& args) {
+        if (args.size() == 1 && args[0] == "alu") {
+          return CommandResult::Ok(kSchematicAluPayload);
+        }
+        return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                   "unknown module");
+      });
+  EXPECT_TRUE(status.ok());
+}
+
 // Panel rework: the issues model parses a synth_issues
 // payload, sorts by severity, and counts per severity. The
 // payload lists the issues out of order on purpose: the
@@ -2452,6 +2543,134 @@ TEST(SchematicOutline, ClickSelectsGateWithBlueOutline) {
   }
   EXPECT_EQ(blue, 1u);
   EXPECT_EQ(gray, 1u);
+}
+
+TEST(SchematicOutline, ClickHighlightsOnlyConeWiresAndPins) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kOutlineAluHierarchy, true);
+  RegisterAluSchematic(registry);
+  CommandContext context;
+  context.synth.elaborated = true;
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  view.RefreshSchematic();
+  ASSERT_FALSE(view.Schematic().Empty());
+  SchematicDiagram diagram(view);
+  diagram.show();
+  QApplication::processEvents();
+  diagram.Refresh();
+  QApplication::processEvents();
+  diagram.HighlightGate("add");
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  // The gate outline holding a type label: generic gates draw
+  // as outlined rects, shaped gates as paths, both 64 high.
+  auto gate_rect_for_label = [&](const std::string& label) {
+    QPointF at;
+    bool found = false;
+    for (const QGraphicsSimpleTextItem* text :
+         OutlineSceneItems<QGraphicsSimpleTextItem>(scene)) {
+      if (text->text().toStdString() == label) {
+        at = text->pos();
+        found = true;
+        break;
+      }
+    }
+    EXPECT_TRUE(found) << "label: " << label;
+    if (!found) return QRectF();
+    for (const QGraphicsRectItem* rect :
+         OutlineSceneItems<QGraphicsRectItem>(scene)) {
+      if (rect->pen().style() == Qt::NoPen) continue;
+      if (std::abs(rect->rect().height() - 64) > 0.01) continue;
+      if (rect->rect().contains(at)) return rect->rect();
+    }
+    for (const QGraphicsPathItem* path :
+         OutlineSceneItems<QGraphicsPathItem>(scene)) {
+      const QRectF bounds = path->path().boundingRect();
+      if (std::abs(bounds.height() - 64) > 0.01) continue;
+      if (bounds.contains(at)) return bounds;
+    }
+    EXPECT_TRUE(false) << "no gate outline holds label: " << label;
+    return QRectF();
+  };
+  const QRectF add_rect = gate_rect_for_label("ADD");
+  const QRectF and_rect = gate_rect_for_label("AND");
+  const QRectF sub_rect = gate_rect_for_label("SUB");
+  const QRectF xor_rect = gate_rect_for_label("XOR");
+  const QRectF mux_rect = gate_rect_for_label("PMUX");
+  ASSERT_FALSE(add_rect.isNull());
+  ASSERT_FALSE(and_rect.isNull());
+  ASSERT_FALSE(sub_rect.isNull());
+  ASSERT_FALSE(xor_rect.isNull());
+  ASSERT_FALSE(mux_rect.isNull());
+  const std::vector<QGraphicsLineItem*> lines =
+      OutlineSceneItems<QGraphicsLineItem>(scene);
+  std::size_t blue = 0;
+  std::size_t grey = 0;
+  for (const QGraphicsLineItem* line : lines) {
+    if (line->pen().color() == Qt::blue) {
+      ++blue;
+    } else if (line->pen().color() == Qt::lightGray) {
+      ++grey;
+    }
+  }
+  EXPECT_GT(blue, 0u);
+  EXPECT_GT(grey, 0u);
+  auto touches = [](const QGraphicsLineItem* line, const QRectF& rect) {
+    return rect.contains(line->line().p1()) ||
+           rect.contains(line->line().p2());
+  };
+  // No blue wire touches a sibling gate: the shared input nets
+  // light only their ADD branch, and only the ADD branch into
+  // the PMUX lights.
+  for (const QGraphicsLineItem* line : lines) {
+    if (line->pen().color() != Qt::blue) continue;
+    for (const QRectF& sibling : {and_rect, sub_rect, xor_rect}) {
+      EXPECT_FALSE(touches(line, sibling))
+          << "blue line touches a sibling gate";
+    }
+  }
+  // A blue wire reaches ADD and the PMUX.
+  bool blue_reaches_add = false;
+  bool blue_reaches_mux = false;
+  for (const QGraphicsLineItem* line : lines) {
+    if (line->pen().color() != Qt::blue) continue;
+    if (touches(line, add_rect)) blue_reaches_add = true;
+    if (touches(line, mux_rect)) blue_reaches_mux = true;
+  }
+  EXPECT_TRUE(blue_reaches_add);
+  EXPECT_TRUE(blue_reaches_mux);
+  // Terminal pins follow the same cone: x and y feed ADD, z is
+  // driven by the PMUX, op only selects the PMUX from outside
+  // the cone. Input arrowheads are 16 high at the top of
+  // their row; the output arrowhead is the only one past the
+  // gate columns.
+  const double row_pitch = kSchematicGateHeight + kSchematicGateGap;
+  auto terminal_color = [&](double top, bool output_side) {
+    for (const QGraphicsPathItem* path :
+         OutlineSceneItems<QGraphicsPathItem>(scene)) {
+      const QRectF bounds = path->path().boundingRect();
+      if (std::abs(bounds.height() - 16) > 0.01) continue;
+      if (output_side) {
+        if (bounds.left() < 300) continue;
+      } else {
+        // Input arrowheads sit at the left edge; the output
+        // arrowhead shares the first row's top, so the left
+        // edge is what tells them apart.
+        if (bounds.left() > 100) continue;
+        if (std::abs(bounds.top() - top) > 0.01) continue;
+      }
+      return path->pen().color();
+    }
+    return QColor();
+  };
+  EXPECT_EQ(terminal_color(kSchematicGateTop, false), Qt::gray);
+  EXPECT_EQ(terminal_color(kSchematicGateTop + row_pitch, false),
+            Qt::blue);
+  EXPECT_EQ(terminal_color(kSchematicGateTop + 2 * row_pitch, false),
+            Qt::blue);
+  EXPECT_EQ(terminal_color(0, true), Qt::blue);
 }
 
 TEST(BlockOutline, BlocksDrawWhiteOutlineWithoutFill) {
