@@ -89,6 +89,34 @@ struct ElectricalCheck {
   bool has_limit = false;
 };
 
+// One analysis-coverage row (Immediate unit 7, review item I4):
+// one check type evaluated at one constrained pin. The check type
+// is one of setup, hold, out_setup, out_hold, recovery, removal,
+// clock_gating_setup, clock_gating_hold, no-change,
+// min_pulse_width. The related pin is the pin the check is
+// measured against: the clock pin for setup, hold, recovery,
+// removal and the clock-gating checks; the from pin for no-change;
+// the output delay's reference pin, or its clock name when the
+// delay has no reference pin, for out_setup and out_hold; "-"
+// for min_pulse_width, which is measured on the pin itself, and
+// for a set_max_delay/set_min_delay endpoint, whose constraining
+// object is a from/to pair rather than one pin. tested is true
+// exactly when the engine visited a constrained path end of this
+// type at the pin (or, for min_pulse_width, a min-pulse-width
+// check). untested_reason is empty when tested, and otherwise one
+// of constant_disabled (the pin is constant or the check is
+// disabled), no_clock (the check's clock is absent), 
+// no_startpoint_clock (the clock is present but no clocked path
+// reaches the pin), no_paths (the clock and a clocked path are
+// present but no constrained path end was visited).
+struct CoveragePin {
+  std::string pin;
+  std::string related_pin;
+  std::string check_type;
+  bool tested = false;
+  std::string untested_reason;
+};
+
 // One violating pin of an electrical check: the pin's path name,
 // the measured value, the limit it violates and the slack, all in
 // the check's own unit (nanoseconds for max transition,
@@ -265,6 +293,14 @@ class StaEngine {
   // violating in more than one analysis mode appears once per
   // violating mode, matching the upstream bulk check's count.
   Result<std::vector<ElectricalViolation>> MaxFanoutViolators();
+  // The analysis coverage of the loaded design (Immediate unit 7,
+  // review item I4): one CoveragePin per (pin, check type) where
+  // the check is defined, sorted by pin path name then check
+  // type so the order is deterministic. A check type with no
+  // defined check anywhere in the design contributes no rows.
+  // Fails with kInvalidState under the same conditions as
+  // WorstSlackNs.
+  Result<std::vector<CoveragePin>> AnalysisCoverage();
 
  private:
   struct Impl;

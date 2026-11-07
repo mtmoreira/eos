@@ -25,21 +25,36 @@
 #include <algorithm>
 #include <atomic>
 #include <exception>
+#include <limits>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "Clock.hh"
+#include "ClkNetwork.hh"
+#include "DataCheck.hh"
 #include "Graph.hh"
 #include "GraphDelayCalc.hh"
 #include "Fuzzy.hh"
 #include "MinMax.hh"
 #include "Network.hh"
+#include "Path.hh"
 #include "PathEnd.hh"
 #include "PathExpanded.hh"
+#include "PortDelay.hh"
+#include "Sdc.hh"
+#include "Search.hh"
 #include "Sta.hh"
 #include "StaMain.hh"
+#include "TimingRole.hh"
+#include "Transition.hh"
 #include "Units.hh"
 #include "VisitPathEnds.hh"
+#include "search/CheckMinPulseWidths.hh"
+#include "search/GatedClk.hh"
 
 // Defined by the SWIG wrapper generated from src/app/StaApp.i.
 extern "C" {
@@ -121,6 +136,73 @@ class WorstEndVisitor : public sta::PathEndVisitor {
   bool found_ = false;
   sta::Slack slack_ = 0.0F;
   const sta::Path* worst_path_ = nullptr;
+};
+
+// Folds one upstream check role into the coverage check type
+// (Immediate unit 7). Latch and non-sequential checks are the
+// same check type as the setup/hold check they constrain; a data
+// check is the no-change type whatever its min/max; a path-delay
+// end already reports setup or hold through checkRole. Roles that
+// are not timing checks (combinational, clock, ...) fold to
+// null and are never coverage rows.
+const char* FoldCheckRole(const sta::TimingRole* role) {
+  if (role == sta::TimingRole::setup() ||
+      role == sta::TimingRole::latchSetup() ||
+      role == sta::TimingRole::nonSeqSetup()) {
+    return "setup";
+  }
+  if (role == sta::TimingRole::hold() ||
+      role == sta::TimingRole::latchHold() ||
+      role == sta::TimingRole::nonSeqHold()) {
+    return "hold";
+  }
+  if (role == sta::TimingRole::recovery()) return "recovery";
+  if (role == sta::TimingRole::removal()) return "removal";
+  if (role == sta::TimingRole::outputSetup()) return "out_setup";
+  if (role == sta::TimingRole::outputHold()) return "out_hold";
+  if (role == sta::TimingRole::gatedClockSetup()) {
+    return "clock_gating_setup";
+  }
+  if (role == sta::TimingRole::gatedClockHold()) {
+    return "clock_gating_hold";
+  }
+  if (role == sta::TimingRole::dataCheckSetup() ||
+      role == sta::TimingRole::dataCheckHold() ||
+      role == sta::TimingRole::nochange()) {
+    return "no-change";
+  }
+  return nullptr;
+}
+
+// Collects the (pin, check type) pairs with a constrained path
+// end at the visited vertices: the tested set of the coverage
+// report. The result set is shared with copies, so the visitor
+// keeps working whichever copy the visit machinery uses. Only
+// constrained ends count: an unconstrained end is the engine
+// saying the check exists but no clocked path exercises it.
+class CoverageVisitor : public sta::PathEndVisitor {
+ public:
+  using TestedSet = std::set<std::pair<std::string, std::string>>;
+  CoverageVisitor(const sta::StaState* sta,
+                  std::shared_ptr<TestedSet> tested)
+      : sta_(sta), tested_(std::move(tested)) {}
+
+  sta::PathEndVisitor* copy() const override {
+    return new CoverageVisitor(*this);
+  }
+
+  void visit(sta::PathEnd* path_end) override {
+    if (path_end->isUnconstrained()) return;
+    const char* type = FoldCheckRole(path_end->checkRole(sta_));
+    if (type == nullptr) return;
+    sta::Vertex* vertex = path_end->vertex(sta_);
+    if (vertex == nullptr) return;
+    tested_->insert({sta_->network()->pathName(vertex->pin()), type});
+  }
+
+ private:
+  const sta::StaState* sta_;
+  std::shared_ptr<TestedSet> tested_;
 };
 
 }  // namespace
@@ -421,6 +503,344 @@ struct StaEngine::Impl {
       });
       SortViolators(violators);
       return violators;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
+  // The analysis coverage (Immediate unit 7, review item I4).
+  // The universe is enumerated per pin from the definitions the
+  // engine itself evaluates: Liberty check arcs (the in-edge
+  // roles at the pin's vertex), SDC output delays, gated-clock
+  // enables, SDC data checks, and min-pulse-width constraints
+  // (SDC or Liberty). Tested is decided by visiting the
+  // constrained path ends at every vertex; a set_max_delay or
+  // set_min_delay endpoint reached this way adds its row (defined
+  // and tested) since a path-delay constraint has no check arc to
+  // enumerate from. Untested reasons follow the documented
+  // precedence: constant_disabled, no_clock,
+  // no_startpoint_clock, no_paths.
+  Result<std::vector<CoveragePin>> AnalysisCoverage() {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      sta->ensureGraph();
+      sta::Graph* graph = sta->graph();
+      sta::Network* network = sta->network();
+      const sta::ModeSeq& modes = sta->modes();
+      if (modes.empty()) {
+        return Status::Error(ErrorCode::kInvalidState,
+                             "analysis coverage needs an analysis mode");
+      }
+      const sta::Sdc* sdc = (*modes.begin())->sdc();
+      // One universe row plus the facts the untested reason
+      // needs. clock_present is per row: the check's clock, which
+      // lives on the constrained pin for the check-arc and
+      // data-check types, on the gated clock pin for the gating
+      // checks, and on the output delay itself for out_setup and
+      // out_hold; for min_pulse_width it is whether a clocked
+      // path reaches the pin.
+      struct RowFacts {
+        CoveragePin pin;
+        bool disabled = false;
+        bool clock_present = true;
+        bool has_paths = false;
+        bool has_clocked_path = false;
+      };
+      std::map<std::pair<std::string, std::string>, RowFacts> rows;
+      const auto add_row = [&rows](const std::string& pin,
+                                   const std::string& related,
+                                   const char* type, bool clock_present) {
+        const auto key = std::make_pair(pin, std::string(type));
+        if (rows.find(key) == rows.end()) {
+          RowFacts facts;
+          facts.pin.pin = pin;
+          facts.pin.related_pin = related;
+          facts.pin.check_type = type;
+          facts.clock_present = clock_present;
+          rows[key] = std::move(facts);
+        }
+      };
+      // The output delays are enumerated once, not per pin: one
+      // OutputDelay covers its leaf pins, and its clock or
+      // reference pin is the related pin for the out_setup and
+      // out_hold rows.
+      for (sta::OutputDelay* delay : sdc->outputDelays()) {
+        std::string related = "-";
+        if (delay->refPin() != nullptr) {
+          related = network->pathName(delay->refPin());
+        } else if (delay->clock() != nullptr) {
+          related = delay->clock()->name();
+        }
+        const bool delay_clocked = delay->clock() != nullptr ||
+                                   delay->refPin() != nullptr;
+        for (const sta::Pin* leaf : delay->leafPins()) {
+          const std::string leaf_name = network->pathName(leaf);
+          for (const sta::RiseFall* rf : sta::RiseFall::range()) {
+            float margin = 0.0F;
+            bool exists = false;
+            delay->delays()->value(rf, sta::MinMax::max(), margin,
+                                   exists);
+            if (exists) {
+              add_row(leaf_name, related, "out_setup", delay_clocked);
+            }
+            delay->delays()->value(rf, sta::MinMax::min(), margin,
+                                   exists);
+            if (exists) {
+              add_row(leaf_name, related, "out_hold", delay_clocked);
+            }
+          }
+          bool leaf_disabled = false;
+          for (const sta::Mode* mode : modes) {
+            if (sta->isConstant(leaf, mode)) leaf_disabled = true;
+          }
+          if (leaf_disabled || sdc->isDisabledConstraint(leaf)) {
+            const auto setup_key =
+                std::make_pair(leaf_name, std::string("out_setup"));
+            const auto hold_key =
+                std::make_pair(leaf_name, std::string("out_hold"));
+            if (rows.find(setup_key) != rows.end()) {
+              rows[setup_key].disabled = true;
+            }
+            if (rows.find(hold_key) != rows.end()) {
+              rows[hold_key].disabled = true;
+            }
+          }
+        }
+      }
+      auto tested = std::make_shared<CoverageVisitor::TestedSet>();
+      VisitAllPins([this, &rows, &add_row, &tested, graph, sdc,
+                    network](const sta::Pin* pin) {
+        const std::string pin_name = network->pathName(pin);
+        sta::Vertex* vertex = graph->pinLoadVertex(pin);
+        if (vertex == nullptr) return;
+        const sta::ModeSeq& modes = sta->modes();
+        bool constant = false;
+        for (const sta::Mode* mode : modes) {
+          if (sta->isConstant(pin, mode)) constant = true;
+        }
+        // Required times first, exactly as the endpoint queries
+        // do: this runs the search, so the path scan below and
+        // the path-end visit see the paths that exist.
+        sta->findRequired(vertex);
+        bool has_paths = false;
+        bool has_clocked_path = false;
+        sta::VertexPathIterator path_iter(vertex, sta);
+        while (path_iter.hasNext()) {
+          const sta::Path* path = path_iter.next();
+          has_paths = true;
+          if (path->clock(sta) != nullptr) has_clocked_path = true;
+        }
+        const auto note_paths = [&rows, &pin_name, has_paths,
+                                 has_clocked_path](const char* type) {
+          const auto key =
+              std::make_pair(pin_name, std::string(type));
+          const auto it = rows.find(key);
+          if (it != rows.end()) {
+            it->second.has_paths = has_paths;
+            it->second.has_clocked_path = has_clocked_path;
+          }
+        };
+        // The Liberty check arcs into the pin. When the pin
+        // carries an output delay the engine evaluates the delay
+        // instead of the arcs (VisitPathEnds precedence), so the
+        // arcs contribute no rows for that pin.
+        if (!sdc->hasOutputDelay(pin)) {
+          sta::VertexInEdgeIterator edge_iter(vertex, graph);
+          while (edge_iter.hasNext()) {
+            sta::Edge* edge = edge_iter.next();
+            const char* type = FoldCheckRole(edge->role());
+            if (type == nullptr) continue;
+            sta::Vertex* from_vertex = edge->from(graph);
+            const sta::Pin* from_pin =
+                from_vertex == nullptr ? nullptr : from_vertex->pin();
+            const std::string related =
+                from_pin == nullptr ? "-"
+                                    : network->pathName(from_pin);
+            // The check's clock lives on the related pin (the
+            // clock pin of the check arc), not on the constrained
+            // pin: a D pin carries no clock, its CK pin does. The
+            // clock network is the query that answers it: the
+            // SDC pin maps only record the pins a clock was
+            // created on, while the network traces the clock to
+            // its leaves.
+            bool arc_clocked = false;
+            if (from_pin != nullptr) {
+              for (const sta::Mode* mode : modes) {
+                if (mode->clkNetwork()->isClock(from_pin)) {
+                  arc_clocked = true;
+                }
+              }
+            }
+            add_row(pin_name, related, type, arc_clocked);
+            bool edge_disabled = constant;
+            if (!edge_disabled) {
+              for (const sta::Mode* mode : modes) {
+                if (sta->isDisabledConstant(edge, mode)) {
+                  edge_disabled = true;
+                }
+              }
+            }
+            if (!edge_disabled &&
+                sdc->isDisabledConstraint(edge)) {
+              edge_disabled = true;
+            }
+            if (edge_disabled) {
+              rows[std::make_pair(pin_name, std::string(type))]
+                  .disabled = true;
+            }
+            note_paths(type);
+          }
+        }
+        // The SDC data checks targeting this pin (no-change).
+        // A data check has no single clock pin: its clock is
+        // the launch clock of the path that reaches the pin, so
+        // the check's clock is present exactly when the design
+        // has any clock at all.
+        const bool design_has_clock = !sdc->clocks().empty();
+        const sta::DataCheckSet* data_checks = sdc->dataChecksTo(pin);
+        if (data_checks != nullptr) {
+          for (const sta::DataCheck* check : *data_checks) {
+            const sta::Pin* from_pin = check->from();
+            add_row(pin_name,
+                    from_pin == nullptr
+                        ? "-"
+                        : network->pathName(from_pin),
+                    "no-change", design_has_clock);
+            if (constant) {
+              rows[std::make_pair(pin_name, std::string("no-change"))]
+                  .disabled = true;
+            }
+            note_paths("no-change");
+          }
+        }
+        // The clock-gating checks at this pin, when it is the
+        // enable of a gated clock.
+        for (const sta::Mode* mode : modes) {
+          bool is_enable = false;
+          const sta::Pin* clk_pin = nullptr;
+          sta::LogicValue active_value;
+          sta->search()->gatedClk()->isGatedClkEnable(
+              vertex, mode, is_enable, clk_pin, active_value);
+          if (!is_enable || clk_pin == nullptr) continue;
+          const std::string clk_name = network->pathName(clk_pin);
+          bool clk_clocked = false;
+          for (const sta::Mode* mode : modes) {
+            if (mode->clkNetwork()->isClock(clk_pin)) {
+              clk_clocked = true;
+            }
+          }
+          add_row(pin_name, clk_name, "clock_gating_setup", clk_clocked);
+          add_row(pin_name, clk_name, "clock_gating_hold", clk_clocked);
+          sta::Instance* inst = network->instance(pin);
+          const bool gating_disabled =
+              constant || sdc->isDisableClockGatingCheck(pin) ||
+              (inst != nullptr &&
+               sdc->isDisableClockGatingCheck(inst));
+          if (gating_disabled) {
+            rows[std::make_pair(pin_name,
+                                std::string("clock_gating_setup"))]
+                .disabled = true;
+            rows[std::make_pair(pin_name,
+                                std::string("clock_gating_hold"))]
+                .disabled = true;
+          }
+          note_paths("clock_gating_setup");
+          note_paths("clock_gating_hold");
+        }
+        // Min pulse width: the SDC constraint (pin, instance,
+        // clock or global scope, either transition) or the
+        // Liberty arc at this vertex.
+        for (const sta::RiseFall* rf :
+             {sta::RiseFall::rise(), sta::RiseFall::fall()}) {
+          float width = 0.0F;
+          bool exists = false;
+          sdc->minPulseWidth(pin, nullptr, rf, width, exists);
+          if (!exists) {
+            for (const sta::Clock* clk : sdc->clocks()) {
+              sdc->minPulseWidth(pin, clk, rf, width, exists);
+              if (exists) break;
+            }
+          }
+          if (!exists) {
+            sta::Edge* mpw_edge = nullptr;
+            sta::TimingArc* mpw_arc = nullptr;
+            graph->minPulseWidthArc(vertex, rf, mpw_edge, mpw_arc);
+            exists = mpw_edge != nullptr;
+          }
+          if (exists) {
+            add_row(pin_name, "-", "min_pulse_width", has_clocked_path);
+            if (constant) {
+              rows[std::make_pair(pin_name,
+                                  std::string("min_pulse_width"))]
+                  .disabled = true;
+            }
+            note_paths("min_pulse_width");
+          }
+        }
+        // The constrained path ends at this vertex decide tested.
+        sta::VisitPathEnds visit(sta);
+        CoverageVisitor visitor(sta, tested);
+        visit.visitPathEnds(vertex, &visitor);
+      });
+      // A constrained end the visitor saw at a pin with no
+      // universe row for its type is a set_max_delay or
+      // set_min_delay endpoint: the check is defined (the engine
+      // evaluated it) and tested.
+      for (const auto& entry : *tested) {
+        const auto it = rows.find(entry);
+        if (it == rows.end()) {
+          RowFacts facts;
+          facts.pin.pin = entry.first;
+          facts.pin.related_pin = "-";
+          facts.pin.check_type = entry.second;
+          facts.pin.tested = true;
+          facts.has_paths = true;
+          facts.has_clocked_path = true;
+          rows[entry] = std::move(facts);
+        } else {
+          it->second.pin.tested = true;
+        }
+      }
+      // Min pulse width tested comes from the upstream bulk
+      // check, which evaluates the check per pin: a pin it
+      // returns has a min-pulse-width check with a clock path
+      // and a close path.
+      sta::CheckMinPulseWidths mpw(sta);
+      const sta::MinPulseWidthCheckSeq& mpw_checks = mpw.check(
+          nullptr, std::numeric_limits<std::size_t>::max(), false,
+          sta->makeSceneSeq(nullptr));
+      for (const sta::MinPulseWidthCheck& check : mpw_checks) {
+        const std::string pin_name =
+            network->pathName(check.pin(sta));
+        const auto key =
+            std::make_pair(pin_name, std::string("min_pulse_width"));
+        const auto it = rows.find(key);
+        if (it != rows.end()) it->second.pin.tested = true;
+      }
+      std::vector<CoveragePin> out;
+      for (auto& entry : rows) {
+        RowFacts& facts = entry.second;
+        CoveragePin& row = facts.pin;
+        if (!row.tested) {
+          if (facts.disabled) {
+            row.untested_reason = "constant_disabled";
+          } else if (!facts.clock_present) {
+            row.untested_reason = "no_clock";
+          } else if (facts.has_paths && !facts.has_clocked_path) {
+            row.untested_reason = "no_startpoint_clock";
+          } else {
+            row.untested_reason = "no_paths";
+          }
+        }
+        out.push_back(row);
+      }
+      std::sort(out.begin(), out.end(),
+                [](const CoveragePin& a, const CoveragePin& b) {
+                  if (a.pin != b.pin) return a.pin < b.pin;
+                  return a.check_type < b.check_type;
+                });
+      return out;
     } catch (const std::exception& ex) {
       return Status::Error(ErrorCode::kIoError, ex.what());
     }
@@ -741,6 +1161,10 @@ StaEngine::MaxCapacitanceViolators() {
 
 Result<std::vector<ElectricalViolation>> StaEngine::MaxFanoutViolators() {
   return impl_->MaxFanoutViolators();
+}
+
+Result<std::vector<CoveragePin>> StaEngine::AnalysisCoverage() {
+  return impl_->AnalysisCoverage();
 }
 
 }  // namespace eos::analysis
