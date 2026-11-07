@@ -13,9 +13,11 @@
 #ifndef EOS_UI_SCHEMATIC_H_
 #define EOS_UI_SCHEMATIC_H_
 
+#include <cstddef>
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace eos::ui {
@@ -228,15 +230,32 @@ struct SchematicTerminalPlacement {
   double y;
 };
 
+// One routed path's endpoints: the driving anchor and the load
+// anchor it serves. A gate endpoint names the gate instance
+// and port; a terminal endpoint names the parent port. The
+// single-anchor stub has the same anchor on both sides, so a
+// stub's driver and load name the same gate or terminal.
+struct SchematicNetPathEnds {
+  std::string driver_gate;
+  std::string driver_terminal;
+  std::string load_gate;
+  std::string load_terminal;
+};
+
 // One routed net: a polyline per load, each from the driving
 // anchor to one load anchor, plus a dot at every true branch
 // point, where three or more wire ends meet. All segments are
 // orthogonal: horizontal and vertical only, never diagonal.
-// A net with a single anchor routes as one stub path.
+// A net with a single anchor routes as one stub path. Each
+// path has one entry in path_ends, in the same order, naming
+// the anchors it starts and ends at, so the widget can color
+// each path by the cone it belongs to instead of guessing
+// from coordinates.
 struct SchematicNetRoute {
   std::string name;
   std::string label;
   std::vector<std::vector<SchematicPoint>> paths;
+  std::vector<SchematicNetPathEnds> path_ends;
   std::vector<SchematicPoint> branch_dots;
 };
 
@@ -264,6 +283,18 @@ struct SchematicLayout {
 // and width: same model, same layout.
 SchematicLayout ComputeSchematicLayout(const SchematicModel& model,
                                        double gate_width);
+
+// The net paths in the transitive fanin and fanout cones of a
+// gate: for each net, the indices of the paths whose wire
+// carries a cone signal. A path is in the cone when both its
+// endpoints are cone endpoints: gate to gate between two cone
+// gates, a primary input feeding a fanin gate, or a cone gate
+// driving a primary output. A path from a cone gate to a
+// sibling load, or from a primary input to a fanout gate, is
+// not in the cone. Empty for an unknown instance.
+std::set<std::pair<std::string, std::size_t>> ConeNetPaths(
+    const SchematicModel& model, const SchematicLayout& layout,
+    const std::string& instance);
 
 }  // namespace eos::ui
 
