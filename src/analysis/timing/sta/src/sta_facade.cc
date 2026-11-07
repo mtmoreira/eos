@@ -39,11 +39,13 @@
 #include "Graph.hh"
 #include "GraphDelayCalc.hh"
 #include "Fuzzy.hh"
+#include "Liberty.hh"
 #include "MinMax.hh"
 #include "Network.hh"
 #include "Path.hh"
 #include "PathEnd.hh"
 #include "PathExpanded.hh"
+#include "PathGroup.hh"
 #include "PortDelay.hh"
 #include "Sdc.hh"
 #include "Search.hh"
@@ -1047,6 +1049,105 @@ struct StaEngine::Impl {
       return Status::Error(ErrorCode::kIoError, ex.what());
     }
   }
+
+  // The path groups for one check kind, through the upstream
+  // reporting enumeration: findPathEnds builds the groups (named
+  // group_path groups, one group per clock, the async, gated-clock
+  // and path-delay groups) and assigns each returned end to every
+  // group it belongs to, one end per endpoint per group. The
+  // group count is unbounded and the slack bounds are infinite,
+  // so no constrained end is pruned: the union of the groups is
+  // the full constrained-endpoint population the visitors see.
+  // The ends are owned by the upstream search and die on the next
+  // findPathEnds call, so the names and slacks are copied out
+  // before this returns.
+  Result<std::vector<PathGroupSlack>> PathGroupSlacks(bool hold) {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      sta::StringSeq group_names;
+      const sta::PathEndSeq ends = sta->findPathEnds(
+          nullptr, nullptr, nullptr, false, sta->scenes(),
+          hold ? sta::MinMaxAll::min() : sta::MinMaxAll::max(),
+          std::numeric_limits<int>::max(), 1, true, false, -sta::INF,
+          sta::INF, true, group_names, !hold, hold, !hold, hold,
+          !hold, hold);
+      std::map<std::string, std::vector<EndpointSlack>> by_group;
+      for (const sta::PathEnd* end : ends) {
+        const sta::PathGroup* group = end->pathGroup();
+        if (group == nullptr) continue;
+        const sta::Slack slack = end->slack(sta);
+        if (sta::delayInf(slack, sta)) continue;
+        sta::Vertex* vertex = end->vertex(sta);
+        if (vertex == nullptr) continue;
+        by_group[group->name()].push_back(EndpointSlack{
+            sta->network()->pathName(vertex->pin()), ToNs(slack)});
+      }
+      std::vector<PathGroupSlack> groups;
+      for (auto& [name, endpoints] : by_group) {
+        std::sort(endpoints.begin(), endpoints.end(),
+                  [](const EndpointSlack& a, const EndpointSlack& b) {
+                    if (a.slack_ns != b.slack_ns)
+                      return a.slack_ns < b.slack_ns;
+                    return a.pin < b.pin;
+                  });
+        groups.push_back(PathGroupSlack{name, std::move(endpoints)});
+      }
+      std::sort(groups.begin(), groups.end(),
+                [](const PathGroupSlack& a, const PathGroupSlack& b) {
+                  return a.name < b.name;
+                });
+      return groups;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
+  // The cell census: one row per Liberty cell type over the leaf
+  // instances, in the same visit order as VisitAllPins, so a
+  // hierarchical instance's leaves are counted exactly once and
+  // the top instance is never counted as a cell.
+  Result<CellAreaResult> CellArea() {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      sta::Network* network = sta->network();
+      std::map<std::string, CellTypeArea> by_cell;
+      std::size_t total_cells = 0;
+      double total_area = 0.0;
+      sta::LeafInstanceIterator* inst_iter =
+          network->leafInstanceIterator();
+      while (inst_iter->hasNext()) {
+        const sta::Instance* inst = inst_iter->next();
+        const sta::LibertyCell* cell = network->libertyCell(inst);
+        const std::string name =
+            cell == nullptr ? "(no liberty cell)" : cell->name();
+        const double area =
+            cell == nullptr ? 0.0 : static_cast<double>(cell->area());
+        CellTypeArea& row = by_cell[name];
+        row.cell = name;
+        row.count += 1;
+        row.area += area;
+        total_cells += 1;
+        total_area += area;
+      }
+      delete inst_iter;
+      CellAreaResult result;
+      result.total_cells = total_cells;
+      result.total_area = total_area;
+      for (auto& [name, row] : by_cell) {
+        result.rows.push_back(std::move(row));
+      }
+      std::sort(result.rows.begin(), result.rows.end(),
+                [](const CellTypeArea& a, const CellTypeArea& b) {
+                  if (a.count != b.count) return a.count > b.count;
+                  return a.cell < b.cell;
+                });
+      return result;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
 };
 
 StaEngine::StaEngine() : impl_(new Impl) {}
@@ -1135,6 +1236,15 @@ Result<std::vector<PathPoint>> StaEngine::WorstPath(
 Result<PathReport> StaEngine::WorstPathReport(
     CheckKind kind, const std::string& endpoint_pin) {
   return impl_->WorstPathReport(kind == CheckKind::kHold, endpoint_pin);
+}
+
+Result<std::vector<PathGroupSlack>> StaEngine::PathGroupSlacks(
+    CheckKind kind) {
+  return impl_->PathGroupSlacks(kind == CheckKind::kHold);
+}
+
+Result<CellAreaResult> StaEngine::CellArea() {
+  return impl_->CellArea();
 }
 
 Result<ElectricalCheck> StaEngine::MaxTransitionCheck() {

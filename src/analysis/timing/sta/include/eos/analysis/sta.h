@@ -168,6 +168,39 @@ struct PathReport {
   std::vector<PathPoint> points;
 };
 
+// One path group: its name and every constrained endpoint in it
+// (pin path name and worst slack in nanoseconds), worst first. An
+// endpoint appears in every group it belongs to: group_path
+// exceptions take precedence over the clock group, so one
+// endpoint can sit in several named groups at once, and the union
+// TNS counts it once while the every-group TNS counts it once per
+// group. The default groups are named after their clocks; the
+// special groups are named "path_delay", "gated_clk", "async"
+// and "unconstrained" upstream.
+struct PathGroupSlack {
+  std::string name;
+  std::vector<EndpointSlack> endpoints;
+};
+
+// One Liberty cell type's share of the design: the instance count
+// and the summed Liberty area. Instances with no Liberty cell are
+// counted under "(no liberty cell)" with zero area.
+struct CellTypeArea {
+  std::string cell;
+  std::size_t count = 0;
+  double area = 0.0;
+};
+
+// The design's cell census: one row per Liberty cell type present
+// as a leaf instance, sorted by count descending then cell name,
+// plus the totals. Area is the sum of the Liberty area
+// attributes, in the library's own area unit.
+struct CellAreaResult {
+  std::vector<CellTypeArea> rows;
+  std::size_t total_cells = 0;
+  double total_area = 0.0;
+};
+
 // One timing analysis session. Move-only; the destructor releases
 // the upstream analyzer and its interpreter. The intended order is
 // ReadLiberty, ReadVerilog, LinkDesign, ReadSdc, then the slack
@@ -263,6 +296,20 @@ class StaEngine {
   // for that check kind.
   Result<PathReport> WorstPathReport(CheckKind kind,
                                      const std::string& endpoint_pin);
+  // The path groups for one check kind: every constrained
+  // endpoint bucketed by the group it belongs to, worst slack
+  // first within each group, groups sorted by name so the order
+  // is deterministic. Setup groups carry the max ends (setup,
+  // recovery, gated-clock setup); hold groups the min ends
+  // (hold, removal, gated-clock hold). Unconstrained endpoints
+  // are never listed: an end with no clocked path is not in any
+  // reported group. Fails with kInvalidState under the same
+  // conditions as WorstSlackNs.
+  Result<std::vector<PathGroupSlack>> PathGroupSlacks(CheckKind kind);
+  // The design's cell census: one row per Liberty cell type
+  // present as a leaf instance, plus the totals. Fails with
+  // kInvalidState under the same conditions as WorstSlackNs.
+  Result<CellAreaResult> CellArea();
 
   // The max transition (slew) check: worst value, limit and
   // slack in nanoseconds, and the violating-pin count. Fails

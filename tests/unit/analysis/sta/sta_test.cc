@@ -418,6 +418,86 @@ TEST(StaFacade, WorstHoldPathUsesTheSameCone) {
   EXPECT_EQ(path.value().front().pin, "r1/Q");
 }
 
+// QoR groups and cell area (Immediate unit 9, review item I9):
+// PathGroupSlacks enumerates the groups the timing engine knows,
+// with every constrained endpoint in each, and CellArea counts
+// the leaf instances by Liberty cell.
+TEST(StaFacade, PathGroupSlacksDefaultClockGroup) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto setup = engine.PathGroupSlacks(CheckKind::kSetup);
+  ASSERT_TRUE(setup.ok()) << setup.status().message();
+  ASSERT_EQ(setup.value().size(), 1u);
+  EXPECT_EQ(setup.value()[0].name, "clk");
+  ASSERT_EQ(setup.value()[0].endpoints.size(), 1u);
+  EXPECT_EQ(setup.value()[0].endpoints[0].pin, "r2/D");
+  EXPECT_NEAR(setup.value()[0].endpoints[0].slack_ns, kWorstSlackNs,
+              1e-6 * std::abs(kWorstSlackNs));
+  const auto hold = engine.PathGroupSlacks(CheckKind::kHold);
+  ASSERT_TRUE(hold.ok()) << hold.status().message();
+  ASSERT_EQ(hold.value().size(), 1u);
+  EXPECT_EQ(hold.value()[0].name, "clk");
+  ASSERT_EQ(hold.value()[0].endpoints.size(), 1u);
+  EXPECT_EQ(hold.value()[0].endpoints[0].pin, "r2/D");
+  EXPECT_NEAR(hold.value()[0].endpoints[0].slack_ns, 0.45, 1e-6);
+}
+
+TEST(StaFacade, PathGroupSlacksTightClock) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcTight);
+  const auto setup = engine.PathGroupSlacks(CheckKind::kSetup);
+  ASSERT_TRUE(setup.ok()) << setup.status().message();
+  ASSERT_EQ(setup.value().size(), 1u);
+  EXPECT_EQ(setup.value()[0].name, "clk");
+  ASSERT_EQ(setup.value()[0].endpoints.size(), 1u);
+  EXPECT_NEAR(setup.value()[0].endpoints[0].slack_ns, kWorstSlackTightNs,
+              1e-6 * std::abs(kWorstSlackTightNs) + 1e-7);
+}
+
+TEST(StaFacade, PathGroupSlacksNamedGroupsShareEndpoint) {
+  // The I9 worked example: two group_path commands both matching
+  // r2/D put the endpoint in both named groups and in neither
+  // clock group (group_path exceptions take precedence), so the
+  // union TNS is -0.1 over one endpoint while the every-group
+  // TNS is -0.2 over two.
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir,
+              std::string(kSdcTight) +
+                  "group_path -name fast -to [get_pins r2/D]\n"
+                  "group_path -name slow -to [get_pins r2/D]\n");
+  const auto setup = engine.PathGroupSlacks(CheckKind::kSetup);
+  ASSERT_TRUE(setup.ok()) << setup.status().message();
+  ASSERT_EQ(setup.value().size(), 2u);
+  EXPECT_EQ(setup.value()[0].name, "fast");
+  EXPECT_EQ(setup.value()[1].name, "slow");
+  for (const PathGroupSlack& group : setup.value()) {
+    ASSERT_EQ(group.endpoints.size(), 1u);
+    EXPECT_EQ(group.endpoints[0].pin, "r2/D");
+    EXPECT_NEAR(group.endpoints[0].slack_ns, kWorstSlackTightNs,
+                1e-6 * std::abs(kWorstSlackTightNs) + 1e-7);
+  }
+}
+
+TEST(StaFacade, CellAreaCountsLeafInstances) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto area = engine.CellArea();
+  ASSERT_TRUE(area.ok()) << area.status().message();
+  EXPECT_EQ(area.value().total_cells, 3u);
+  EXPECT_NEAR(area.value().total_area, 22.0, 1e-9);
+  ASSERT_EQ(area.value().rows.size(), 2u);
+  EXPECT_EQ(area.value().rows[0].cell, "DFF");
+  EXPECT_EQ(area.value().rows[0].count, 2u);
+  EXPECT_NEAR(area.value().rows[0].area, 20.0, 1e-9);
+  EXPECT_EQ(area.value().rows[1].cell, "BUF");
+  EXPECT_EQ(area.value().rows[1].count, 1u);
+  EXPECT_NEAR(area.value().rows[1].area, 2.0, 1e-9);
+}
+
 void LoadElectricalFixture(StaEngine& engine, const TempDir& dir) {
   ASSERT_TRUE(
       engine.ReadLiberty(dir.Write("cells_elec.lib", kLibertyElectrical))

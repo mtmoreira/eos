@@ -112,6 +112,19 @@ struct CommandContext {
     std::map<std::string, std::string> liberty_by_corner;
     std::string spef_path;
     std::vector<analysis::SceneResult> last_results;
+    // The bottleneck capture (Immediate unit 9, review item I9):
+    // bottleneck_capture is the setting, set by
+    // eos::set_bottleneck_capture before the timing update;
+    // last_capture_enabled records whether the most recent
+    // run_timing ran with it on, and the two path lists are the
+    // worst paths that update saved for the violating endpoints,
+    // one per endpoint, setup and hold separately. A run with
+    // capture off clears both lists, so stale paths can never
+    // serve a later report.
+    bool bottleneck_capture = false;
+    bool last_capture_enabled = false;
+    std::vector<analysis::ScenePathReports> last_bottleneck_setup_paths;
+    std::vector<analysis::ScenePathReports> last_bottleneck_hold_paths;
   };
   TimingSession timing;
 
@@ -174,6 +187,11 @@ struct CommandContext {
     double mapped_worst_slack_ns = 0.0;
     double mapped_total_negative_slack_ns = 0.0;
     int mapped_electrical_violations = 0;
+    // Immediate unit 9: the CPU seconds the last successful
+    // synth_map run took (std::clock), -1 when it has not run
+    // in this session. report_qor sums the recorded runs as the
+    // compile CPU.
+    double mapped_cpu_s = -1.0;
     // Synthesis unit S3: the every-path optimization loop's
     // record. The loop starts from the mapped netlist, or from
     // the previous loop's winner when the loop runs again, and
@@ -195,6 +213,10 @@ struct CommandContext {
     int opt_cells = 0;
     double opt_worst_slack_ns = 0.0;
     double opt_total_negative_slack_ns = 0.0;
+    // Immediate unit 9: the CPU seconds the last successful
+    // synth_opt run took, -1 when it has not run in this
+    // session. See mapped_cpu_s.
+    double opt_cpu_s = -1.0;
     std::vector<std::string> opt_still_violating;
     // Synthesis unit S7: one record per strategy the loop
     // committed, in commit order, as
