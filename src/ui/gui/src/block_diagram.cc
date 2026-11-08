@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <utility>
 
 #include "eos/ui/diagram.h"
@@ -217,6 +218,31 @@ void BlockDiagram::RebuildScene() {
   std::map<std::string, QRectF> block_rects;
   const std::string& level = view_.DiagramLevel();
   const std::string& selected = view_.SelectedHierarchyPath();
+  // The selected block, by instance: the hierarchy selection
+  // names a full path, while blocks carry instance names.
+  std::string selected_instance;
+  for (const DiagramBlock& block : diagram.Blocks()) {
+    const std::string block_path =
+        level.empty() ? block.instance : level + "/" + block.instance;
+    if (block_path == selected) {
+      selected_instance = block.instance;
+      break;
+    }
+  }
+  // Tracing a selected block lights only its fanin and fanout
+  // cone, like a gate click in the schematic; everything else
+  // dims. With no block selected every net draws plain.
+  const bool highlighting = !selected_instance.empty();
+  std::set<std::string> cone;
+  std::set<std::pair<std::string, std::size_t>> cone_spokes;
+  if (highlighting) {
+    cone = FaninCone(diagram, selected_instance);
+    const std::set<std::string> fanout =
+        FanoutCone(diagram, selected_instance);
+    cone.insert(fanout.begin(), fanout.end());
+    cone.insert(selected_instance);
+    cone_spokes = ConeNetSpokes(diagram, selected_instance);
+  }
   for (std::size_t i = 0; i < diagram.Blocks().size(); ++i) {
     const DiagramBlock& block = diagram.Blocks()[i];
     const qreal y = kBlockTop + static_cast<qreal>(i) *
@@ -235,7 +261,13 @@ void BlockDiagram::RebuildScene() {
     // Blocks are white contours with no fill: the diagram sits
     // on a dark background, so a solid white fill would be a
     // white box on black. A highlighted block outlines in blue.
-    item->setPen(QPen(highlighted ? Qt::blue : Qt::white,
+    // While a block is traced, blocks outside its cone outline
+    // in grey, like off-cone gates in the schematic.
+    const bool in_cone = cone.count(block.instance) != 0;
+    item->setPen(QPen(highlighted
+                          ? Qt::blue
+                          : (highlighting && !in_cone ? Qt::gray
+                                                      : Qt::white),
                       highlighted ? 3 : 1));
     item->setBrush(Qt::NoBrush);
     item->setToolTip(QString::fromStdString(block.instance + " (" +
@@ -321,7 +353,16 @@ void BlockDiagram::RebuildScene() {
 
   // Nets: a star from the driving output endpoint when one
   // exists, else from the first anchor; a lone anchor gets a
-  // short stub outward. Labels sit on the first segment.
+  // short stub outward. Labels sit on the first segment. A
+  // spoke in the selected cone draws blue; with a selection
+  // active, the rest draw grey, like cone paths in the
+  // schematic.
+  auto net_pen = [&](const std::string& name, std::size_t spoke) {
+    if (!highlighting) return QPen(Qt::black, 1);
+    return cone_spokes.count({name, spoke}) != 0
+               ? QPen(Qt::blue, 2)
+               : QPen(Qt::lightGray, 1);
+  };
   for (const DiagramNet& net : diagram.Nets()) {
     std::vector<Anchor> anchors;
     for (const DiagramNetEndpoint& endpoint : net.endpoints) {
@@ -349,7 +390,7 @@ void BlockDiagram::RebuildScene() {
       const QPointF end(outer.x() +
                             (anchor.left_side ? -kStubLength : kStubLength),
                         outer.y());
-      scene_->addLine(QLineF(outer, end));
+      scene_->addLine(QLineF(outer, end), net_pen(net.name, 0));
       auto* label = scene_->addSimpleText(
           QString::fromStdString(net.name));
       label->setBrush(QBrush(Qt::white));
@@ -361,16 +402,14 @@ void BlockDiagram::RebuildScene() {
                     end.y() - 18);
       continue;
     }
-    std::size_t center = 0;
-    for (std::size_t i = 0; i < anchors.size(); ++i) {
-      if (anchors[i].is_output) {
-        center = i;
-        break;
-      }
-    }
+    // The star center is the driving output endpoint when one
+    // exists, else the first anchor: the same rule the model
+    // uses to key cone spokes, so the indices line up.
+    const std::size_t center = DiagramNetCenterIndex(diagram, net);
     for (std::size_t i = 0; i < anchors.size(); ++i) {
       if (i == center) continue;
-      scene_->addLine(QLineF(anchors[center].point, anchors[i].point));
+      scene_->addLine(QLineF(anchors[center].point, anchors[i].point),
+                      net_pen(net.name, i));
     }
     std::size_t other = center == 0 ? 1 : 0;
     const QPointF mid((anchors[center].point.x() + anchors[other].point.x()) / 2,
@@ -388,14 +427,14 @@ void BlockDiagram::OnBlockClicked(const std::string& instance) {
   const std::string& level = view_.DiagramLevel();
   if (level.empty()) return;
   const std::string path = level + "/" + instance;
-  // Click-to-expand: a single click selects the block AND
-  // descends into it, exactly like a double-click. A block
-  // the hierarchy does not hold (an unresolved or black-box
-  // cell) selects nothing and descends nowhere. The center
-  // view switches to the schematic when the new level is a
-  // leaf, on the refresh the action callback triggers.
+  // A single click selects the block and traces its nets, like
+  // a gate click in the schematic: it never descends. Only a
+  // double-click descends into the block. A block the hierarchy
+  // does not hold (an unresolved or black-box cell) selects
+  // nothing and traces nothing. The center view switches to
+  // the schematic when the new level is a leaf, on the refresh
+  // the action callback triggers.
   if (!view_.SelectHierarchyPath(path)) return;
-  view_.SetDiagramLevel(path);
   if (on_action_) on_action_();
 }
 

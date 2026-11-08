@@ -54,7 +54,9 @@ gains a single log window beside the console, showing all
 engine output plus the output of every console-dispatched
 command, with severity colors, severity filters, and a
 search box; the Messages tab keeps dispatch history only.
-Clicking a block in the diagram descends into it, and when the
+Clicking a block in the diagram selects it and traces its
+fanin and fanout nets, like a gate click in the schematic;
+double-clicking the block descends into it, and when the
 new level is a leaf the center switches to the schematic for
 it. (Earlier this rework put the schematic in the right
 panels as its own tab; the owner's 2026-11-06 demo feedback
