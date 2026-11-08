@@ -35,10 +35,12 @@
 #include <QGraphicsView>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QPushButton>
 
 #include "block_diagram.h"
 #include "center_view.h"
 #include "floorplan_diagram.h"
+#include "main_window.h"
 #include "panels_view.h"
 #include "schematic_diagram.h"
 #endif
@@ -210,6 +212,55 @@ TEST(GuiSessionView, DispatchSeesSharedContext) {
   const CommandResult result = view.Dispatch("mark_parsed", {});
   EXPECT_TRUE(result.ok);
   EXPECT_EQ(view.ReadStep(), StepStatus::kDone);
+}
+
+void RegisterOkCommand(CommandRegistry& registry,
+                       const std::string& name) {
+  auto status = registry.Register(
+      name, name,
+      [](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Ok("");
+      });
+  EXPECT_TRUE(status.ok());
+}
+
+TEST(GuiSessionView, DispatchNavigatesToCommandResults) {
+  using Destination = SessionView::ResultDestination;
+  CommandRegistry registry;
+  for (const std::string& name :
+       {"elaborate", "synth_generic", "synth_map", "synth_blocks",
+        "synth_issues", "read_verilog", "run_timing", "report_clock",
+        "create_scenario"}) {
+    RegisterOkCommand(registry, name);
+  }
+  CommandContext context;
+  SessionView view(registry, context);
+  const std::pair<const char*, Destination> cases[] = {
+      {"elaborate", Destination::kSynthesis},
+      {"synth_generic", Destination::kOptLog},
+      {"synth_map", Destination::kResults},
+      {"synth_blocks", Destination::kCenter},
+      {"synth_issues", Destination::kIssues},
+      {"read_verilog", Destination::kSources},
+      {"run_timing", Destination::kTiming},
+      {"report_clock", Destination::kResults},
+      {"create_scenario", Destination::kNone},
+  };
+  for (const auto& [name, want] : cases) {
+    ASSERT_TRUE(view.Dispatch(name, {}).ok) << name;
+    EXPECT_EQ(view.TakeNavigation(), want) << name;
+    // Consumed once: the next take finds nothing pending.
+    EXPECT_EQ(view.TakeNavigation(), Destination::kNone) << name;
+  }
+}
+
+TEST(GuiSessionView, FailedDispatchNavigatesNowhere) {
+  using Destination = SessionView::ResultDestination;
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  ASSERT_FALSE(view.Dispatch("nope", {}).ok);
+  EXPECT_EQ(view.TakeNavigation(), Destination::kNone);
 }
 
 const char kFlatPayload[] =
@@ -2617,6 +2668,7 @@ TEST(ConsoleEntry, SplitSegmentsDropsBlanks) {
 
 using eos::ui::BlockDiagram;
 using eos::ui::CenterView;
+using eos::ui::MainWindow;
 using eos::ui::PanelsView;
 using eos::ui::FloorplanDiagram;
 using eos::ui::SchematicDiagram;
@@ -4134,6 +4186,77 @@ TEST(BlockOutline, DoubleClickDescendsIntoBlock) {
                           &double_click);
   EXPECT_EQ(fixture.view.SelectedHierarchyPath(), "top/u_ctrl");
   EXPECT_EQ(fixture.view.DiagramLevel(), "top/u_ctrl");
+}
+
+// A SessionView whose registry runs fake elaborate and run_timing
+// commands, so the main window's auto-navigation can be driven
+// without a live design.
+struct AutoNavView {
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view;
+  AutoNavView() : view(registry, context) {
+    OutlineTestApp();
+    auto elaborate = registry.Register(
+        "elaborate", "elaborate",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          ctx.synth.elaborated = true;
+          return CommandResult::Ok("");
+        });
+    EXPECT_TRUE(elaborate.ok());
+    RegisterOkCommand(registry, "run_timing");
+  }
+};
+
+QPushButton* AutoNavButtonWithPrefix(MainWindow& window,
+                                     const std::string& prefix) {
+  for (QPushButton* button : window.findChildren<QPushButton*>()) {
+    if (button->text().toStdString().rfind(prefix, 0) == 0) {
+      return button;
+    }
+  }
+  return nullptr;
+}
+
+TEST(MainWindowAutoNav, ElaborateEnablesAndShowsSynthesisTab) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  EXPECT_FALSE(window.SynthesisEnabled());
+  EXPECT_EQ(window.CurrentTab(), 0);
+  ASSERT_TRUE(fixture.view.Dispatch("elaborate", {}).ok);
+  EXPECT_EQ(fixture.view.ElaborateStep(), StepStatus::kDone);
+  window.Refresh();
+  EXPECT_TRUE(window.SynthesisEnabled());
+  EXPECT_EQ(window.CurrentTab(), 2);
+}
+
+TEST(MainWindowAutoNav, RunTimingShowsTimingTab) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  ASSERT_TRUE(fixture.view.Dispatch("run_timing", {}).ok);
+  window.Refresh();
+  EXPECT_EQ(window.CurrentTab(), 3);
+  EXPECT_FALSE(window.SynthesisEnabled());
+}
+
+TEST(MainWindowAutoNav, SynthesisButtonShowsResultsTab) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  ASSERT_TRUE(fixture.view.Dispatch("elaborate", {}).ok);
+  window.Refresh();
+  ASSERT_EQ(window.CurrentTab(), 2);
+  // Move away through the stepper's Read step (Sources tab),
+  // then take the Synthesis stage button back to Results.
+  QPushButton* read = AutoNavButtonWithPrefix(window, "Read");
+  ASSERT_NE(read, nullptr);
+  read->click();
+  EXPECT_EQ(window.CurrentTab(), 1);
+  QPushButton* synthesis =
+      AutoNavButtonWithPrefix(window, "Synthesis");
+  ASSERT_NE(synthesis, nullptr);
+  EXPECT_TRUE(synthesis->isEnabled());
+  synthesis->click();
+  EXPECT_EQ(window.CurrentTab(), 2);
 }
 
 // A SessionView with the nested hierarchy, so the center can

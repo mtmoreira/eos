@@ -178,6 +178,48 @@ std::string SessionView::EchoLine(const std::string& name,
   return line;
 }
 
+// Where a command's results live, by name. Timing commands
+// (run_timing, the timing reports, the check-specific reports,
+// timing_summary, check_timing) go to the Timing tab, whose
+// model renders them; the remaining report commands go to the
+// Results tab; synth_map and synth_opt go to the Results tab's
+// mapped synthesis section, synth_generic to the Opt log, and
+// the hierarchy queries to the center views. The floorplan
+// command is not here: the center_floorplan_ flag already
+// takes the user to the canvas.
+static SessionView::ResultDestination NavigationForCommand(
+    const std::string& name) {
+  using Destination = SessionView::ResultDestination;
+  if (name == "elaborate") return Destination::kSynthesis;
+  if (name == "synth_generic") return Destination::kOptLog;
+  if (name == "synth_map" || name == "synth_opt" ||
+      name == "synth_summary" || name == "synth_stats" ||
+      name == "check_equivalence") {
+    return Destination::kResults;
+  }
+  if (name == "synth_hierarchy" || name == "synth_blocks" ||
+      name == "synth_schematic") {
+    return Destination::kCenter;
+  }
+  if (name == "synth_issues") return Destination::kIssues;
+  if (name == "read_verilog" || name == "read_filelist") {
+    return Destination::kSources;
+  }
+  if (name == "run_timing" || name == "report_timing" ||
+      name == "report_global_timing" || name == "report_global_slack" ||
+      name == "report_min_period" || name == "report_min_pulse_width" ||
+      name == "report_clock_gating_check" || name == "timing_summary" ||
+      name == "check_timing") {
+    return Destination::kTiming;
+  }
+  if (name == "report_clock" || name == "report_constraint" ||
+      name == "report_analysis_coverage" || name == "report_qor" ||
+      name == "report_bottleneck") {
+    return Destination::kResults;
+  }
+  return Destination::kNone;
+}
+
 CommandResult SessionView::Dispatch(const std::string& name,
                                     const std::vector<std::string>& args) {
   const std::string line = EchoLine(name, args);
@@ -198,6 +240,9 @@ CommandResult SessionView::Dispatch(const std::string& name,
     // console the command was typed in.
     AppendPayloadToLog(log_, result.payload);
     echo_.push_back("ok");
+    // A successful command asks the window to take the user to
+    // its results, once, on the next refresh.
+    pending_navigation_ = NavigationForCommand(name);
     if (name == "checkpoint" || name == "restore") {
       if (args.size() == 1) checkpoint_ = args[0];
     } else if (name == "close_design") {

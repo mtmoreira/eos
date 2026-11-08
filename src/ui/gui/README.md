@@ -128,6 +128,41 @@ also records its diagnostic in Messages. The terminal REPL
 keeps its current behavior: terminal commands print their
 output on the terminal, as before.
 
+## Auto-navigation
+
+As commands run, the window takes the user to the surface
+showing the command's results, once per command: the session
+records a pending destination on a successful dispatch, and
+the next refresh consumes it, so a later refresh never yanks
+the user back to a tab they already left. A failed command
+navigates nowhere, and a command whose results have no
+surface of their own leaves the current tab alone.
+
+- elaborate enables the Synthesis stage in the stage bar and
+  shows the Results tab, which carries the synthesis section.
+  The Synthesis stage stays disabled until elaboration is
+  done, and stays enabled once it is; clicking it shows the
+  Results tab.
+- synth_generic shows the Opt log; synth_map, synth_opt,
+  synth_summary, synth_stats, and check_equivalence show the
+  Results tab; synth_hierarchy, synth_blocks, and
+  synth_schematic show the hierarchy views; synth_issues
+  shows the Issues tab.
+- run_timing, report_timing, the check-specific timing
+  reports, timing_summary, and check_timing show the Timing
+  tab. The remaining report commands (report_clock,
+  report_constraint, report_analysis_coverage, report_qor,
+  report_bottleneck) show the Results tab.
+- read_verilog and read_filelist show the Sources tab.
+- floorplan shows the floorplan canvas, as before, through
+  the center flag rather than this destination.
+- The stepper step clicks still follow the step mapping
+  (Read shows Sources, Elaborate shows Issues, Generic synth
+  shows the Opt log); only a command completion auto-navigates.
+- The terminal REPL dispatches through the Tcl shell, not
+  through the session dispatch, so terminal commands never
+  auto-navigate; the window still refreshes after each one.
+
 ## App icon
 
 The GUI shows the EOS logo as its icon, two mechanisms:

@@ -59,7 +59,9 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   // Floorplan is a button, not a label: it stays disabled until a
   // floorplan is loaded, and its text carries the error count
   // while any elaboration error exists (backend finding 1).
-  // Elaboration and Floorplan are flat buttons, not labels: the
+  // Synthesis is a button too: it stays disabled until
+  // elaboration is done, and shows the Results tab's synthesis
+  // section. Elaboration and Floorplan are flat buttons, not labels: the
   // user switches the center between the hierarchy views and
   // the floorplan canvas there. The other later stages stay
   // greyed labels until their units land.
@@ -74,6 +76,19 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
     Refresh();
   });
   for (const char* stage : kLaterStages) {
+    if (std::string(stage) == "Synthesis") {
+      synthesis_button_ = new QPushButton(stage, stages);
+      synthesis_button_->setFlat(true);
+      synthesis_button_->setEnabled(false);
+      stages_layout->addWidget(synthesis_button_);
+      connect(synthesis_button_, &QPushButton::clicked, [this]() {
+        // PanelsView is created below; clicks only happen after
+        // construction, so it is set by then.
+        panels_->ShowTab(2);
+        Refresh();
+      });
+      continue;
+    }
     if (std::string(stage) == "Floorplan") {
       floorplan_button_ = new QPushButton(stage, stages);
       floorplan_button_->setFlat(true);
@@ -232,6 +247,14 @@ void MainWindow::ShowAgain() {
   activateWindow();
 }
 
+// Test seams (see main_window.h): defined here, where the full
+// PanelsView and QPushButton types are visible.
+int MainWindow::CurrentTab() const { return panels_->currentIndex(); }
+
+bool MainWindow::SynthesisEnabled() const {
+  return synthesis_button_ != nullptr && synthesis_button_->isEnabled();
+}
+
 void MainWindow::NoteStdinClosed() {
   stdin_closed_ = true;
   if (!isVisible()) QCoreApplication::quit();
@@ -301,6 +324,34 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void MainWindow::Refresh() {
+  // A just-run command's results take the user to their
+  // surface, once: the destination is consumed here, so a
+  // later refresh never yanks the user back to a tab they
+  // already left. The tab and center flags are set before the
+  // refreshes below render them.
+  switch (view_.TakeNavigation()) {
+    case SessionView::ResultDestination::kNone:
+      break;
+    case SessionView::ResultDestination::kIssues:
+      panels_->ShowTab(0);
+      break;
+    case SessionView::ResultDestination::kSources:
+      panels_->ShowTab(1);
+      break;
+    case SessionView::ResultDestination::kResults:
+    case SessionView::ResultDestination::kSynthesis:
+      panels_->ShowTab(2);
+      break;
+    case SessionView::ResultDestination::kTiming:
+      panels_->ShowTab(3);
+      break;
+    case SessionView::ResultDestination::kOptLog:
+      panels_->ShowTab(4);
+      break;
+    case SessionView::ResultDestination::kCenter:
+      view_.ShowFloorplan(false);
+      break;
+  }
   view_.RefreshHierarchy();
   view_.RefreshDiagram();
   view_.RefreshSchematic();
@@ -332,6 +383,14 @@ void MainWindow::RefreshSteps() {
   // for the one showing, normal for the other. Floorplan stays
   // disabled until a floorplan is loaded, and its label carries
   // the error count while any elaboration error exists.
+  // Synthesis stays disabled until elaboration is done, and
+  // stays enabled once it is: the flag comes from the live
+  // session record, so a later refresh never disables it while
+  // the design is still elaborated.
+  if (synthesis_button_ != nullptr) {
+    synthesis_button_->setEnabled(view_.ElaborateStep() ==
+                                 StepStatus::kDone);
+  }
   if (elaboration_button_ != nullptr) {
     elaboration_button_->setStyleSheet(
         view_.ShowingFloorplan() ? "" : "font-weight: bold;");
