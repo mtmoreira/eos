@@ -51,7 +51,8 @@ hierarchy, descends the diagram to it, and highlights the
 offending gate in the center schematic. The Floorplan stage label
 carries the error count while any error exists. The bottom row
 gains a single log window beside the console, showing all
-engine output with severity colors, severity filters, and a
+engine output plus the output of every console-dispatched
+command, with severity colors, severity filters, and a
 search box; the Messages tab keeps dispatch history only.
 Clicking a block in the diagram descends into it, and when the
 new level is a leaf the center switches to the schematic for
@@ -112,6 +113,18 @@ the application quits instead of lingering headless, since a
 hidden window with no terminal left cannot be reopened.
 Packaging (U7) delivered the minimal install rule above. The
 app icon lives in src/ui/gui/icons/ and is covered below.
+
+## Console and log routing
+
+A command typed in the GUI console runs through the session
+and its output goes to the Log window, shown and saved there,
+never to the console transcript: the transcript keeps the
+command echo plus one outcome line, "ok" on success and the
+one-line diagnostic on failure, so a long report never floods
+the console the command was typed in. A rejected dispatch
+also records its diagnostic in Messages. The terminal REPL
+keeps its current behavior: terminal commands print their
+output on the terminal, as before.
 
 ## App icon
 

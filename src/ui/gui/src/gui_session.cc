@@ -28,23 +28,6 @@ std::string QuoteArg(const std::string& arg) {
   return out;
 }
 
-// Appends one result payload to the echo log, one line per
-// payload line. A payload is key=value lines; a trailing
-// newline leaves no empty line behind, and an empty payload
-// appends nothing: a command with nothing to report shows
-// only its echo line.
-void AppendPayloadLines(std::vector<std::string>& echo,
-                        const std::string& payload) {
-  std::size_t i = 0;
-  const std::size_t n = payload.size();
-  while (i < n) {
-    std::size_t j = payload.find('\n', i);
-    if (j == std::string::npos) j = n;
-    if (j > i) echo.push_back(payload.substr(i, j - i));
-    i = j + 1;
-  }
-}
-
 // The local time as "%H:%M:%S" for a log entry.
 std::string LogTimestamp() {
   const std::time_t now = std::time(nullptr);
@@ -65,6 +48,29 @@ std::string ClassifyLogLine(const std::string& line) {
   if (line.find("ERROR:") != std::string::npos) return "error";
   if (line.find("Warning:") != std::string::npos) return "warning";
   return "info";
+}
+
+// Appends one result payload to the log, one info entry per
+// payload line. A payload is key=value lines; a trailing
+// newline leaves no empty line behind, and an empty payload
+// appends nothing. The payload is command output: it belongs
+// in the log window, never in the console transcript (see
+// Dispatch), so the transcript stays one echo line plus one
+// outcome line per command.
+void AppendPayloadToLog(std::vector<SessionView::LogEntry>& log,
+                        const std::string& payload) {
+  const std::string timestamp = LogTimestamp();
+  std::size_t i = 0;
+  const std::size_t n = payload.size();
+  while (i < n) {
+    std::size_t j = payload.find('\n', i);
+    if (j == std::string::npos) j = n;
+    if (j > i) {
+      log.push_back(SessionView::LogEntry{timestamp, "info",
+                                          payload.substr(i, j - i)});
+    }
+    i = j + 1;
+  }
 }
 
 // The timing inputs as one string: everything the timing
@@ -185,7 +191,13 @@ CommandResult SessionView::Dispatch(const std::string& name,
     echo_.push_back(error);
     log_.push_back(LogEntry{LogTimestamp(), "error", error});
   } else {
-    AppendPayloadLines(echo_, result.payload);
+    // A command's output goes to the log window, shown and
+    // saved there, never to the console transcript: the
+    // transcript keeps the echo line plus one outcome line,
+    // "ok" on success, so a long report never floods the
+    // console the command was typed in.
+    AppendPayloadToLog(log_, result.payload);
+    echo_.push_back("ok");
     if (name == "checkpoint" || name == "restore") {
       if (args.size() == 1) checkpoint_ = args[0];
     } else if (name == "close_design") {
