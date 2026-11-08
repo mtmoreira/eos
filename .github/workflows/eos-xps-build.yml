@@ -69,7 +69,9 @@ jobs:
       - name: Build
         run: |
           set -o pipefail
-          cmake --build build -j"$(nproc)" 2>&1 | tee build.log
+          # -j2, not -j$(nproc): the 6 GiB ci-eos VM OOM-killed the runner
+          # at -j4 on 2026-11-08 (5.5G peak, runner failed oom-kill).
+          cmake --build build -j2 2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
           echo "build_exit=${rc}" | tee -a build.log
           exit $rc
