@@ -1467,6 +1467,65 @@ std::string FormatNumber(double value) {
   return out.str();
 }
 
+// Renders the mapped synthesis record (full-flow GUI unit F1) in
+// the same key=value line style as StatsText, so the GUI model
+// parses it with the same rules. Three lines, fixed key order per
+// line, "none" for absent values, FormatNumber for doubles. The
+// mapped line is the synth_map record; the opt line is the loop
+// record, all placeholders when the loop never ran; the equiv
+// line is the most recent check_equivalence proof, all
+// placeholders when no proof ran. The caller fails fast when no
+// mapped design exists, so the mapped line never reports "none"
+// for its target or its cells.
+std::string SynthSummaryText(
+    const CommandContext::SynthSession& synth) {
+  std::string out =
+      "mapped target=" + synth.mapped_target +
+      " liberty=" + synth.mapped_liberty +
+      " verilog=" + synth.mapped_verilog +
+      " cells=" + std::to_string(synth.mapped_cells) +
+      " types=" +
+      (synth.mapped_types.empty() ? "none" : synth.mapped_types) +
+      " judged=" + (synth.mapped_timing_judged ? "true" : "false") +
+      " worst_slack_ns=" +
+      (synth.mapped_timing_judged
+           ? FormatNumber(synth.mapped_worst_slack_ns)
+           : "none") +
+      " tns_ns=" +
+      (synth.mapped_timing_judged
+           ? FormatNumber(synth.mapped_total_negative_slack_ns)
+           : "none") +
+      "\n";
+  out += std::string("opt run=") + (synth.opt_run ? "true" : "false");
+  if (synth.opt_run) {
+    out += " winner=" +
+           (synth.opt_winner.empty() ? "none" : synth.opt_winner) +
+           " iterations=" + std::to_string(synth.opt_iterations) +
+           " verilog=" + synth.opt_verilog +
+           " cells=" + std::to_string(synth.opt_cells) +
+           " types=" +
+           (synth.opt_types.empty() ? "none" : synth.opt_types) +
+           " worst_slack_ns=" +
+           FormatNumber(synth.opt_worst_slack_ns) +
+           " tns_ns=" + FormatNumber(synth.opt_total_negative_slack_ns);
+  } else {
+    out += " winner=none iterations=0 verilog=none cells=0 types=none"
+           " worst_slack_ns=none tns_ns=none";
+  }
+  out += "\n";
+  out += std::string("equiv run=") +
+         (synth.equiv_run ? "true" : "false");
+  if (synth.equiv_run) {
+    out += " verdict=" + synth.equiv_verdict +
+           " first=" + synth.equiv_first +
+           " second=" + synth.equiv_second;
+  } else {
+    out += " verdict=none first=none second=none";
+  }
+  out += "\n";
+  return out;
+}
+
 std::string MetricText(const analysis::TimingMetricMap& metrics,
                        const std::string& name) {
   const auto it = metrics.find(name);
@@ -6702,6 +6761,29 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(IssuesText(
             issues.value(),
             ctx.synth.generic_optimized ? "generic" : "elaborated"));
+      });
+
+  // Reports the mapped synthesis record for the session, as the
+  // GUI Synthesis view (full-flow GUI unit F1) consumes it.
+  // Read-only like synth_stats: it runs no pass and changes no
+  // session state. It fails fast when no mapped design exists,
+  // so the view is present only once synth_map ran; the loop
+  // and equivalence sections report their placeholders until
+  // synth_opt and check_equivalence run. No text is scraped
+  // anywhere here: every number comes from the session record
+  // the commands already maintain.
+  add("synth_summary", "synth_summary",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "synth_summary")) {
+          return *bad;
+        }
+        if (!ctx.synth.mapped) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no mapped design: eos::synth_map first");
+        }
+        return CommandResult::Ok(SynthSummaryText(ctx.synth));
       });
 
   add("synth_generic", "synth_generic [-script <name>]",

@@ -32,6 +32,7 @@
 #include <QGraphicsSimpleTextItem>
 #include <QGraphicsView>
 #include <QMouseEvent>
+#include <QPlainTextEdit>
 
 #include "block_diagram.h"
 #include "center_view.h"
@@ -60,6 +61,7 @@ using eos::ui::HierarchyModel;
 using eos::ui::HierarchyNode;
 using eos::ui::IssuesModel;
 using eos::ui::LiveStatsModel;
+using eos::ui::MappedSynthModel;
 using eos::ui::NetLabel;
 using eos::ui::LogicEquation;
 using eos::ui::OperatorGlyph;
@@ -136,12 +138,15 @@ TEST(GuiSessionView, StepStatesFollowSessionFlags) {
   EXPECT_EQ(view.ReadStep(), StepStatus::kPending);
   EXPECT_EQ(view.ElaborateStep(), StepStatus::kPending);
   EXPECT_EQ(view.GenericStep(), StepStatus::kPending);
+  EXPECT_EQ(view.SynthesisStep(), StepStatus::kPending);
   context.synth.parsed = true;
   EXPECT_EQ(view.ReadStep(), StepStatus::kDone);
   context.synth.elaborated = true;
   EXPECT_EQ(view.ElaborateStep(), StepStatus::kDone);
   context.synth.generic_optimized = true;
   EXPECT_EQ(view.GenericStep(), StepStatus::kDone);
+  context.synth.mapped = true;
+  EXPECT_EQ(view.SynthesisStep(), StepStatus::kDone);
 }
 
 TEST(GuiSessionView, DispatchSeesSharedContext) {
@@ -1615,6 +1620,206 @@ TEST(LiveStatsModel, ReloadReplacesPrevious) {
   EXPECT_TRUE(model.Types().empty());
 }
 
+// F1: the full demo chain numbers, as synth_summary reports
+// them: mapped 4 cells at -0.35 ns, loop winner classic at
+// +0.05 ns, equivalence equivalent.
+const char kSummaryPayload[] =
+    "mapped target=area liberty=demo/synth/cells.lib "
+    "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+    "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+    "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+    "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+    "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+    "second=/tmp/out.v\n";
+
+const char kSummaryMappedOnlyPayload[] =
+    "mapped target=area liberty=demo/synth/cells.lib "
+    "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+    "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+    "opt run=false winner=none iterations=0 verilog=none cells=0 "
+    "types=none worst_slack_ns=none tns_ns=none\n"
+    "equiv run=false verdict=none first=none second=none\n";
+
+const char kSummaryUnjudgedPayload[] =
+    "mapped target=area liberty=demo/synth/cells.lib "
+    "verilog=/tmp/mapped.v cells=3 types=AND2:3 judged=false "
+    "worst_slack_ns=none tns_ns=none\n"
+    "opt run=false winner=none iterations=0 verilog=none cells=0 "
+    "types=none worst_slack_ns=none tns_ns=none\n"
+    "equiv run=false verdict=none first=none second=none\n";
+
+TEST(MappedSynthModel, ParsesFullPayload) {
+  MappedSynthModel model;
+  ASSERT_TRUE(model.LoadPayload(kSummaryPayload));
+  EXPECT_FALSE(model.Empty());
+  EXPECT_EQ(model.Target(), "area");
+  EXPECT_EQ(model.Liberty(), "demo/synth/cells.lib");
+  EXPECT_EQ(model.Verilog(), "/tmp/mapped.v");
+  EXPECT_EQ(model.Cells(), 4);
+  ASSERT_EQ(model.Types().size(), 2u);
+  EXPECT_EQ(model.Types()[0].type, "AND2");
+  EXPECT_EQ(model.Types()[0].count, 3);
+  EXPECT_EQ(model.Types()[1].type, "BUF");
+  EXPECT_EQ(model.Types()[1].count, 1);
+  EXPECT_TRUE(model.Judged());
+  EXPECT_NEAR(model.WorstSlackNs(), -0.35, 1e-9);
+  EXPECT_NEAR(model.TnsNs(), -0.35, 1e-9);
+  EXPECT_TRUE(model.OptRun());
+  EXPECT_EQ(model.OptWinner(), "classic");
+  EXPECT_EQ(model.OptIterations(), 1);
+  EXPECT_EQ(model.OptVerilog(), "/tmp/out.v");
+  EXPECT_EQ(model.OptCells(), 4);
+  ASSERT_EQ(model.OptTypes().size(), 1u);
+  EXPECT_EQ(model.OptTypes()[0].type, "AND2");
+  EXPECT_EQ(model.OptTypes()[0].count, 4);
+  EXPECT_NEAR(model.OptWorstSlackNs(), 0.05, 1e-9);
+  EXPECT_NEAR(model.OptTnsNs(), 0.0, 1e-9);
+  EXPECT_TRUE(model.EquivRun());
+  EXPECT_EQ(model.EquivVerdict(), "equivalent");
+  EXPECT_EQ(model.EquivFirst(), "/tmp/mapped.v");
+  EXPECT_EQ(model.EquivSecond(), "/tmp/out.v");
+}
+
+TEST(MappedSynthModel, ParsesMappedOnlyPayload) {
+  MappedSynthModel model;
+  ASSERT_TRUE(model.LoadPayload(kSummaryMappedOnlyPayload));
+  EXPECT_FALSE(model.Empty());
+  EXPECT_EQ(model.Target(), "area");
+  EXPECT_EQ(model.Cells(), 4);
+  EXPECT_TRUE(model.Judged());
+  EXPECT_FALSE(model.OptRun());
+  EXPECT_FALSE(model.EquivRun());
+}
+
+TEST(MappedSynthModel, ParsesUnjudgedPayload) {
+  MappedSynthModel model;
+  ASSERT_TRUE(model.LoadPayload(kSummaryUnjudgedPayload));
+  EXPECT_FALSE(model.Judged());
+  EXPECT_EQ(model.Cells(), 3);
+  EXPECT_NEAR(model.WorstSlackNs(), 0.0, 1e-9);
+  EXPECT_NEAR(model.TnsNs(), 0.0, 1e-9);
+}
+
+TEST(MappedSynthModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      "",
+      "mapped target=area\n",
+      "mapped target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n",
+      "map target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped cells=4 target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=none tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=false "
+      "worst_slack_ns=-0.35 tns_ns=none\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+      "opt run=false winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=none "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=bogus first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=false verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=BUF:1,AND2:3 judged=true "
+      "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=-4 types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=soon tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+      "mapped  target=area liberty=demo/synth/cells.lib "
+      "verilog=/tmp/mapped.v cells=4 types=AND2:3,BUF:1 judged=true "
+      "worst_slack_ns=-0.35 tns_ns=-0.35\n"
+      "opt run=true winner=classic iterations=1 verilog=/tmp/out.v "
+      "cells=4 types=AND2:4 worst_slack_ns=0.05 tns_ns=0\n"
+      "equiv run=true verdict=equivalent first=/tmp/mapped.v "
+      "second=/tmp/out.v\n",
+  };
+  for (const char* payload : bad) {
+    MappedSynthModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_TRUE(model.Empty());
+  }
+}
+
+TEST(MappedSynthModel, RejectsMalformedKeepsPrevious) {
+  MappedSynthModel model;
+  ASSERT_TRUE(model.LoadPayload(kSummaryPayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.Target(), "area");
+  EXPECT_EQ(model.Cells(), 4);
+  EXPECT_TRUE(model.OptRun());
+}
+
+TEST(MappedSynthModel, ReloadReplacesPrevious) {
+  MappedSynthModel model;
+  ASSERT_TRUE(model.LoadPayload(kSummaryPayload));
+  ASSERT_TRUE(model.LoadPayload(kSummaryMappedOnlyPayload));
+  EXPECT_EQ(model.Target(), "area");
+  EXPECT_EQ(model.Cells(), 4);
+  EXPECT_FALSE(model.OptRun());
+  EXPECT_FALSE(model.EquivRun());
+}
+
 void RegisterStatsCommand(CommandRegistry& registry,
                           const std::string& payload, bool ok) {
   auto status = registry.Register(
@@ -1623,6 +1828,23 @@ void RegisterStatsCommand(CommandRegistry& registry,
         if (!ok) {
           return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
                                      "no elaborated design");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
+// F1: the synth_summary stub, failing fast when the session
+// holds no mapped design, like the real command.
+void RegisterSummaryCommand(CommandRegistry& registry,
+                            const std::string& payload, bool ok) {
+  auto status = registry.Register(
+      "synth_summary", "synth_summary",
+      [payload, ok](CommandContext& context,
+                    const std::vector<std::string>&) {
+        if (!ok || !context.synth.mapped) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no mapped design");
         }
         return CommandResult::Ok(payload);
       });
@@ -1644,6 +1866,28 @@ void FillPanelsContext(CommandContext& context) {
   context.synth.generic_after_and = 3;
   context.synth.generic_after_levels = 2;
   context.synth.generic_verilog = "demo/synth/optloop_generic.v";
+  // F1: the mapped record behind kSummaryPayload.
+  context.synth.mapped = true;
+  context.synth.mapped_target = "area";
+  context.synth.mapped_liberty = "demo/synth/cells.lib";
+  context.synth.mapped_verilog = "/tmp/mapped.v";
+  context.synth.mapped_cells = 4;
+  context.synth.mapped_types = "AND2:3,BUF:1";
+  context.synth.mapped_timing_judged = true;
+  context.synth.mapped_worst_slack_ns = -0.35;
+  context.synth.mapped_total_negative_slack_ns = -0.35;
+  context.synth.opt_run = true;
+  context.synth.opt_winner = "classic";
+  context.synth.opt_iterations = 1;
+  context.synth.opt_verilog = "/tmp/out.v";
+  context.synth.opt_cells = 4;
+  context.synth.opt_types = "AND2:4";
+  context.synth.opt_worst_slack_ns = 0.05;
+  context.synth.opt_total_negative_slack_ns = 0.0;
+  context.synth.equiv_run = true;
+  context.synth.equiv_verdict = "equivalent";
+  context.synth.equiv_first = "/tmp/mapped.v";
+  context.synth.equiv_second = "/tmp/out.v";
 }
 
 TEST(GuiSessionView, RefreshPanelsPopulatesFromRecordAndStatsWithoutEcho) {
@@ -1680,8 +1924,81 @@ TEST(GuiSessionView, RefreshPanelsPopulatesFromRecordAndStatsWithoutEcho) {
   ASSERT_EQ(panels.live_stats.Types().size(), 1u);
   EXPECT_EQ(panels.live_stats.Types()[0].type, "$and");
   EXPECT_EQ(panels.live_stats.Types()[0].count, 6);
+  // No synth_summary command is registered here, so the mapped
+  // record stays empty even though the context holds one.
+  EXPECT_TRUE(panels.mapped_synth.Empty());
   EXPECT_TRUE(view.EchoLog().empty());
   EXPECT_TRUE(view.Messages().empty());
+}
+
+TEST(GuiSessionView, RefreshPanelsPopulatesMappedSynthWithoutEcho) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, kStatsPayload, true);
+  RegisterSummaryCommand(registry, kSummaryPayload, true);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  const PanelsModel& panels = view.Panels();
+  EXPECT_FALSE(panels.mapped_synth.Empty());
+  EXPECT_EQ(panels.mapped_synth.Target(), "area");
+  EXPECT_EQ(panels.mapped_synth.Cells(), 4);
+  EXPECT_TRUE(panels.mapped_synth.Judged());
+  EXPECT_NEAR(panels.mapped_synth.WorstSlackNs(), -0.35, 1e-9);
+  EXPECT_NEAR(panels.mapped_synth.TnsNs(), -0.35, 1e-9);
+  EXPECT_TRUE(panels.mapped_synth.OptRun());
+  EXPECT_EQ(panels.mapped_synth.OptWinner(), "classic");
+  EXPECT_EQ(panels.mapped_synth.OptIterations(), 1);
+  EXPECT_NEAR(panels.mapped_synth.OptWorstSlackNs(), 0.05, 1e-9);
+  EXPECT_TRUE(panels.mapped_synth.EquivRun());
+  EXPECT_EQ(panels.mapped_synth.EquivVerdict(), "equivalent");
+  EXPECT_TRUE(view.EchoLog().empty());
+  EXPECT_TRUE(view.Messages().empty());
+}
+
+TEST(GuiSessionView, RefreshPanelsClearsMappedSynthWhenNotMapped) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, kStatsPayload, true);
+  RegisterSummaryCommand(registry, kSummaryPayload, true);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  ASSERT_FALSE(view.Panels().mapped_synth.Empty());
+  context.synth.mapped = false;
+  view.RefreshPanels();
+  EXPECT_TRUE(view.Panels().parsed);
+  EXPECT_TRUE(view.Panels().elaborated);
+  EXPECT_TRUE(view.Panels().generic_run);
+  EXPECT_TRUE(view.Panels().mapped_synth.Empty());
+}
+
+TEST(GuiSessionView, RefreshPanelsKeepsRecordClearsMappedSynthOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, kStatsPayload, true);
+  RegisterSummaryCommand(registry, "", false);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  EXPECT_TRUE(view.Panels().parsed);
+  EXPECT_TRUE(view.Panels().elaborated);
+  EXPECT_TRUE(view.Panels().generic_run);
+  EXPECT_TRUE(view.Panels().mapped_synth.Empty());
+}
+
+TEST(GuiSessionView, RefreshPanelsKeepsRecordClearsMappedSynthOnMalformedPayload) {
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, kStatsPayload, true);
+  RegisterSummaryCommand(registry, "garbage\n", true);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  EXPECT_TRUE(view.Panels().parsed);
+  EXPECT_TRUE(view.Panels().elaborated);
+  EXPECT_TRUE(view.Panels().generic_run);
+  EXPECT_TRUE(view.Panels().mapped_synth.Empty());
 }
 
 TEST(GuiSessionView, RefreshPanelsFilelistShape) {
@@ -3512,6 +3829,33 @@ TEST(PanelsView, HasSixTabsWithTiming) {
   EXPECT_EQ(panels.tabText(3).toStdString(), "Timing");
   EXPECT_EQ(panels.tabText(4).toStdString(), "Opt log");
   EXPECT_EQ(panels.tabText(5).toStdString(), "Messages");
+}
+
+// F1: the Results tab carries the mapped synthesis section from
+// the synth_summary query, with the demo chain numbers.
+TEST(PanelsView, ResultsTabShowsMappedSynthesis) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterStatsCommand(registry, kStatsPayload, true);
+  RegisterSummaryCommand(registry, kSummaryPayload, true);
+  CommandContext context;
+  FillPanelsContext(context);
+  SessionView view(registry, context);
+  view.RefreshPanels();
+  PanelsView panels(view);
+  auto* results = qobject_cast<QPlainTextEdit*>(panels.widget(2));
+  ASSERT_NE(results, nullptr);
+  const std::string text = results->toPlainText().toStdString();
+  EXPECT_NE(text.find("Mapped: target=area cells=4 worst slack=-0.35 ns, "
+                      "TNS=-0.35 ns"),
+            std::string::npos);
+  EXPECT_NE(text.find("AND2: 3"), std::string::npos);
+  EXPECT_NE(text.find("BUF: 1"), std::string::npos);
+  EXPECT_NE(text.find("Loop: winner=classic iterations=1 cells=4 "
+                      "worst slack=0.05 ns, TNS=0 ns"),
+            std::string::npos);
+  EXPECT_NE(text.find("AND2: 4"), std::string::npos);
+  EXPECT_NE(text.find("Equivalence: equivalent"), std::string::npos);
 }
 
 // An issue on the leaf adder module, so LocateIssue must

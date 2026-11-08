@@ -178,16 +178,19 @@ class SessionView {
   // RefreshPanels). The panels snapshot the session record:
   // sources from the Read step, elaborated totals from the
   // Elaborate step, the generic record from the Generic synth
-  // step, and the live cell-type breakdown from a synth_stats
+  // step, the live cell-type breakdown from a synth_stats
+  // query, and the mapped synthesis record from a synth_summary
   // query. The snapshot clears when no design is parsed, and
-  // the live stats clear when not elaborated or when the query
-  // or its payload fails, so stale panels never linger.
+  // the live stats and mapped record clear when not elaborated
+  // or mapped, or when the query or its payload fails, so stale
+  // panels never linger.
   const PanelsModel& Panels() const { return panels_; }
 
   // Re-reads the right panels from the live session: copies
-  // the session record and dispatches synth_stats WITHOUT an
-  // echo line (a model refresh is not a user action). Messages
-  // are dispatch history, not a refresh, so they survive.
+  // the session record and dispatches synth_stats and
+  // synth_summary WITHOUT an echo line (a model refresh is not
+  // a user action). Messages are dispatch history, not a
+  // refresh, so they survive.
   void RefreshPanels();
 
   // Dispatch message log: one line per rejected dispatch, in
@@ -273,6 +276,13 @@ class SessionView {
   StepStatus GenericStep() const {
     return context_.synth.generic_optimized ? StepStatus::kDone
                                             : StepStatus::kPending;
+  }
+  // Mapped synthesis (full-flow GUI unit F1): Done once a
+  // mapped design exists. The stepper widget itself is F11's;
+  // this is the state contract it wires.
+  StepStatus SynthesisStep() const {
+    return context_.synth.mapped ? StepStatus::kDone
+                                 : StepStatus::kPending;
   }
 
  private:
