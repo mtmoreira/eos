@@ -21,6 +21,7 @@
 #include "eos/ui/panels.h"
 #include "eos/ui/registry.h"
 #include "eos/ui/schematic.h"
+#include "eos/ui/timing.h"
 
 namespace eos::ui {
 
@@ -214,6 +215,25 @@ class SessionView {
   // check it already ran.
   void RefreshIssues();
 
+  // Timing model, refreshed from the live session (see
+  // RefreshTiming). The Timing panel reads this: the per-scene
+  // slack summary from the last run_timing, the clock table,
+  // the worst-violator table, the worst paths, the coverage
+  // summary, and the QoR numbers.
+  const TimingModel& Timing() const { return timing_; }
+
+  // Re-reads the timing model from the live session:
+  // dispatches timing_summary WITHOUT an echo line (a model
+  // refresh is not a user action) and rebuilds the model when
+  // a timing run exists; clears it otherwise, or when the
+  // query or its payload fails, so stale timing never lingers.
+  // The query runs fresh STA sessions for the paths, coverage,
+  // and QoR rows, so it runs only when the timing inputs
+  // changed since the last refresh (a new run, a new SDC, a
+  // new scenario, or a new synthesis record), exactly like the
+  // issues check-pass guard.
+  void RefreshTiming();
+
   // One engine log line for the log window: the local time the
   // line was drained, its severity ("error" for a line
   // carrying "ERROR:", "warning" for one carrying "Warning:",
@@ -277,6 +297,10 @@ class SessionView {
   // by a design-changing dispatch (see Dispatch), so the next
   // refresh re-runs the check on the new design.
   std::string issues_key_;
+  TimingModel timing_;
+  // The timing inputs the timing model was last built from
+  // (see RefreshTiming). Empty when no timing is loaded.
+  std::string timing_key_;
   std::string diagram_level_;
 };
 

@@ -252,3 +252,4 @@ need temp-file SDC materialization or engine text-input support.
   (`report_global_timing`, `report_global_slack`,
   `report_min_period`, `report_min_pulse_width`,
   `report_clock_gating_check`), 83 to 88.
+  F2 adds `timing_summary`, 88 to 89.

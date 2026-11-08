@@ -10241,6 +10241,549 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(payload);
       });
 
+  // ---- timing_summary (full-flow GUI unit F2) --------------------
+  // The structured timing query the GUI Timing panel reads: one
+  // payload with the per-scene slack summary from the last
+  // run_timing, the clock table from the session constraint set,
+  // the worst-violator table from the same results, the worst
+  // paths across endpoints (worst first) from the timing
+  // service, the coverage summary, and the QoR numbers. It is a
+  // query, not a report: it runs no report binding, writes no
+  // file, and changes no session state. The worst paths come
+  // from the TimingService analysis (ReportPaths), never from
+  // report_timing text; the coverage and QoR rows come from the
+  // same service (AnalyzeCoverage, AnalyzeQor). Like its sibling
+  // reports it runs the analysis itself for the selected scenes:
+  // the session keeps no live engine, so a query cannot reuse
+  // one. That costs one engine session per scene for the paths,
+  // one for coverage, and one for QoR, on top of the stored
+  // last_results the summary reads; the GUI refreshes the panel
+  // only when the timing inputs change, so a plain refresh never
+  // pays it twice. The scenes reported are the scenes of the
+  // last run_timing: a scenario added after that run is not
+  // shown until run_timing runs again. -max_paths caps the
+  // worst paths per check per scene (default 5); -scene limits
+  // the payload to one scene.
+  add("timing_summary", "timing_summary [-max_paths N] [-scene <name>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-max_paths", 1, false}, {"-scene", 1, false}},
+                "timing_summary", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "timing_summary: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        std::size_t max_paths = 5;
+        if (opts.Seen("-max_paths")) {
+          std::uint64_t parsed = 0;
+          if (!ParseU64(*opts.Value("-max_paths"), parsed) ||
+              parsed == 0) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "timing_summary: -max_paths must be a positive "
+                "integer, got: " +
+                    *opts.Value("-max_paths"));
+          }
+          max_paths = static_cast<std::size_t>(parsed);
+        }
+        if (ctx.timing.last_results.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no timing results: run eos::run_timing first");
+        }
+        bool from_odb = false;
+        std::vector<analysis::SceneAnalysis> scenes;
+        if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          return *bad;
+        }
+        // The reported scenes are the last run's scenes, in run
+        // order; -scene picks one of them. A scene the last run
+        // never covered has no summary to show, so it fails
+        // fast instead of reporting analysis rows with no
+        // summary row.
+        std::vector<const analysis::SceneResult*> reported;
+        for (const analysis::SceneResult& result :
+             ctx.timing.last_results) {
+          if (opts.Seen("-scene") &&
+              result.scenario.name != *opts.Value("-scene")) {
+            continue;
+          }
+          reported.push_back(&result);
+        }
+        if (reported.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              opts.Seen("-scene")
+                  ? "timing_summary: scene has no timing results: " +
+                        *opts.Value("-scene")
+                  : "timing_summary: no timing results");
+        }
+        const auto scene_selected = [&reported](const std::string& name) {
+          for (const analysis::SceneResult* result : reported) {
+            if (result->scenario.name == name) return true;
+          }
+          return false;
+        };
+        std::vector<analysis::SceneAnalysis> analyzed;
+        for (const analysis::SceneAnalysis& scene : scenes) {
+          if (scene_selected(scene.scenario.name)) {
+            analyzed.push_back(scene);
+          }
+        }
+        analysis::TimingService service;
+        const auto paths_for = [&](analysis::CheckKind kind) {
+          analysis::PathReportRequest request;
+          request.kind = kind;
+          request.max_paths = max_paths;
+          return from_odb
+                     ? service.ReportPaths(*ctx.timing.odb,
+                                           ctx.timing.sdc_path, analyzed,
+                                           request)
+                     : service.ReportPaths(
+                           analysis::VerilogDesign{
+                               ctx.timing.verilog_path, ctx.timing.top_cell,
+                               ctx.timing.sdc_path},
+                           analyzed, request);
+        };
+        const Result<std::vector<analysis::ScenePathReports>> setup_paths =
+            paths_for(analysis::CheckKind::kSetup);
+        if (!setup_paths.ok()) return FromStatus(setup_paths.status());
+        const Result<std::vector<analysis::ScenePathReports>> hold_paths =
+            paths_for(analysis::CheckKind::kHold);
+        if (!hold_paths.ok()) return FromStatus(hold_paths.status());
+        const Result<std::vector<analysis::CoverageResult>> coverage =
+            from_odb
+                ? service.AnalyzeCoverage(*ctx.timing.odb,
+                                          ctx.timing.sdc_path, analyzed)
+                : service.AnalyzeCoverage(
+                      analysis::VerilogDesign{ctx.timing.verilog_path,
+                                              ctx.timing.top_cell,
+                                              ctx.timing.sdc_path},
+                      analyzed);
+        if (!coverage.ok()) return FromStatus(coverage.status());
+        const Result<std::vector<analysis::QorResult>> qor =
+            from_odb
+                ? service.AnalyzeQor(*ctx.timing.odb, ctx.timing.sdc_path,
+                                     analyzed)
+                : service.AnalyzeQor(
+                      analysis::VerilogDesign{ctx.timing.verilog_path,
+                                              ctx.timing.top_cell,
+                                              ctx.timing.sdc_path},
+                      analyzed);
+        if (!qor.ok()) return FromStatus(qor.status());
+        const auto find_paths = [](
+            const std::vector<analysis::ScenePathReports>& all,
+            const std::string& name) {
+          for (const analysis::ScenePathReports& scene : all) {
+            if (scene.scenario.name == name) return &scene.paths;
+          }
+          return static_cast<const std::vector<analysis::PathReport>*>(
+              nullptr);
+        };
+        const auto find_coverage = [](
+            const std::vector<analysis::CoverageResult>& all,
+            const std::string& name) {
+          for (const analysis::CoverageResult& scene : all) {
+            if (scene.scenario.name == name) return &scene;
+          }
+          return static_cast<const analysis::CoverageResult*>(nullptr);
+        };
+        const auto find_qor = [](
+            const std::vector<analysis::QorResult>& all,
+            const std::string& name) {
+          for (const analysis::QorResult& scene : all) {
+            if (scene.scenario.name == name) return &scene;
+          }
+          return static_cast<const analysis::QorResult*>(nullptr);
+        };
+        std::string payload = std::string("source=") +
+                              (from_odb ? "odb" : "verilog") +
+                              " scenes=" +
+                              std::to_string(reported.size()) +
+                              " revision=" +
+                              std::to_string(
+                                  ctx.project.ledger.current_revision());
+        // The clock table, from the session constraint set: the
+        // same entries report_clock renders, as machine-readable
+        // rows. Skew reads none on every clock: no clock
+        // uncertainty is defined yet
+        // (set_clock_uncertainty is not an EOS command).
+        const std::vector<ReportClockEntry> clocks =
+            ReportClockEntries(ctx.project.constraints);
+        for (const ReportClockEntry& entry : clocks) {
+          std::string attrs;
+          if (entry.generated) attrs += "G";
+          if (entry.unresolved) attrs += "u";
+          payload += "\nclock name=" + entry.name +
+                     " generated=" + (entry.generated ? "1" : "0") +
+                     " period=" +
+                     (entry.period_ns.has_value()
+                          ? FormatNum(*entry.period_ns)
+                          : std::string("-")) +
+                     " rise=" +
+                     (entry.rise_ns.has_value()
+                          ? FormatNum(*entry.rise_ns)
+                          : std::string("-")) +
+                     " fall=" +
+                     (entry.fall_ns.has_value()
+                          ? FormatNum(*entry.fall_ns)
+                          : std::string("-")) +
+                     " attrs=" + attrs + " skew=none sources=" +
+                     ReportClockBrace(entry.sources);
+        }
+        const std::vector<ReportGeneratedEntry> generated =
+            ReportGeneratedEntries(ctx.project.constraints);
+        for (const ReportGeneratedEntry& entry : generated) {
+          // The brace groups carry the source lists and the
+          // modification: both may contain spaces, so they ride
+          // as one brace-valued token each.
+          payload += "\ngenclock name=" + entry.name +
+                     " master_clock=" +
+                     (entry.master_clock.empty() ? std::string("-")
+                                                 : entry.master_clock) +
+                     " modification=" +
+                     (entry.modification.empty()
+                          ? std::string("-")
+                          : "{" + entry.modification + "}") +
+                     " master_source={" + entry.master_source + "}" +
+                     " sources=" + ReportClockBrace(entry.sources);
+        }
+        for (const db::Constraint& c : ctx.project.constraints.all()) {
+          if (c.kind != db::ConstraintKind::kClock ||
+              c.Param("period_ns").has_value()) {
+            continue;
+          }
+          payload += "\nbindclock name=" + c.name +
+                     " target={" + c.target_spec + "}";
+        }
+        // One class row per constraint class, mirroring
+        // report_constraint's worst-violator tier: the worst
+        // violator, its slack, the exact cost, weight 1, and
+        // the violating-pin count. A DRC class with no limit
+        // at all reports limit=none, never clean.
+        const auto timing_row = [](
+            const char* name,
+            const std::vector<analysis::EndpointSlack>& violators,
+            const std::optional<double>& worst_slack,
+            const std::optional<double>& total_negative_slack,
+            std::string& out) {
+          out += " class=";
+          out += name;
+          out += " violator=";
+          out += violators.empty() ? "-" : violators[0].pin;
+          out += " slack=";
+          if (!violators.empty()) {
+            out += FormatNum(violators[0].slack_ns);
+          } else if (worst_slack.has_value() &&
+                     std::isfinite(*worst_slack)) {
+            out += FormatNum(*worst_slack);
+          } else {
+            out += "none";
+          }
+          out += " cost=";
+          if (total_negative_slack.has_value()) {
+            double cost = -*total_negative_slack;
+            if (cost == 0.0) cost = 0.0;
+            out += FormatNum(cost);
+          } else {
+            out += "none";
+          }
+          out += " weight=1 violations=" +
+                 std::to_string(violators.size());
+        };
+        const auto drc_row = [](
+            const char* name, const analysis::ElectricalCheck& check,
+            const std::vector<analysis::ElectricalViolation>& violators,
+            std::string& out) {
+          out += " class=";
+          out += name;
+          if (!check.has_limit) {
+            out += " violator=- limit=none weight=1 violations=" +
+                   std::to_string(violators.size());
+            return;
+          }
+          out += " violator=";
+          out += violators.empty() ? "-" : violators[0].pin;
+          out += " slack=";
+          out += FormatNum(violators.empty() ? check.worst_slack
+                                             : violators[0].slack);
+          double cost = 0.0;
+          for (const analysis::ElectricalViolation& violation :
+               violators) {
+            cost += -violation.slack;
+          }
+          out += " cost=" + FormatNum(cost);
+          out += " weight=1 violations=" +
+                 std::to_string(violators.size());
+        };
+        // The per-group WNS/TNS helpers mirror report_qor's:
+        // WNS is the worst slack over every endpoint in the
+        // group, TNS the sum of the negative ones.
+        const auto group_tns = [](const analysis::PathGroupResult& group) {
+          double wns = 0.0;
+          double tns = 0.0;
+          std::size_t violating = 0;
+          bool first = true;
+          for (const analysis::EndpointSlack& endpoint : group.endpoints) {
+            if (first || endpoint.slack_ns < wns) {
+              wns = endpoint.slack_ns;
+              first = false;
+            }
+            if (endpoint.slack_ns < 0.0) {
+              tns += endpoint.slack_ns;
+              ++violating;
+            }
+          }
+          return std::make_tuple(wns, tns, violating);
+        };
+        const auto union_tns =
+            [](const std::vector<analysis::PathGroupResult>& groups) {
+              std::map<std::string, double> by_pin;
+              for (const analysis::PathGroupResult& group : groups) {
+                for (const analysis::EndpointSlack& endpoint :
+                     group.endpoints) {
+                  const auto [it, inserted] = by_pin.try_emplace(
+                      endpoint.pin, endpoint.slack_ns);
+                  if (!inserted) {
+                    it->second = std::min(it->second, endpoint.slack_ns);
+                  }
+                }
+              }
+              double tns = 0.0;
+              std::size_t violating = 0;
+              for (const auto& entry : by_pin) {
+                if (entry.second < 0.0) {
+                  tns += entry.second;
+                  ++violating;
+                }
+              }
+              return std::make_pair(tns, violating);
+            };
+        static const char* kCoverageTypes[] = {
+            "setup",           "hold",
+            "out_setup",       "out_hold",
+            "recovery",        "removal",
+            "clock_gating_setup", "clock_gating_hold",
+            "no-change",       "min_pulse_width",
+        };
+        for (const analysis::SceneResult* result : reported) {
+          const std::string& scene = result->scenario.name;
+          const auto metric = [&result](const char* name) {
+            const auto it = result->metrics.find(name);
+            return it == result->metrics.end()
+                       ? std::optional<double>{}
+                       : std::optional<double>{it->second.value};
+          };
+          payload += "\nscene=" + scene +
+                     " mode=" + result->scenario.mode +
+                     " corner=" + result->scenario.corner +
+                     " parasitics=" +
+                     std::string(result->scenario.parasitics ==
+                                         db::ParasiticsLevel::kExtracted
+                                     ? "extracted"
+                                     : "estimate") +
+                     " worst_slack_ns=" +
+                     MetricText(result->metrics, "worst_slack_ns") +
+                     " total_negative_slack_ns=" +
+                     MetricText(result->metrics,
+                                "total_negative_slack_ns") +
+                     " worst_hold_slack_ns=" +
+                     MetricText(result->metrics, "worst_hold_slack_ns") +
+                     " total_negative_hold_slack_ns=" +
+                     MetricText(result->metrics,
+                                "total_negative_hold_slack_ns") +
+                     " max_transition_ns=" +
+                     MetricText(result->metrics, "max_transition_ns") +
+                     " max_transition_violations=" +
+                     MetricText(result->metrics,
+                                "max_transition_violations") +
+                     " max_capacitance_pf=" +
+                     MetricText(result->metrics, "max_capacitance_pf") +
+                     " max_capacitance_violations=" +
+                     MetricText(result->metrics,
+                                "max_capacitance_violations") +
+                     " max_fanout=" +
+                     MetricText(result->metrics, "max_fanout") +
+                     " max_fanout_violations=" +
+                     MetricText(result->metrics, "max_fanout_violations");
+          std::string violators = "\nscene=" + scene;
+          timing_row("max_delay", result->setup_violating_endpoints,
+                     metric("worst_slack_ns"),
+                     metric("total_negative_slack_ns"), violators);
+          payload += violators;
+          violators = "\nscene=" + scene;
+          timing_row("min_delay", result->hold_violating_endpoints,
+                     metric("worst_hold_slack_ns"),
+                     metric("total_negative_hold_slack_ns"), violators);
+          payload += violators;
+          violators = "\nscene=" + scene;
+          drc_row("max_transition", result->max_transition_check,
+                  result->max_transition_violators, violators);
+          payload += violators;
+          violators = "\nscene=" + scene;
+          drc_row("max_capacitance", result->max_capacitance_check,
+                  result->max_capacitance_violators, violators);
+          payload += violators;
+          violators = "\nscene=" + scene;
+          drc_row("max_fanout", result->max_fanout_check,
+                  result->max_fanout_violators, violators);
+          payload += violators;
+          const auto emit_paths = [&](const char* check,
+                                      const std::vector<
+                                          analysis::ScenePathReports>& all) {
+            const std::vector<analysis::PathReport>* paths =
+                find_paths(all, scene);
+            if (paths == nullptr) return;
+            for (const analysis::PathReport& path : *paths) {
+              payload += "\npath scene=" + scene + " check=" + check +
+                         " endpoint=" + path.endpoint +
+                         " startpoint=" + path.startpoint +
+                         " slack=" + FormatNum(path.slack_ns) +
+                         " arrival=" + FormatNum(path.arrival_ns) +
+                         " required=" + FormatNum(path.required_ns);
+            }
+          };
+          emit_paths("setup", setup_paths.value());
+          emit_paths("hold", hold_paths.value());
+          const analysis::CoverageResult* scene_coverage =
+              find_coverage(coverage.value(), scene);
+          if (scene_coverage != nullptr) {
+            std::size_t total_tested = 0;
+            std::size_t total_untested = 0;
+            for (const analysis::CoveragePin& pin : scene_coverage->pins) {
+              if (pin.tested) {
+                ++total_tested;
+              } else {
+                ++total_untested;
+              }
+            }
+            payload += "\ncoverage scene=" + scene +
+                       " checks=" +
+                       std::to_string(scene_coverage->pins.size()) +
+                       " tested=" + std::to_string(total_tested) +
+                       " untested=" + std::to_string(total_untested);
+            for (const char* type : kCoverageTypes) {
+              std::size_t tested = 0;
+              std::size_t untested = 0;
+              for (const analysis::CoveragePin& pin :
+                   scene_coverage->pins) {
+                if (pin.check_type != type) continue;
+                if (pin.tested) {
+                  ++tested;
+                } else {
+                  ++untested;
+                }
+              }
+              const std::size_t total = tested + untested;
+              if (total == 0) continue;
+              const double percent =
+                  static_cast<double>(tested) * 100.0 /
+                  static_cast<double>(total);
+              payload += "\ncoverage scene=" + scene + " type=" + type +
+                         " tested=" + std::to_string(tested) +
+                         " untested=" + std::to_string(untested) +
+                         " percent=" + FormatFixed(percent, 1);
+            }
+          }
+          const analysis::QorResult* scene_qor =
+              find_qor(qor.value(), scene);
+          if (scene_qor != nullptr) {
+            const auto [setup_union_tns, setup_union_violating] =
+                union_tns(scene_qor->setup_groups);
+            const auto [hold_union_tns, hold_union_violating] =
+                union_tns(scene_qor->hold_groups);
+            double setup_every_tns = 0.0;
+            std::size_t setup_every_violating = 0;
+            for (const analysis::PathGroupResult& group :
+                 scene_qor->setup_groups) {
+              const auto [wns, tns, violating] = group_tns(group);
+              setup_every_tns += tns;
+              setup_every_violating += violating;
+            }
+            double hold_every_tns = 0.0;
+            std::size_t hold_every_violating = 0;
+            for (const analysis::PathGroupResult& group :
+                 scene_qor->hold_groups) {
+              const auto [wns, tns, violating] = group_tns(group);
+              hold_every_tns += tns;
+              hold_every_violating += violating;
+            }
+            const double compile_cpu =
+                (ctx.synth.mapped_cpu_s >= 0.0 ? ctx.synth.mapped_cpu_s
+                                               : 0.0) +
+                (ctx.synth.opt_cpu_s >= 0.0 ? ctx.synth.opt_cpu_s : 0.0);
+            const bool compile_recorded =
+                ctx.synth.mapped_cpu_s >= 0.0 || ctx.synth.opt_cpu_s >= 0.0;
+            payload += "\nqor scene=" + scene +
+                       " setup_groups=" +
+                       std::to_string(scene_qor->setup_groups.size()) +
+                       " hold_groups=" +
+                       std::to_string(scene_qor->hold_groups.size()) +
+                       " union_tns=" + FormatNum(setup_union_tns) +
+                       " union_endpoints=" +
+                       std::to_string(setup_union_violating) +
+                       " every_group_tns=" + FormatNum(setup_every_tns) +
+                       " every_group_endpoints=" +
+                       std::to_string(setup_every_violating) +
+                       " hold_union_tns=" + FormatNum(hold_union_tns) +
+                       " hold_union_endpoints=" +
+                       std::to_string(hold_union_violating) +
+                       " hold_every_group_tns=" +
+                       FormatNum(hold_every_tns) +
+                       " hold_every_group_endpoints=" +
+                       std::to_string(hold_every_violating) +
+                       " cells=" + std::to_string(scene_qor->total_cells) +
+                       " area=" + FormatNum(scene_qor->total_area) +
+                       " compile_cpu_s=" +
+                       (compile_recorded ? FormatNum(compile_cpu)
+                                         : "n/a");
+            for (const analysis::PathGroupResult& group :
+                 scene_qor->setup_groups) {
+              const auto [wns, tns, violating] = group_tns(group);
+              payload += "\nqor scene=" + scene + " group=" + group.name +
+                         " check=setup wns=" + FormatNum(wns) +
+                         " tns=" + FormatNum(tns) +
+                         " violating_paths=" + std::to_string(violating);
+            }
+            for (const analysis::PathGroupResult& group :
+                 scene_qor->hold_groups) {
+              const auto [wns, tns, violating] = group_tns(group);
+              payload += "\nqor scene=" + scene + " group=" + group.name +
+                         " check=hold wns=" + FormatNum(wns) +
+                         " tns=" + FormatNum(tns) +
+                         " violating_paths=" + std::to_string(violating);
+            }
+            for (const analysis::CellTypeRow& row : scene_qor->cells) {
+              payload += "\nqor scene=" + scene + " cell=" + row.cell +
+                         " count=" + std::to_string(row.count) +
+                         " area=" + FormatNum(row.area);
+            }
+            const auto qor_drc = [&](const char* name,
+                                     const analysis::ElectricalCheck& check) {
+              // "none" is the no-limit value: a worst_slack of
+              // "no limit" would be two tokens in this payload.
+              payload += "\nqor scene=" + scene + " drc=" + name +
+                         " violations=" +
+                         std::to_string(check.violation_count) +
+                         " worst_slack=" +
+                         (check.has_limit ? FormatNum(check.worst_slack)
+                                          : "none");
+            };
+            qor_drc("max_transition", scene_qor->max_transition_check);
+            qor_drc("max_capacitance", scene_qor->max_capacitance_check);
+            qor_drc("max_fanout", scene_qor->max_fanout_check);
+          }
+        }
+        return CommandResult::Ok(payload);
+      });
+
   add("close_timing", "close_timing <max_iterations>",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {

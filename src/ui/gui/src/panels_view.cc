@@ -15,6 +15,7 @@
 #include "eos/ui/gui.h"
 #include "eos/ui/issues.h"
 #include "eos/ui/panels.h"
+#include "eos/ui/timing.h"
 
 namespace eos::ui {
 
@@ -88,6 +89,129 @@ std::string RenderOptLog(const PanelsModel& panels) {
   out += "Saved: " + std::to_string(panels.SavedAnd()) + " ANDs, " +
          std::to_string(panels.SavedLevels()) + " levels\n";
   out += "Verilog: " + panels.generic_verilog + "\n";
+  return out;
+}
+
+std::string RenderTiming(const TimingModel& timing) {
+  if (!timing.Loaded()) {
+    return "(no timing results yet: run eos::run_timing first)";
+  }
+  std::string out;
+  for (const TimingScene& scene : timing.Scenes()) {
+    out += "Scene " + scene.scene + " (" + scene.mode + "/" +
+           scene.corner + "/" + scene.parasitics + "): worst slack " +
+           scene.worst_slack_ns + " ns, TNS " +
+           scene.total_negative_slack_ns + " ns, worst hold slack " +
+           scene.worst_hold_slack_ns + " ns, hold TNS " +
+           scene.total_negative_hold_slack_ns + " ns\n";
+    out += "  max_transition: worst " + scene.max_transition_ns +
+           " ns, " +
+           std::to_string(scene.max_transition_violations) +
+           " violations; max_capacitance: worst " +
+           scene.max_capacitance_pf + " pF, " +
+           std::to_string(scene.max_capacitance_violations) +
+           " violations; max_fanout: worst " + scene.max_fanout +
+           ", " + std::to_string(scene.max_fanout_violations) +
+           " violations\n";
+  }
+  if (!timing.Clocks().empty() || !timing.GeneratedClocks().empty() ||
+      !timing.BindClocks().empty()) {
+    out += "Clocks:\n";
+    for (const TimingClock& clock : timing.Clocks()) {
+      const std::string period =
+          clock.period == "-" ? "-" : clock.period + " ns";
+      const std::string waveform =
+          (clock.rise == "-" || clock.fall == "-")
+              ? "-"
+              : "{" + clock.rise + " " + clock.fall + "}";
+      out += "  " + clock.name + ": period " + period +
+             ", waveform " + waveform + ", attrs " + clock.attrs +
+             ", skew " + clock.skew + ", sources " + clock.sources +
+             "\n";
+    }
+    for (const TimingGeneratedClock& gen : timing.GeneratedClocks()) {
+      out += "  " + gen.name + " (generated): master " +
+             gen.master_clock + ", master source " + gen.master_source +
+             ", modification " + gen.modification + ", sources " +
+             gen.sources + "\n";
+    }
+    for (const TimingBindClock& bind : timing.BindClocks()) {
+      out += "  " + bind.name + " (construction record, no period): " +
+             bind.target + "\n";
+    }
+  } else {
+    out += "Clocks: none defined\n";
+  }
+  out += "Worst violators:\n";
+  for (const TimingViolator& row : timing.Violators()) {
+    out += "  " + row.scene + " " + row.klass + ": violator " +
+           row.violator + ", slack " + row.slack + ", cost " +
+           row.cost + ", weight 1, violations " +
+           std::to_string(row.violations);
+    if (!row.has_limit) out += " (no limit defined)";
+    out += "\n";
+  }
+  bool any_paths = false;
+  for (const TimingPath& path : timing.Paths()) {
+    if (!any_paths) {
+      out += "Worst paths:\n";
+      any_paths = true;
+    }
+    out += "  " + path.scene + " " + path.check + ": " +
+           path.endpoint + " from " + path.startpoint + ", slack " +
+           path.slack + " ns, arrival " + path.arrival +
+           " ns, required " + path.required + " ns\n";
+  }
+  if (!any_paths) out += "Worst paths: none\n";
+  out += "Coverage:\n";
+  for (const TimingCoverageTotal& total : timing.CoverageTotals()) {
+    out += "  " + total.scene + ": " +
+           std::to_string(total.checks) + " checks, " +
+           std::to_string(total.tested) + " tested, " +
+           std::to_string(total.untested) + " untested\n";
+    for (const TimingCoverageType& type : timing.CoverageTypes()) {
+      if (type.scene != total.scene) continue;
+      out += "    " + type.type + ": " +
+             std::to_string(type.tested) + " tested, " +
+             std::to_string(type.untested) + " untested (" +
+             type.percent + "%)\n";
+    }
+  }
+  out += "QoR:\n";
+  for (const TimingQor& qor : timing.QorScenes()) {
+    out += "  " + qor.scene + ": cells " +
+           std::to_string(qor.cells) + ", area " + qor.area +
+           ", compile CPU " + qor.compile_cpu_s + " s\n";
+    out += "    setup: union TNS " + qor.union_tns + " ns (" +
+           std::to_string(qor.union_endpoints) +
+           " endpoints), every-group TNS " + qor.every_group_tns +
+           " ns (" + std::to_string(qor.every_group_endpoints) +
+           " endpoints)\n";
+    out += "    hold: union TNS " + qor.hold_union_tns + " ns (" +
+           std::to_string(qor.hold_union_endpoints) +
+           " endpoints), every-group TNS " +
+           qor.hold_every_group_tns + " ns (" +
+           std::to_string(qor.hold_every_group_endpoints) +
+           " endpoints)\n";
+    for (const TimingQorGroup& group : timing.QorGroups()) {
+      if (group.scene != qor.scene) continue;
+      out += "    group " + group.group + " (" + group.check +
+             "): WNS " + group.wns + " ns, TNS " + group.tns +
+             " ns, " + std::to_string(group.violating_paths) +
+             " violating paths\n";
+    }
+    for (const TimingQorCell& cell : timing.QorCells()) {
+      if (cell.scene != qor.scene) continue;
+      out += "    cell " + cell.cell + ": " +
+             std::to_string(cell.count) + ", area " + cell.area + "\n";
+    }
+    for (const TimingQorDrc& drc : timing.QorDrcs()) {
+      if (drc.scene != qor.scene) continue;
+      out += "    " + drc.drc + ": " +
+             std::to_string(drc.violations) + " violations, worst slack " +
+             drc.worst_slack + "\n";
+    }
+  }
   return out;
 }
 
@@ -229,6 +353,7 @@ PanelsView::PanelsView(SessionView& view, QWidget* parent)
           });
   sources_ = AddTab(this, "Sources");
   results_ = AddTab(this, "Results");
+  timing_ = AddTab(this, "Timing");
   optlog_ = AddTab(this, "Opt log");
   // Messages tab: dispatch history only, never design
   // problems (those live in Issues). The header says so.
@@ -255,6 +380,8 @@ void PanelsView::Refresh() {
   const PanelsModel& panels = view_.Panels();
   sources_->setPlainText(QString::fromStdString(RenderSources(panels)));
   results_->setPlainText(QString::fromStdString(RenderResults(panels)));
+  timing_->setPlainText(
+      QString::fromStdString(RenderTiming(view_.Timing())));
   optlog_->setPlainText(QString::fromStdString(RenderOptLog(panels)));
   RefreshMessages();
 }

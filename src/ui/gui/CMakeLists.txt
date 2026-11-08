@@ -13,7 +13,8 @@ add_library(eda_ui_gui STATIC
   src/hierarchy.cc
   src/issues.cc
   src/panels.cc
-  src/schematic.cc)
+  src/schematic.cc
+  src/timing.cc)
 target_include_directories(eda_ui_gui PUBLIC include)
 target_link_libraries(eda_ui_gui PUBLIC eda_ui_registry)
 

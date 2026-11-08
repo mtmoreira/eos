@@ -37,8 +37,8 @@ namespace {
 const char* kStepNames[3] = {"Read", "Elaborate", "Generic synth"};
 // The tab each stepper step shows: Read shows Sources (1),
 // Elaborate shows Issues (0, the default landing view after
-// Elaborate), Generic synth shows Opt log (3).
-const int kStepTabs[3] = {1, 0, 3};
+// Elaborate), Generic synth shows Opt log (4).
+const int kStepTabs[3] = {1, 0, 4};
 const char* kLaterStages[9] = {"Synthesis", "Floorplan", "Place", "CTS",
                                 "Route",     "Extract",   "STA", "ECO",
                                 "Signoff"};
@@ -77,8 +77,8 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   // shows that step's outputs in the right panels (Read shows
   // Sources, Elaborate shows Issues, Generic synth shows the
   // Opt log) and refreshes the window; the center is always
-  // the block diagram (U3), and the schematic lives as a tab
-  // in the right panels.
+  // the block diagram for a non-leaf level and the schematic
+  // for a leaf level.
   auto* stepper = new QWidget(root);
   auto* stepper_layout = new QHBoxLayout(stepper);
   for (int i = 0; i < 3; ++i) {
@@ -115,9 +115,9 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   center_ = new CenterView(view_, middle);
   center_->SetActionCallback([this]() { Refresh(); });
   middle->addWidget(center_);
-  // Right panels: issues, sources, results, optimization log,
-  // and messages, rendered from the live session. An issue
-  // click highlights the offending gate in the center
+  // Right panels: issues, sources, results, timing,
+  // optimization log, and messages, rendered from the live
+  // session. An issue click highlights the offending gate in the center
   // schematic; a schematic breadcrumb click refreshes the
   // window through the action callback.
   panels_ = new PanelsView(view_, middle);
@@ -282,6 +282,7 @@ void MainWindow::Refresh() {
   view_.RefreshSchematic();
   view_.RefreshPanels();
   view_.RefreshIssues();
+  view_.RefreshTiming();
   view_.RefreshLog();
   browser_->Refresh();
   center_->Refresh();
