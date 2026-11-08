@@ -47,6 +47,15 @@ class MainWindow : public QMainWindow {
   // earlier reappears on the same session.
   void ShowAgain();
 
+  // Test seams: the current right-panel tab index and whether
+  // the Synthesis stage button is enabled, for unit tests to
+  // assert auto-navigation without driving the window. Defined
+  // out of line in main_window.cc: the bodies call into
+  // PanelsView and QPushButton, which are only forward-declared
+  // here, so an inline definition would not compile.
+  int CurrentTab() const;
+  bool SynthesisEnabled() const;
+
   // Records that the terminal stdin reached EOF (U6). A window
   // hidden with no terminal left cannot be reopened, so in that
   // state the application quits instead of lingering headless.
@@ -93,9 +102,12 @@ class MainWindow : public QMainWindow {
   QLabel* checkpoint_label_ = nullptr;
   // Stage buttons: Elaboration shows the hierarchy views,
   // Floorplan shows the floorplan canvas when a floorplan is
-  // loaded. The other later stages stay greyed labels until
-  // their units land.
+  // loaded. Synthesis shows the Results tab's synthesis
+  // section once elaboration is done; it stays a plain
+  // navigation button, with no bold state. The other later
+  // stages stay greyed labels until their units land.
   QPushButton* elaboration_button_ = nullptr;
+  QPushButton* synthesis_button_ = nullptr;
   QPushButton* floorplan_button_ = nullptr;
   HierarchyBrowser* browser_ = nullptr;
   CenterView* center_ = nullptr;

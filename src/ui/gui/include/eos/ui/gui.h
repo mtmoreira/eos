@@ -259,6 +259,33 @@ class SessionView {
   // every refresh, like the hierarchy refresh.
   void RefreshFloorplan();
 
+  // Where a just-run command's results live, for the window to
+  // navigate to after the command: the panel tab or center view
+  // that shows them, or nowhere when the command's results have
+  // no surface of their own. Set by Dispatch on success, from
+  // the command name; the window consumes it once on the next
+  // refresh, so a later refresh never yanks the user back to a
+  // tab they already left. A failed command sets nothing. The
+  // terminal REPL dispatches through the Tcl shell, not through
+  // Dispatch, so terminal commands never navigate.
+  enum class ResultDestination {
+    kNone,
+    kIssues,
+    kSources,
+    kResults,
+    kTiming,
+    kOptLog,
+    kSynthesis,
+    kCenter,
+  };
+
+  // Returns the pending navigation and clears it.
+  ResultDestination TakeNavigation() {
+    const ResultDestination next = pending_navigation_;
+    pending_navigation_ = ResultDestination::kNone;
+    return next;
+  }
+
   // Whether the center shows the floorplan canvas instead of
   // the hierarchy views. A successful floorplan dispatch takes
   // the user there; a hierarchy navigation or a successful
@@ -353,6 +380,9 @@ class SessionView {
   // successful floorplan dispatch and by explicit stage
   // navigation; cleared by a successful close_design.
   bool center_floorplan_ = false;
+  // The navigation a just-run command asked for, consumed once
+  // by the window on the next refresh (see ResultDestination).
+  ResultDestination pending_navigation_ = ResultDestination::kNone;
   std::string diagram_level_;
 };
 
