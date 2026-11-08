@@ -44,9 +44,21 @@ jobs:
           fetch-depth: 0
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y tcl-dev bison flex libfl-dev swig libeigen3-dev libboost-dev libboost-serialization-dev zlib1g-dev libspdlog-dev libfmt-dev liblemon-dev qt6-base-dev qt6-base-dev-tools
+      - name: Cache OR-Tools (P2 declared external dependency, never vendored)
+        id: cache-ortools
+        uses: actions/cache@v4
+        with:
+          # Exact asset version in the key, so a version bump never
+          # restores a stale install. The GitHub release download
+          # flaps between 200 and 504, so a cold cache must not
+          # fail the whole run; the install step retries the
+          # download when it has to fetch.
+          path: ~/or-tools
+          key: or-tools-9.5.2237-ubuntu-22.04
       - name: Install OR-Tools (P2 declared external dependency, never vendored)
+        if: steps.cache-ortools.outputs.cache-hit != 'true'
         run: |
-          curl -L -o /tmp/or-tools.tar.gz https://github.com/google/or-tools/releases/download/v9.5/or-tools_amd64_ubuntu-22.04_cpp_v9.5.2237.tar.gz
+          curl --retry 5 --retry-delay 10 -L -o /tmp/or-tools.tar.gz https://github.com/google/or-tools/releases/download/v9.5/or-tools_amd64_ubuntu-22.04_cpp_v9.5.2237.tar.gz
           mkdir -p "$HOME/or-tools"
           tar -xzf /tmp/or-tools.tar.gz -C "$HOME/or-tools" --strip-components=1
       - name: Configure
