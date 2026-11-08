@@ -80,7 +80,17 @@ TEST(Registry, CoreSetIsComplete) {
   // report_global_timing, report_global_slack, report_min_period,
   // report_min_pulse_width and report_clock_gating_check. F2 adds
   // timing_summary. F1 adds synth_summary.
-  EXPECT_EQ(shell.registry.Names().size(), 90u);
+  // Immediate unit 11 adds the twenty collection commands: the
+  // C1 vocabulary (get_cells, get_nets, get_pins, get_ports,
+  // get_clocks, all_inputs, all_outputs, all_registers,
+  // all_clocks), the C2 filter and attribute commands
+  // (filter_collection, sort_collection, get_attribute,
+  // set_attribute), and the C3 algebra (add_to_collection,
+  // append_to_collection, remove_from_collection,
+  // compare_collections, index_collection, query_objects,
+  // foreach_in_collection). get_objects is the generic alias and
+  // exists already, so it adds no pin.
+  EXPECT_EQ(shell.registry.Names().size(), 110u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -101,6 +111,26 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("report_min_period"), nullptr);
   EXPECT_NE(shell.registry.Find("report_min_pulse_width"), nullptr);
   EXPECT_NE(shell.registry.Find("report_clock_gating_check"), nullptr);
+  EXPECT_NE(shell.registry.Find("get_cells"), nullptr);
+  EXPECT_NE(shell.registry.Find("get_nets"), nullptr);
+  EXPECT_NE(shell.registry.Find("get_pins"), nullptr);
+  EXPECT_NE(shell.registry.Find("get_ports"), nullptr);
+  EXPECT_NE(shell.registry.Find("get_clocks"), nullptr);
+  EXPECT_NE(shell.registry.Find("all_inputs"), nullptr);
+  EXPECT_NE(shell.registry.Find("all_outputs"), nullptr);
+  EXPECT_NE(shell.registry.Find("all_registers"), nullptr);
+  EXPECT_NE(shell.registry.Find("all_clocks"), nullptr);
+  EXPECT_NE(shell.registry.Find("filter_collection"), nullptr);
+  EXPECT_NE(shell.registry.Find("sort_collection"), nullptr);
+  EXPECT_NE(shell.registry.Find("get_attribute"), nullptr);
+  EXPECT_NE(shell.registry.Find("set_attribute"), nullptr);
+  EXPECT_NE(shell.registry.Find("add_to_collection"), nullptr);
+  EXPECT_NE(shell.registry.Find("append_to_collection"), nullptr);
+  EXPECT_NE(shell.registry.Find("remove_from_collection"), nullptr);
+  EXPECT_NE(shell.registry.Find("compare_collections"), nullptr);
+  EXPECT_NE(shell.registry.Find("index_collection"), nullptr);
+  EXPECT_NE(shell.registry.Find("query_objects"), nullptr);
+  EXPECT_NE(shell.registry.Find("foreach_in_collection"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_summary"), nullptr);
@@ -7671,6 +7701,637 @@ TEST(ReportClock, SkewGivenTwiceFailsFast) {
       shell.Run("report_clock", {"-skew", "-skew"});
   ASSERT_FALSE(result.ok);
   EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+}
+
+// ---- collections C1-C3 (Immediate unit 11, review items C1-C3) --------
+
+void BuildCollectionDesign(Shell& shell) {
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_cell", {"AND2"}).ok);
+  ASSERT_TRUE(shell.Run("create_cell", {"$dff"}).ok);
+  ASSERT_TRUE(shell.Run("create_cell", {"$_DFF_PN0_"}).ok);
+  ASSERT_TRUE(shell.Run("create_cell", {"BUF_X2"}).ok);
+  ASSERT_TRUE(shell.Run("create_instance", {"u_and", "AND2"}).ok);
+  ASSERT_TRUE(shell.Run("create_instance", {"u_flop", "$dff"}).ok);
+  ASSERT_TRUE(shell.Run("create_instance", {"u_flop2", "$_DFF_PN0_"}).ok);
+  ASSERT_TRUE(shell.Run("create_instance", {"u_buf", "BUF_X2"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"a", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"b", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"y", "out"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"io", "inout"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"div", "out"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"n_and"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"n_q"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"clk_net"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u_and", "A", "n_and"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u_and", "Y", "n_q"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u_flop", "D", "n_q"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u_flop", "Q", "n_and"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u_flop", "CK", "clk_net"}).ok);
+  ASSERT_TRUE(shell.Run("create_clock",
+                        {"-period", "10", "-name", "sys", "clk"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("create_clock",
+                        {"-period", "4", "-name", "fast", "a"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("create_generated_clock",
+                        {"-source", "clk", "-master_clock", "sys",
+                         "-divide_by", "2", "div"})
+                  .ok);
+}
+
+// The pin the CoreSetIsComplete test pins: this unit adds twenty
+// commands (C1: get_cells, get_nets, get_pins, get_ports,
+// get_clocks, all_inputs, all_outputs, all_registers, all_clocks;
+// C2: filter_collection, sort_collection, get_attribute,
+// set_attribute; C3: add_to_collection, append_to_collection,
+// remove_from_collection, compare_collections, index_collection,
+// query_objects, foreach_in_collection). get_objects is the
+// generic alias and exists already, so it adds no pin.
+TEST(Collections, VocabularyCountsAndDeterministicOrder) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+
+  const CommandResult cells = shell.Run("get_cells");
+  ASSERT_TRUE(cells.ok) << cells.message;
+  EXPECT_NE(cells.payload.find("collection=eos_coll_1"), std::string::npos);
+  EXPECT_NE(cells.payload.find("count=4"), std::string::npos);
+  const CommandResult cell_list = shell.Run("list_collection", {"eos_coll_1"});
+  ASSERT_TRUE(cell_list.ok);
+  EXPECT_EQ(cell_list.payload, "u_and\nu_buf\nu_flop\nu_flop2");
+
+  const CommandResult nets = shell.Run("get_nets");
+  ASSERT_TRUE(nets.ok);
+  EXPECT_NE(nets.payload.find("count=3"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_2"}).payload,
+            "clk_net\nn_and\nn_q");
+
+  const CommandResult pins = shell.Run("get_pins");
+  ASSERT_TRUE(pins.ok);
+  EXPECT_NE(pins.payload.find("count=5"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_3"}).payload,
+            "u_and/A\nu_and/Y\nu_flop/CK\nu_flop/D\nu_flop/Q");
+
+  const CommandResult ports = shell.Run("get_ports");
+  ASSERT_TRUE(ports.ok);
+  EXPECT_NE(ports.payload.find("count=6"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_4"}).payload,
+            "a\nb\nclk\ndiv\nio\ny");
+
+  const CommandResult clocks = shell.Run("get_clocks");
+  ASSERT_TRUE(clocks.ok);
+  EXPECT_NE(clocks.payload.find("count=3"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_5"}).payload,
+            "div\nfast\nsys");
+
+  const CommandResult inputs = shell.Run("all_inputs");
+  ASSERT_TRUE(inputs.ok);
+  EXPECT_NE(inputs.payload.find("count=3"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_6"}).payload,
+            "a\nb\nclk");
+
+  const CommandResult outputs = shell.Run("all_outputs");
+  ASSERT_TRUE(outputs.ok);
+  EXPECT_NE(outputs.payload.find("count=2"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_7"}).payload,
+            "div\ny");
+
+  const CommandResult regs = shell.Run("all_registers");
+  ASSERT_TRUE(regs.ok);
+  EXPECT_NE(regs.payload.find("count=2"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_8"}).payload,
+            "u_flop\nu_flop2");
+
+  const CommandResult all_clocks = shell.Run("all_clocks");
+  ASSERT_TRUE(all_clocks.ok);
+  EXPECT_NE(all_clocks.payload.find("count=3"), std::string::npos);
+
+  // get_cells means instances; masters come from get_objects cell.
+  const CommandResult masters = shell.Run("get_objects", {"cell", "*"});
+  ASSERT_TRUE(masters.ok);
+  EXPECT_NE(masters.payload.find("count=4"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_10"}).payload,
+            "$_DFF_PN0_\n$dff\nAND2\nBUF_X2");
+
+  // get_objects is the generic alias, clock kind included.
+  const CommandResult alias = shell.Run("get_objects", {"clock", "s*"});
+  ASSERT_TRUE(alias.ok);
+  EXPECT_NE(alias.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_11"}).payload, "sys");
+}
+
+TEST(Collections, PatternMatchingAndEmptyResultsAreOk) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+
+  const CommandResult none = shell.Run("get_nets", {"z*"});
+  ASSERT_TRUE(none.ok);
+  EXPECT_NE(none.payload.find("count=0"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_1"}).payload, "");
+  EXPECT_EQ(shell.Run("sizeof_collection", {"eos_coll_1"}).payload,
+            "count=0");
+
+  const CommandResult one = shell.Run("get_cells", {"u_flop*"});
+  ASSERT_TRUE(one.ok);
+  EXPECT_NE(one.payload.find("count=2"), std::string::npos);
+
+  const CommandResult bad_kind = shell.Run("get_objects", {"widget", "*"});
+  ASSERT_FALSE(bad_kind.ok);
+  EXPECT_EQ(bad_kind.diag, Diag::kInvalidConfiguration);
+
+  const CommandResult bad_option =
+      shell.Run("get_nets", {"-bogus", "n*"});
+  ASSERT_FALSE(bad_option.ok);
+  EXPECT_EQ(bad_option.diag, Diag::kInvalidConfiguration);
+
+  const CommandResult two_patterns =
+      shell.Run("get_nets", {"n*", "clk*"});
+  ASSERT_FALSE(two_patterns.ok);
+  EXPECT_EQ(two_patterns.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(Collections, NoDesignFailsFast) {
+  Shell shell;
+  EXPECT_EQ(shell.Run("get_cells").diag, Diag::kUnclosedDesign);
+  EXPECT_EQ(shell.Run("get_clocks").diag, Diag::kUnclosedDesign);
+  EXPECT_EQ(shell.Run("all_registers").diag, Diag::kUnclosedDesign);
+  EXPECT_EQ(shell.Run("all_clocks").diag, Diag::kUnclosedDesign);
+}
+
+TEST(Collections, FilterLanguage) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+
+  // n_and and n_q each carry two pins; clk_net carries one.
+  const CommandResult fanout = shell.Run(
+      "get_nets", {"-filter", "fanout >= 2"});
+  ASSERT_TRUE(fanout.ok) << fanout.message;
+  EXPECT_NE(fanout.payload.find("count=2"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_1"}).payload,
+            "n_and\nn_q");
+
+  // &&, ||, and parentheses compose; =~ is glob matching.
+  const CommandResult filtered = shell.Run(
+      "filter_collection", {"eos_coll_1", "(name =~ n_* && fanout == 2)"});
+  ASSERT_TRUE(filtered.ok) << filtered.message;
+  EXPECT_NE(filtered.payload.find("count=2"), std::string::npos);
+
+  const CommandResult or_filter = shell.Run(
+      "get_ports", {"-filter", "direction == in || direction == out"});
+  ASSERT_TRUE(or_filter.ok) << or_filter.message;
+  EXPECT_NE(or_filter.payload.find("count=5"), std::string::npos);
+
+  const CommandResult name_glob = shell.Run(
+      "get_cells", {"-filter", "cell =~ *FF*"});
+  ASSERT_TRUE(name_glob.ok) << name_glob.message;
+  EXPECT_NE(name_glob.payload.find("count=1"), std::string::npos);
+
+  const CommandResult bad_attr = shell.Run(
+      "get_nets", {"-filter", "nonsense == 1"});
+  ASSERT_FALSE(bad_attr.ok);
+  EXPECT_EQ(bad_attr.diag, Diag::kInvalidConfiguration);
+
+  const CommandResult bad_syntax = shell.Run(
+      "get_nets", {"-filter", "fanout => 2"});
+  ASSERT_FALSE(bad_syntax.ok);
+  EXPECT_EQ(bad_syntax.diag, Diag::kInvalidConfiguration);
+
+  const CommandResult bad_number = shell.Run(
+      "get_nets", {"-filter", "name > 2"});
+  ASSERT_FALSE(bad_number.ok);
+  EXPECT_EQ(bad_number.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(Collections, Attributes) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+
+  const CommandResult dir = shell.Run("get_attribute", {"clk", "direction"});
+  ASSERT_TRUE(dir.ok);
+  EXPECT_EQ(dir.payload, "object=clk attribute=direction value=in");
+
+  const CommandResult cell = shell.Run("get_attribute", {"u_flop", "cell"});
+  ASSERT_TRUE(cell.ok);
+  EXPECT_EQ(cell.payload, "object=u_flop attribute=cell value=$dff");
+
+  const CommandResult is_reg =
+      shell.Run("get_attribute", {"u_flop", "is_register"});
+  ASSERT_TRUE(is_reg.ok);
+  EXPECT_NE(is_reg.payload.find("value=true"), std::string::npos);
+  const CommandResult not_reg =
+      shell.Run("get_attribute", {"u_and", "is_register"});
+  ASSERT_TRUE(not_reg.ok);
+  EXPECT_NE(not_reg.payload.find("value=false"), std::string::npos);
+
+  const CommandResult fanout =
+      shell.Run("get_attribute", {"n_and", "fanout"});
+  ASSERT_TRUE(fanout.ok);
+  EXPECT_NE(fanout.payload.find("value=2"), std::string::npos);
+
+  const CommandResult pin = shell.Run("get_attribute", {"u_flop/CK", "pin"});
+  ASSERT_TRUE(pin.ok);
+  EXPECT_EQ(pin.payload, "object=u_flop/CK attribute=pin value=CK");
+  const CommandResult pin_net =
+      shell.Run("get_attribute", {"u_flop/CK", "net"});
+  ASSERT_TRUE(pin_net.ok);
+  EXPECT_NE(pin_net.payload.find("value=clk_net"), std::string::npos);
+  const CommandResult pin_inst =
+      shell.Run("get_attribute", {"u_flop/CK", "instance"});
+  ASSERT_TRUE(pin_inst.ok);
+  EXPECT_NE(pin_inst.payload.find("value=u_flop"), std::string::npos);
+
+  const CommandResult period =
+      shell.Run("get_attribute", {"sys", "period"});
+  ASSERT_TRUE(period.ok);
+  EXPECT_EQ(period.payload, "object=sys attribute=period value=10");
+
+  // "div" names both a port and a clock: a bare name resolves to
+  // the design object first (the documented order), so the port
+  // answers here and the clock is read through its handle below.
+  const CommandResult div_port =
+      shell.Run("get_attribute", {"div", "direction"});
+  ASSERT_TRUE(div_port.ok);
+  EXPECT_EQ(div_port.payload, "object=div attribute=direction value=out");
+  const CommandResult source =
+      shell.Run("get_attribute", {"sys", "source"});
+  ASSERT_TRUE(source.ok);
+  EXPECT_NE(source.payload.find("value=clk"), std::string::npos);
+
+  // A singleton handle addresses its member.
+  ASSERT_TRUE(shell.Run("get_cells", {"u_flop"}).ok);
+  const CommandResult via_handle =
+      shell.Run("get_attribute", {"eos_coll_1", "cell"});
+  ASSERT_TRUE(via_handle.ok);
+  EXPECT_NE(via_handle.payload.find("value=$dff"), std::string::npos);
+
+  // A multi-member handle cannot address one object.
+  ASSERT_TRUE(shell.Run("get_cells").ok);
+  const CommandResult multi =
+      shell.Run("get_attribute", {"eos_coll_2", "cell"});
+  ASSERT_FALSE(multi.ok);
+  EXPECT_EQ(multi.diag, Diag::kInvalidConfiguration);
+
+  // The div clock's attributes are read through its singleton
+  // handle: the bare name "div" is the port.
+  ASSERT_TRUE(shell.Run("get_clocks", {"div"}).ok);
+  const CommandResult gen_period =
+      shell.Run("get_attribute", {"eos_coll_3", "period"});
+  ASSERT_TRUE(gen_period.ok);
+  EXPECT_EQ(gen_period.payload, "object=div attribute=period value=20");
+  const CommandResult gen_wave =
+      shell.Run("get_attribute", {"eos_coll_3", "waveform"});
+  ASSERT_TRUE(gen_wave.ok);
+  EXPECT_EQ(gen_wave.payload, "object=div attribute=waveform value={0 10}");
+  const CommandResult is_gen =
+      shell.Run("get_attribute", {"eos_coll_3", "is_generated"});
+  ASSERT_TRUE(is_gen.ok);
+  EXPECT_NE(is_gen.payload.find("value=true"), std::string::npos);
+  const CommandResult master =
+      shell.Run("get_attribute", {"eos_coll_3", "master_clock"});
+  ASSERT_TRUE(master.ok);
+  EXPECT_NE(master.payload.find("value=sys"), std::string::npos);
+
+  // Unknown attributes and objects fail fast, naming the class set.
+  const CommandResult unknown =
+      shell.Run("get_attribute", {"u_and", "period"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(unknown.message.find("cell, is_register"), std::string::npos);
+  const CommandResult missing =
+      shell.Run("get_attribute", {"nope", "name"});
+  ASSERT_FALSE(missing.ok);
+  EXPECT_EQ(missing.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(Collections, SetAttributeAndLifetime) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+
+  const CommandResult set =
+      shell.Run("set_attribute", {"u_and", "dont_touch", "true"});
+  ASSERT_TRUE(set.ok);
+  EXPECT_EQ(set.payload,
+            "object=u_and attribute=dont_touch value=true");
+  const CommandResult get =
+      shell.Run("get_attribute", {"u_and", "dont_touch"});
+  ASSERT_TRUE(get.ok);
+  EXPECT_EQ(get.payload,
+            "object=u_and attribute=dont_touch value=true");
+
+  // A filter over the user attribute sees it; untagged objects
+  // read the empty string.
+  ASSERT_TRUE(shell.Run("get_cells").ok);
+  const CommandResult tagged = shell.Run(
+      "filter_collection", {"eos_coll_1", "dont_touch == true"});
+  ASSERT_TRUE(tagged.ok);
+  EXPECT_NE(tagged.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_2"}).payload, "u_and");
+
+  // Intrinsic attributes are read-only.
+  const CommandResult read_only =
+      shell.Run("set_attribute", {"u_and", "cell", "OTHER"});
+  ASSERT_FALSE(read_only.ok);
+  EXPECT_EQ(read_only.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(read_only.message.find("read-only"), std::string::npos);
+
+  // Rollback does not clear collections or user attributes: the
+  // ledger revision does not delete design objects.
+  ASSERT_TRUE(shell.Run("begin_transaction", {"tag"}).ok);
+  ASSERT_TRUE(shell.Run("commit_transaction", {"pass"}).ok);
+  ASSERT_TRUE(shell.Run("rollback", {"0"}).ok);
+  EXPECT_EQ(shell.Run("sizeof_collection", {"eos_coll_1"}).payload,
+            "count=4");
+  EXPECT_EQ(shell.Run("get_attribute", {"u_and", "dont_touch"}).payload,
+            "object=u_and attribute=dont_touch value=true");
+
+  // Restore clears both: the handle is unknown and the tag is gone.
+  const std::string path = "registry_test_collections.eosproj";
+  std::remove(path.c_str());
+  ASSERT_TRUE(shell.Run("checkpoint", {path}).ok);
+  ASSERT_TRUE(shell.Run("restore", {path}).ok);
+  EXPECT_EQ(shell.Run("sizeof_collection", {"eos_coll_1"}).diag,
+            Diag::kInvalidConfiguration);
+  const CommandResult gone =
+      shell.Run("get_attribute", {"u_and", "dont_touch"});
+  ASSERT_FALSE(gone.ok);
+  EXPECT_EQ(gone.diag, Diag::kInvalidConfiguration);
+  std::remove(path.c_str());
+}
+
+TEST(Collections, Algebra) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+
+  // Two overlapping instance collections: {u_flop, u_flop2} and all.
+  const CommandResult first = shell.Run("get_cells", {"u_flop*"});
+  ASSERT_TRUE(first.ok) << first.message;
+  EXPECT_NE(first.payload.find("count=2"), std::string::npos);
+  const CommandResult second = shell.Run("get_cells", {"u_*"});
+  ASSERT_TRUE(second.ok) << second.message;
+  EXPECT_NE(second.payload.find("count=4"), std::string::npos);
+
+  const CommandResult added =
+      shell.Run("add_to_collection", {"eos_coll_1", "eos_coll_2"});
+  ASSERT_TRUE(added.ok);
+  EXPECT_NE(added.payload.find("count=4"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_3"}).payload,
+            "u_and\nu_buf\nu_flop\nu_flop2");
+  // The inputs are untouched by add_to_collection.
+  EXPECT_EQ(shell.Run("sizeof_collection", {"eos_coll_1"}).payload,
+            "count=2");
+
+  const CommandResult different = shell.Run(
+      "compare_collections", {"eos_coll_1", "eos_coll_2"});
+  ASSERT_TRUE(different.ok);
+  EXPECT_EQ(different.payload,
+            "equal=0 count1=2 count2=4 common=2 only1=0 only2=2");
+  const CommandResult equal = shell.Run(
+      "compare_collections", {"eos_coll_3", "eos_coll_2"});
+  ASSERT_TRUE(equal.ok);
+  EXPECT_EQ(equal.payload,
+            "equal=1 count1=4 count2=4 common=4 only1=0 only2=0");
+
+  const CommandResult removed = shell.Run(
+      "remove_from_collection", {"eos_coll_2", "eos_coll_1"});
+  ASSERT_TRUE(removed.ok);
+  EXPECT_NE(removed.payload.find("count=2"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_4"}).payload,
+            "u_and\nu_buf");
+
+  const CommandResult kept = shell.Run(
+      "remove_from_collection", {"-intersect", "eos_coll_2", "eos_coll_1"});
+  ASSERT_TRUE(kept.ok);
+  EXPECT_NE(kept.payload.find("count=2"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_5"}).payload,
+            "u_flop\nu_flop2");
+
+  const CommandResult appended =
+      shell.Run("append_to_collection", {"eos_coll_1", "eos_coll_2"});
+  ASSERT_TRUE(appended.ok);
+  EXPECT_EQ(appended.payload, "collection=eos_coll_1 count=4");
+
+  const CommandResult first_member =
+      shell.Run("index_collection", {"eos_coll_3", "0"});
+  ASSERT_TRUE(first_member.ok);
+  EXPECT_NE(first_member.payload.find("count=1"), std::string::npos);
+  EXPECT_NE(first_member.payload.find("object=u_and"), std::string::npos);
+  const CommandResult out_of_range =
+      shell.Run("index_collection", {"eos_coll_3", "4"});
+  ASSERT_FALSE(out_of_range.ok);
+  EXPECT_EQ(out_of_range.diag, Diag::kInvalidConfiguration);
+
+  const CommandResult query =
+      shell.Run("query_objects", {"eos_coll_3", "-limit", "2"});
+  ASSERT_TRUE(query.ok);
+  EXPECT_EQ(query.payload, "u_and\nu_buf\ntruncated=1 shown=2 total=4");
+  const CommandResult query_all = shell.Run("query_objects", {"eos_coll_3"});
+  ASSERT_TRUE(query_all.ok);
+  EXPECT_EQ(query_all.payload, "u_and\nu_buf\nu_flop\nu_flop2");
+
+  const CommandResult unknown =
+      shell.Run("add_to_collection", {"eos_coll_3", "eos_coll_99"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(Collections, SortByAttribute) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+
+  ASSERT_TRUE(shell.Run("get_clocks").ok);
+  const CommandResult by_period =
+      shell.Run("sort_collection", {"eos_coll_1", "period"});
+  ASSERT_TRUE(by_period.ok);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_2"}).payload,
+            "fast\nsys\ndiv");
+  const CommandResult down =
+      shell.Run("sort_collection", {"eos_coll_1", "period", "-descending"});
+  ASSERT_TRUE(down.ok);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_3"}).payload,
+            "div\nsys\nfast");
+  const CommandResult by_name =
+      shell.Run("sort_collection", {"eos_coll_1", "name"});
+  ASSERT_TRUE(by_name.ok);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_4"}).payload,
+            "div\nfast\nsys");
+
+  const CommandResult unknown =
+      shell.Run("sort_collection", {"eos_coll_1", "nonsense"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(Collections, Traversal) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+
+  const CommandResult cells = shell.Run("get_cells", {"u_*"});
+  ASSERT_TRUE(cells.ok);
+  EXPECT_NE(cells.payload.find("count=4"), std::string::npos);
+
+  // Pins of the instances.
+  const CommandResult pins = shell.Run(
+      "get_pins", {"-of_objects", "eos_coll_1"});
+  ASSERT_TRUE(pins.ok) << pins.message;
+  EXPECT_NE(pins.payload.find("count=5"), std::string::npos);
+
+  // Nets of those pins.
+  const CommandResult nets = shell.Run(
+      "get_nets", {"-of_objects", "eos_coll_2"});
+  ASSERT_TRUE(nets.ok) << nets.message;
+  EXPECT_NE(nets.payload.find("count=3"), std::string::npos);
+
+  // Instances with pins on those nets.
+  const CommandResult back = shell.Run(
+      "get_cells", {"-of_objects", "eos_coll_3"});
+  ASSERT_TRUE(back.ok) << back.message;
+  EXPECT_NE(back.payload.find("count=2"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_4"}).payload,
+            "u_and\nu_flop");
+
+  // Clocks bound to the clock port: sys only. The generated div is
+  // bound to its target, the div port, not to its source clk.
+  ASSERT_TRUE(shell.Run("get_ports", {"clk"}).ok);
+  const CommandResult clocks = shell.Run(
+      "get_clocks", {"-of_objects", "eos_coll_5"});
+  ASSERT_TRUE(clocks.ok) << clocks.message;
+  EXPECT_NE(clocks.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_6"}).payload, "sys");
+
+  // The generated clock traverses from its target port.
+  ASSERT_TRUE(shell.Run("get_ports", {"div"}).ok);
+  const CommandResult gen = shell.Run(
+      "get_clocks", {"-of_objects", "eos_coll_7"});
+  ASSERT_TRUE(gen.ok) << gen.message;
+  EXPECT_NE(gen.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_8"}).payload, "div");
+
+  // Ports do not traverse, and a clock cannot be a pin source.
+  const CommandResult ports_fail = shell.Run(
+      "get_ports", {"-of_objects", "eos_coll_1"});
+  ASSERT_FALSE(ports_fail.ok);
+  EXPECT_EQ(ports_fail.diag, Diag::kInvalidConfiguration);
+  const CommandResult clock_source = shell.Run(
+      "get_pins", {"-of_objects", "eos_coll_6"});
+  ASSERT_FALSE(clock_source.ok);
+  EXPECT_EQ(clock_source.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(Collections, ForeachWithFakeHost) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+  ASSERT_TRUE(shell.Run("get_cells", {"u_*"}).ok);
+
+  std::vector<std::pair<std::string, std::string>> seen;
+  std::vector<std::string> bodies;
+  shell.ctx.eval_script = [&seen, &bodies](
+      const std::string& var, const std::string& value,
+      const std::string& body, std::string& error) {
+    seen.emplace_back(var, value);
+    bodies.push_back(body);
+    return true;
+  };
+  const CommandResult done = shell.Run(
+      "foreach_in_collection", {"eos_coll_1", "cell", "puts $cell"});
+  ASSERT_TRUE(done.ok) << done.message;
+  EXPECT_EQ(done.payload, "iterations=4");
+  ASSERT_EQ(seen.size(), 4u);
+  EXPECT_EQ(seen[0].first, "cell");
+  EXPECT_EQ(seen[0].second, "u_and");
+  EXPECT_EQ(seen[1].second, "u_buf");
+  EXPECT_EQ(seen[2].second, "u_flop");
+  EXPECT_EQ(seen[3].second, "u_flop2");
+  ASSERT_EQ(bodies.size(), 4u);
+  EXPECT_EQ(bodies[0], "puts $cell");
+
+  // A body failure fails fast naming the member.
+  shell.ctx.eval_script = [](const std::string&, const std::string&,
+                             const std::string&, std::string& error) {
+    error = "boom";
+    return false;
+  };
+  const CommandResult failed = shell.Run(
+      "foreach_in_collection", {"eos_coll_1", "cell", "puts $cell"});
+  ASSERT_FALSE(failed.ok);
+  EXPECT_NE(failed.message.find("u_and"), std::string::npos);
+  EXPECT_NE(failed.message.find("boom"), std::string::npos);
+
+  const CommandResult unknown = shell.Run(
+      "foreach_in_collection", {"eos_coll_99", "cell", "puts $cell"});
+  ASSERT_FALSE(unknown.ok);
+}
+
+TEST(Collections, ForeachWithoutScriptHostFailsFast) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+  ASSERT_TRUE(shell.Run("get_cells").ok);
+  // No eval_script installed on this shell: the GUI console shape.
+  const CommandResult result = shell.Run(
+      "foreach_in_collection", {"eos_coll_1", "cell", "puts $cell"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("script host"), std::string::npos);
+}
+
+TEST(Collections, HandlesAsSdcTargets) {
+  Shell shell;
+  BuildCollectionDesign(shell);
+
+  // A three-port handle expands to three clock rows sharing the name.
+  ASSERT_TRUE(shell.Run("get_ports", {"?"}).ok);
+  const CommandResult clocked = shell.Run(
+      "create_clock", {"-period", "8", "-name", "bus_clk", "eos_coll_1"});
+  ASSERT_TRUE(clocked.ok) << clocked.message;
+  EXPECT_NE(clocked.payload.find("target=a"), std::string::npos);
+  EXPECT_NE(clocked.payload.find("target=b"), std::string::npos);
+  EXPECT_NE(clocked.payload.find("target=y"), std::string::npos);
+  const CommandResult bus = shell.Run("get_clocks", {"bus_clk"});
+  ASSERT_TRUE(bus.ok);
+  EXPECT_NE(bus.payload.find("count=1"), std::string::npos);
+  const CommandResult period =
+      shell.Run("get_attribute", {"bus_clk", "period"});
+  ASSERT_TRUE(period.ok);
+  EXPECT_NE(period.payload.find("value=8"), std::string::npos);
+
+  // -source needs exactly one object: a two-member handle fails.
+  const CommandResult source = shell.Run(
+      "create_generated_clock",
+      {"-source", "eos_coll_1", "-master_clock", "sys", "-divide_by", "2",
+       "div2"});
+  ASSERT_FALSE(source.ok);
+  EXPECT_EQ(source.diag, Diag::kInvalidConfiguration);
+
+  // An unknown handle is not a target at all.
+  const CommandResult unknown = shell.Run(
+      "create_clock", {"-period", "8", "-name", "nope", "eos_coll_99"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+}
+
+TEST(Collections, BusBracketEscaping) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"data[0]"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"data[1]"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"star*"}).ok);
+
+  // Brackets are literal in patterns: data[0] matches only data[0].
+  const CommandResult literal = shell.Run("get_nets", {"data[0]"});
+  ASSERT_TRUE(literal.ok);
+  EXPECT_NE(literal.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_1"}).payload, "data[0]");
+
+  // A glob star still spans the brackets.
+  const CommandResult spanned = shell.Run("get_nets", {"data[*]"});
+  ASSERT_TRUE(spanned.ok);
+  EXPECT_NE(spanned.payload.find("count=2"), std::string::npos);
+
+  // A backslash escapes the star to a literal star.
+  const CommandResult escaped = shell.Run("get_nets", {"star\\*"});
+  ASSERT_TRUE(escaped.ok);
+  EXPECT_NE(escaped.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_3"}).payload, "star*");
 }
 
 }  // namespace

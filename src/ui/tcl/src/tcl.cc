@@ -206,6 +206,28 @@ foundation::Result<std::unique_ptr<TclShell>> TclShell::Create(
         std::string("Tcl_Init failed: ") +
             Tcl_GetStringResult(shell->impl_->interp));
   }
+  // foreach_in_collection evaluates its body in this interpreter:
+  // set the loop variable to one member's display name, then eval
+  // the body. The hook is empty in hosts without a Tcl interpreter
+  // (the GUI console), where the command fails fast instead. The
+  // interpreter outlives every use of the context: both belong to
+  // the shell's process, and the hook is never called after the
+  // shell is destroyed.
+  context.eval_script =
+      [interp = shell->impl_->interp](
+          const std::string& var, const std::string& value,
+          const std::string& body, std::string& error) {
+        if (Tcl_SetVar(interp, var.c_str(), value.c_str(), 0) ==
+            nullptr) {
+          error = "cannot set variable: " + var;
+          return false;
+        }
+        if (Tcl_Eval(interp, body.c_str()) != TCL_OK) {
+          error = Tcl_GetStringResult(interp);
+          return false;
+        }
+        return true;
+      };
   for (const std::string& name : registry.Names()) {
     auto binding = std::make_unique<Binding>();
     binding->registry = &registry;
