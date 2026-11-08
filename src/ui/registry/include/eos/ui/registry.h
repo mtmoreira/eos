@@ -19,9 +19,10 @@
 // style commands report an outcome that is a result, not an error.
 //
 // Collections are a defined type here, distinct from plain lists: a
-// named, live handle over persistent object IDs. Listing a collection
-// resolves names at call time; an object that no longer exists reads
-// as <deleted>. Wildcard rules: '*' matches any run of characters,
+// named, live handle over persistent object IDs (and clock names,
+// which are not design objects). Listing a collection resolves names
+// at call time; an object that no longer exists reads as
+// <deleted>. Wildcard rules: '*' matches any run of characters,
 // '?' exactly one; matching is anchored at both ends; the hierarchy
 // separator is '/'; backslash escapes the next character literally.
 //
@@ -76,6 +77,40 @@ struct CommandResult {
   static CommandResult Fail(Diag diag, std::string message);
 };
 
+// One member of a collection: either a design object (by persistent
+// ObjectId) or a clock (by constraint name). Clocks are not design
+// objects (no ObjectKind exists for them, and the kind values are a
+// written format), so a clock member is carried by name and
+// re-resolved against the constraint set at use time; a clock whose
+// constraint is gone reads as <deleted>, like a deleted design
+// object. Members compare by kind then identity.
+struct CollectionMember {
+  ObjectId object;    // null when this member is a clock
+  std::string clock;  // non-empty exactly when this member is a clock
+
+  bool IsClock() const { return !clock.empty(); }
+
+  static CollectionMember Design(ObjectId id) {
+    CollectionMember m;
+    m.object = id;
+    return m;
+  }
+  static CollectionMember Clock(const std::string& name) {
+    CollectionMember m;
+    m.clock = name;
+    return m;
+  }
+
+  friend bool operator==(const CollectionMember& a,
+                         const CollectionMember& b) {
+    return a.object == b.object && a.clock == b.clock;
+  }
+  friend bool operator!=(const CollectionMember& a,
+                         const CollectionMember& b) {
+    return !(a == b);
+  }
+};
+
 // The state commands operate on: the L5 Project (design, scenarios,
 // constraints and ledger as one owned unit), plus the collections
 // this interface session has minted. Owned by whoever hosts the
@@ -92,9 +127,34 @@ struct CommandContext {
   session::ReportRegistry reports;
 
   // Collections by handle ("eos_coll_1", ...). Handles are never
-  // reused within a context.
-  std::map<std::string, std::vector<ObjectId>> collections;
+  // reused within a context. A collection holds design objects and
+  // clocks (see CollectionMember); every collection is stored in
+  // deterministic order (display name, then kind, then id), so
+  // index, compare, and iteration mean the same thing every run.
+  std::map<std::string, std::vector<CollectionMember>> collections;
   std::uint32_t next_collection = 1;
+
+  // User attributes set by eos::set_attribute, keyed by member
+  // ("obj:<raw id>" for design objects, "clock:<name>" for
+  // clocks). Interface session state, like the collections: cleared
+  // by ResetProject on close_design and by restore, surviving
+  // rollback and abort. Intrinsic attributes (name, period,
+  // direction, ...) are read from the design or constraints at
+  // call time and are never stored here.
+  std::map<std::string, std::map<std::string, std::string>>
+      user_attributes;
+
+  // Script evaluation, installed by the hosting interface when it
+  // can evaluate script text (the Tcl shell installs Tcl_SetVar
+  // plus Tcl_Eval on its interpreter). Empty in hosts that cannot
+  // run scripts (the GUI console runs one registry command per
+  // line): foreach_in_collection fails fast there instead of
+  // silently skipping its body. The hook sets the loop variable to
+  // one member's display name, evaluates the body, and reports
+  // false with the error text when either step fails.
+  std::function<bool(const std::string& var, const std::string& value,
+                     const std::string& body, std::string& error)>
+      eval_script;
 
   // Timing session state (Phase 2 unit 2.3): the design source and
   // the analysis inputs the timing commands accumulate, plus the

@@ -30,6 +30,7 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -296,6 +297,7 @@ void ResetProject(CommandContext& ctx) {
   ctx.project.Reset();
   ctx.collections.clear();
   ctx.next_collection = 1;
+  ctx.user_attributes.clear();
   ctx.timing = CommandContext::TimingSession();
   ctx.synth = CommandContext::SynthSession();
   ctx.wire_rc_overrides.clear();
@@ -2161,6 +2163,12 @@ std::string TrimStr(const std::string& s) {
   return s.substr(first, last - first + 1);
 }
 
+// Forward declaration: defined with the collections helpers below.
+// Expands one collection member to its SDC-addressable names.
+bool MemberTargetNames(const CommandContext& ctx,
+                       const CollectionMember& member,
+                       std::vector<std::string>& out, std::string& error);
+
 // Normalizes one target address to the object name the constraint
 // store resolves: a bare name, a pin path "<instance>/<pin>", or a
 // single-object get_ports/get_pins/get_nets/get_cells wrapper passed
@@ -2196,15 +2204,60 @@ std::optional<CommandResult> NormalizeTarget(const std::string& raw,
   return std::nullopt;
 }
 
+// True when the token has the shape of a collection handle
+// (eos_coll_ followed by digits). The handle namespace is
+// reserved: such a token is never a plain design-object name, so
+// an unminted one fails fast instead of silently becoming an
+// unresolved target.
+bool IsCollectionHandleShape(const std::string& s) {
+  static const std::string kPrefix = "eos_coll_";
+  if (s.rfind(kPrefix, 0) != 0 || s.size() == kPrefix.size()) {
+    return false;
+  }
+  for (std::size_t i = kPrefix.size(); i < s.size(); ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+  }
+  return true;
+}
+
+// Expands one raw token into target names. A token that is exactly
+// a collection handle expands to its members' SDC-addressable
+// names (design object names; for clock members, every target of
+// the clock). Anything else normalizes to one name as before.
+// This is the one place handle expansion lives, so every SDC
+// command that takes targets accepts handles.
+std::optional<CommandResult> ExpandTargetToken(
+    const std::string& raw, const std::string& cmd,
+    const CommandContext& ctx, std::vector<std::string>& out) {
+  const std::string s = TrimStr(raw);
+  const auto hit = ctx.collections.find(s);
+  if (hit != ctx.collections.end()) {
+    for (const CollectionMember& member : hit->second) {
+      std::string error;
+      if (!MemberTargetNames(ctx, member, out, error)) {
+        return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                   cmd + ": collection " + s + ": " + error);
+      }
+    }
+    return std::nullopt;
+  }
+  if (IsCollectionHandleShape(s)) {
+    return CommandResult::Fail(Diag::kInvalidConfiguration,
+                               cmd + ": unknown collection: " + s);
+  }
+  std::string target;
+  if (auto bad = NormalizeTarget(raw, cmd, target)) return bad;
+  out.push_back(target);
+  return std::nullopt;
+}
+
 // Normalizes every positional into target names, failing on the
-// first bad one.
+// first bad one. Collection handles expand to their members.
 std::optional<CommandResult> NormalizeTargets(
     const std::vector<std::string>& raw, const std::string& cmd,
-    std::vector<std::string>& out) {
+    const CommandContext& ctx, std::vector<std::string>& out) {
   for (const std::string& token : raw) {
-    std::string target;
-    if (auto bad = NormalizeTarget(token, cmd, target)) return bad;
-    out.push_back(target);
+    if (auto bad = ExpandTargetToken(token, cmd, ctx, out)) return bad;
   }
   return std::nullopt;
 }
@@ -3818,6 +3871,884 @@ std::string ReportClockBrace(const std::vector<std::string>& sources) {
     return std::nullopt;
   }
 
+// ---- collections C1-C3 (Immediate unit 11, review items C1-C3) ------
+// The collection contract (docs/collections.md): handles over
+// design objects and clocks, a -filter language, a documented
+// per-class attribute set, algebra, and lifetime rules across
+// restore, rollback, and abort. C4 (path collections as report
+// inputs) is deliberately not built here.
+
+// Clock names in the session: SDC clocks (kClock rows carrying
+// period_ns) and generated clocks (kGeneratedClock rows), deduped,
+// sorted. Construction records (bind_clock: kClock without a
+// period) are not clocks.
+std::vector<std::string> CollectionClockNames(const CommandContext& ctx) {
+  std::set<std::string> names;
+  for (const db::Constraint& c : ctx.project.constraints.all()) {
+    if (c.kind == db::ConstraintKind::kGeneratedClock) {
+      names.insert(c.name);
+    } else if (c.kind == db::ConstraintKind::kClock &&
+               c.Param("period_ns").has_value()) {
+      names.insert(c.name);
+    }
+  }
+  return std::vector<std::string>(names.begin(), names.end());
+}
+
+bool CollectionClockExists(const CommandContext& ctx,
+                           const std::string& name) {
+  for (const std::string& known : CollectionClockNames(ctx)) {
+    if (known == name) return true;
+  }
+  return false;
+}
+
+// The display name of a collection member: the design name, or the
+// clock name. "<deleted>" when the member no longer resolves.
+std::string CollectionDisplayName(const CommandContext& ctx,
+                                  const CollectionMember& member) {
+  if (member.IsClock()) {
+    return CollectionClockExists(ctx, member.clock)
+               ? member.clock
+               : std::string("<deleted>");
+  }
+  if (!ctx.HasDesign()) return std::string("<deleted>");
+  const std::string name = ctx.project.design->NameOf(member.object);
+  return name.empty() ? std::string("<deleted>") : name;
+}
+
+std::string CollectionMemberKey(const CollectionMember& member) {
+  if (member.IsClock()) return "clock:" + member.clock;
+  return "obj:" + std::to_string(member.object.raw());
+}
+
+// Deterministic order: display name, clocks after design objects
+// on a name tie, then raw id. Every collection is stored in this
+// order, so index, compare, and iteration mean the same thing
+// every run. Duplicates are removed.
+void SortCollectionMembers(const CommandContext& ctx,
+                           std::vector<CollectionMember>& members) {
+  std::sort(members.begin(), members.end(),
+            [&ctx](const CollectionMember& a, const CollectionMember& b) {
+              const std::string an = CollectionDisplayName(ctx, a);
+              const std::string bn = CollectionDisplayName(ctx, b);
+              if (an != bn) return an < bn;
+              if (a.IsClock() != b.IsClock()) return !a.IsClock();
+              return a.object.raw() < b.object.raw();
+            });
+  members.erase(std::unique(members.begin(), members.end()),
+                members.end());
+}
+
+// Mints a handle for a member list: sorts, dedups, stores, and
+// returns the handle. Handles are never reused within a context.
+std::string MintCollection(CommandContext& ctx,
+                           std::vector<CollectionMember> members) {
+  SortCollectionMembers(ctx, members);
+  const std::string handle =
+      "eos_coll_" + std::to_string(ctx.next_collection++);
+  ctx.collections[handle] = std::move(members);
+  return handle;
+}
+
+// Mints a handle keeping the caller's order: dedups, keeping the
+// first occurrence, but does not re-sort by name. sort_collection
+// and filter_collection use this so an attribute sort (or a prior
+// sort feeding a filter) survives the mint; every other minter
+// uses MintCollection and its deterministic name order.
+std::string MintCollectionOrdered(CommandContext& ctx,
+                                  std::vector<CollectionMember> members) {
+  std::vector<CollectionMember> kept;
+  for (const CollectionMember& member : members) {
+    if (std::find(kept.begin(), kept.end(), member) == kept.end()) {
+      kept.push_back(member);
+    }
+  }
+  const std::string handle =
+      "eos_coll_" + std::to_string(ctx.next_collection++);
+  ctx.collections[handle] = std::move(kept);
+  return handle;
+}
+
+// The "collection=<handle> count=<n>" payload for a minted handle.
+std::string CollectionPayload(const CommandContext& ctx,
+                              const std::string& handle) {
+  const auto it = ctx.collections.find(handle);
+  const std::size_t count =
+      it == ctx.collections.end() ? 0 : it->second.size();
+  return "collection=" + handle + " count=" + std::to_string(count);
+}
+
+// Whether a cell name denotes a sequential cell (Yosys types):
+// the generic $dff/$adff/$dlatch/$sr families and the tech-mapped
+// $_DFF_/$_DLATCH_/$_SR_ families. Exact names for the generic
+// cells, prefixes for the mapped ones. Liberty DFF cells named by
+// hand are not classified; see docs/collections.md.
+bool IsSequentialCellName(const std::string& name) {
+  static const char* kExact[] = {"$dff",  "$adff",   "$aldff", "$sdff",
+                                 "$dffe", "$adffe",  "$aldffe", "$sdffe",
+                                 "$dffsr", "$adffsr", "$dlatch", "$dlatchsr",
+                                 "$sr"};
+  for (const char* cell : kExact) {
+    if (name == cell) return true;
+  }
+  static const char* kPrefix[] = {"$_DFF_", "$_DLATCH_", "$_SR_"};
+  for (const char* prefix : kPrefix) {
+    if (name.rfind(prefix, 0) == 0) return true;
+  }
+  return false;
+}
+
+const char* CollectionObjectClass(const CollectionMember& member) {
+  if (member.IsClock()) return "clock";
+  switch (member.object.kind()) {
+    case ObjectKind::kCell: return "cell";
+    case ObjectKind::kInstance: return "instance";
+    case ObjectKind::kNet: return "net";
+    case ObjectKind::kPort: return "port";
+    case ObjectKind::kPin: return "pin";
+    default: return "object";
+  }
+}
+
+// The documented per-class attribute set, in the order the
+// unknown-attribute error lists it.
+std::vector<std::string> CollectionClassAttributes(const char* cls) {
+  const std::string kind(cls);
+  std::vector<std::string> attrs = {"name", "full_name", "object_class"};
+  if (kind == "cell") {
+    attrs.push_back("is_macro");
+  } else if (kind == "instance") {
+    attrs.push_back("cell");
+    attrs.push_back("is_register");
+  } else if (kind == "net") {
+    attrs.push_back("fanout");
+  } else if (kind == "port") {
+    attrs.push_back("direction");
+  } else if (kind == "pin") {
+    attrs.push_back("instance");
+    attrs.push_back("pin");
+    attrs.push_back("net");
+  } else if (kind == "clock") {
+    attrs.push_back("period");
+    attrs.push_back("waveform");
+    attrs.push_back("is_generated");
+    attrs.push_back("source");
+    attrs.push_back("master_clock");
+  }
+  return attrs;
+}
+
+std::string CollectionJoinAttributes(
+    const std::vector<std::string>& attrs) {
+  std::string out;
+  for (const std::string& attr : attrs) {
+    if (!out.empty()) out += ", ";
+    out += attr;
+  }
+  return out;
+}
+
+// Reads one intrinsic attribute. Returns nullopt when the attribute
+// does not exist for the member's class; an empty string is a real
+// value (an underivable period, a clock with no master), not a
+// missing attribute. Clock periods and waveforms reuse
+// ReportClockTimingOf, so there is exactly one derivation.
+std::optional<std::string> CollectionIntrinsicAttribute(
+    const CommandContext& ctx, const CollectionMember& member,
+    const std::string& attribute) {
+  const char* cls = CollectionObjectClass(member);
+  const std::string kind(cls);
+  if (attribute == "name" || attribute == "full_name") {
+    return CollectionDisplayName(ctx, member);
+  }
+  if (attribute == "object_class") return std::string(cls);
+  if (member.IsClock()) {
+    if (kind != "clock") return std::nullopt;
+    if (attribute == "period" || attribute == "waveform") {
+      std::set<db::ConstraintId> seen;
+      const std::optional<ReportClockTiming> timing =
+          ReportClockTimingOf(ctx.project.constraints, member.clock, seen);
+      if (!timing.has_value()) return std::string("");
+      if (attribute == "period") return FormatNum(timing->period_ns);
+      return "{" + FormatNum(timing->rise_ns) + " " +
+             FormatNum(timing->fall_ns) + "}";
+    }
+    if (attribute == "is_generated") {
+      for (const db::Constraint& c : ctx.project.constraints.all()) {
+        if (c.name == member.clock &&
+            c.kind == db::ConstraintKind::kGeneratedClock) {
+          return std::string("true");
+        }
+      }
+      return std::string("false");
+    }
+    if (attribute == "source") {
+      return ReportClockSourcesOf(ctx.project.constraints, member.clock);
+    }
+    if (attribute == "master_clock") {
+      for (const db::Constraint& c : ctx.project.constraints.all()) {
+        if (c.name == member.clock &&
+            c.kind == db::ConstraintKind::kGeneratedClock) {
+          const std::optional<std::string> master =
+              c.Param("master_clock");
+          return master.has_value() ? *master : std::string("");
+        }
+      }
+      return std::string("");
+    }
+    return std::nullopt;
+  }
+  if (!ctx.HasDesign()) return std::nullopt;
+  const db::Design& design = *ctx.project.design;
+  const ObjectId id = member.object;
+  if (kind == "cell") {
+    const db::CellRecord* cell = design.FindCell(id);
+    if (cell == nullptr) return std::nullopt;
+    if (attribute == "is_macro") return cell->is_macro ? "true" : "false";
+    return std::nullopt;
+  }
+  if (kind == "instance") {
+    const db::InstanceRecord* inst = design.FindInstance(id);
+    if (inst == nullptr) return std::nullopt;
+    if (attribute == "cell") {
+      const db::CellRecord* cell = design.FindCell(inst->cell);
+      return cell == nullptr ? std::string("") : cell->name;
+    }
+    if (attribute == "is_register") {
+      const db::CellRecord* cell = design.FindCell(inst->cell);
+      return cell != nullptr && IsSequentialCellName(cell->name) ? "true"
+                                                                : "false";
+    }
+    return std::nullopt;
+  }
+  if (kind == "net") {
+    if (design.FindNet(id) == nullptr) return std::nullopt;
+    if (attribute == "fanout") {
+      std::size_t count = 0;
+      for (const ObjectId pin : EnumerateKind(design, ObjectKind::kPin)) {
+        const db::PinRecord* record = design.FindPin(pin);
+        if (record != nullptr && record->net == id) ++count;
+      }
+      return std::to_string(count);
+    }
+    return std::nullopt;
+  }
+  if (kind == "port") {
+    const db::PortRecord* port = design.FindPort(id);
+    if (port == nullptr) return std::nullopt;
+    if (attribute == "direction") {
+      switch (port->direction) {
+        case db::Direction::kInput: return std::string("in");
+        case db::Direction::kOutput: return std::string("out");
+        case db::Direction::kInout: return std::string("inout");
+      }
+    }
+    return std::nullopt;
+  }
+  if (kind == "pin") {
+    const db::PinRecord* pin = design.FindPin(id);
+    if (pin == nullptr) return std::nullopt;
+    if (attribute == "instance") return design.NameOf(pin->instance);
+    if (attribute == "pin") return pin->pin_name;
+    if (attribute == "net") {
+      return pin->net.is_null() ? std::string("")
+                                : design.NameOf(pin->net);
+    }
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+// Reads one attribute for filter and sort evaluation: a user
+// attribute when set, else the intrinsic value, else the empty
+// string. Filters over optional user attributes compare against
+// the empty string instead of failing, so `dont_touch == ""`
+// matches objects never tagged.
+std::string CollectionFilterValue(const CommandContext& ctx,
+                                  const CollectionMember& member,
+                                  const std::string& attribute) {
+  const auto uit = ctx.user_attributes.find(CollectionMemberKey(member));
+  if (uit != ctx.user_attributes.end()) {
+    const auto ait = uit->second.find(attribute);
+    if (ait != uit->second.end()) return ait->second;
+  }
+  const std::optional<std::string> intrinsic =
+      CollectionIntrinsicAttribute(ctx, member, attribute);
+  return intrinsic.has_value() ? *intrinsic : std::string("");
+}
+
+// Whether an attribute name is known anywhere: intrinsic to some
+// class, or set as a user attribute on some member. Filters and
+// sorts fail fast on a name known nowhere, so a typo fails
+// instead of matching nothing.
+bool CollectionKnownAttribute(const CommandContext& ctx,
+                              const std::string& attribute) {
+  static const char* kClasses[] = {"cell", "instance", "net",
+                                   "port", "pin",  "clock"};
+  for (const char* cls : kClasses) {
+    for (const std::string& known : CollectionClassAttributes(cls)) {
+      if (known == attribute) return true;
+    }
+  }
+  for (const auto& pair : ctx.user_attributes) {
+    if (pair.second.count(attribute) != 0) return true;
+  }
+  return false;
+}
+
+// ---- the -filter language (C2) --------------------------------------
+// Grammar: or := and ("||" and)*; and := term ("&&" term)*;
+// term := "(" or ")" | attribute op value; op is ==, !=, <, <=, >,
+// >=, =~, !~. Values are bare tokens or double-quoted strings.
+// Numeric compare when both sides parse as doubles, else string
+// compare for ==, !=, =~, !~; ordering ops on non-numbers fail.
+struct FilterNode {
+  enum class Kind { kAnd, kOr, kCompare } kind = Kind::kCompare;
+  std::string attribute;
+  std::string op;
+  std::string value;
+  std::vector<std::unique_ptr<FilterNode>> children;
+};
+
+struct FilterParser {
+  std::string text;
+  std::size_t pos = 0;
+  std::string error;
+
+  explicit FilterParser(const std::string& expr) : text(expr) {}
+
+  void SkipSpace() {
+    while (pos < text.size() &&
+           (text[pos] == ' ' || text[pos] == '\t')) {
+      ++pos;
+    }
+  }
+
+  bool Take(const char* word) {
+    SkipSpace();
+    const std::size_t len = std::string(word).size();
+    if (text.compare(pos, len, word) != 0) return false;
+    pos += len;
+    return true;
+  }
+
+  std::optional<std::string> TakeToken() {
+    SkipSpace();
+    if (pos >= text.size()) return std::nullopt;
+    if (text[pos] == '"') {
+      ++pos;
+      std::string out;
+      while (pos < text.size() && text[pos] != '"') {
+        if (text[pos] == '\\' && pos + 1 < text.size()) {
+          ++pos;
+        }
+        out += text[pos++];
+      }
+      if (pos >= text.size()) {
+        error = "unterminated quoted string in filter: " + text;
+        return std::nullopt;
+      }
+      ++pos;
+      return out;
+    }
+    const std::size_t start = pos;
+    while (pos < text.size()) {
+      const char c = text[pos];
+      if (c == ' ' || c == '\t' || c == '(' || c == ')' || c == '"' ||
+          c == '<' || c == '>' || c == '=' || c == '!') {
+        break;
+      }
+      if (c == '&' || c == '|') break;
+      ++pos;
+    }
+    if (pos == start) {
+      error = "expected a value in filter: " + text;
+      return std::nullopt;
+    }
+    return text.substr(start, pos - start);
+  }
+
+  std::unique_ptr<FilterNode> ParseOr() {
+    std::unique_ptr<FilterNode> left = ParseAnd();
+    if (left == nullptr) return nullptr;
+    while (true) {
+      if (!Take("||")) return left;
+      std::unique_ptr<FilterNode> right = ParseAnd();
+      if (right == nullptr) return nullptr;
+      std::unique_ptr<FilterNode> node(new FilterNode());
+      node->kind = FilterNode::Kind::kOr;
+      node->children.push_back(std::move(left));
+      node->children.push_back(std::move(right));
+      left = std::move(node);
+    }
+  }
+
+  std::unique_ptr<FilterNode> ParseAnd() {
+    std::unique_ptr<FilterNode> left = ParseTerm();
+    if (left == nullptr) return nullptr;
+    while (true) {
+      if (!Take("&&")) return left;
+      std::unique_ptr<FilterNode> right = ParseTerm();
+      if (right == nullptr) return nullptr;
+      std::unique_ptr<FilterNode> node(new FilterNode());
+      node->kind = FilterNode::Kind::kAnd;
+      node->children.push_back(std::move(left));
+      node->children.push_back(std::move(right));
+      left = std::move(node);
+    }
+  }
+
+  std::unique_ptr<FilterNode> ParseTerm() {
+    SkipSpace();
+    if (pos < text.size() && text[pos] == '(') {
+      ++pos;
+      std::unique_ptr<FilterNode> inner = ParseOr();
+      if (inner == nullptr) return nullptr;
+      SkipSpace();
+      if (pos >= text.size() || text[pos] != ')') {
+        error = "missing closing parenthesis in filter: " + text;
+        return nullptr;
+      }
+      ++pos;
+      return inner;
+    }
+    const std::optional<std::string> attribute = TakeToken();
+    if (!attribute.has_value()) return nullptr;
+    SkipSpace();
+    static const char* kOps[] = {"==", "!=", "<=", ">=", "=~", "!~",
+                                 "<",  ">"};
+    std::string op;
+    for (const char* candidate : kOps) {
+      if (Take(candidate)) {
+        op = candidate;
+        break;
+      }
+    }
+    if (op.empty()) {
+      error = "expected an operator after '" + *attribute +
+              "' in filter: " + text;
+      return nullptr;
+    }
+    const std::optional<std::string> value = TakeToken();
+    if (!value.has_value()) return nullptr;
+    std::unique_ptr<FilterNode> node(new FilterNode());
+    node->kind = FilterNode::Kind::kCompare;
+    node->attribute = *attribute;
+    node->op = op;
+    node->value = *value;
+    return node;
+  }
+};
+
+std::unique_ptr<FilterNode> ParseFilter(const std::string& expr,
+                                        std::string& error) {
+  FilterParser parser(expr);
+  std::unique_ptr<FilterNode> root = parser.ParseOr();
+  if (root == nullptr) {
+    error = parser.error.empty() ? "cannot parse filter: " + expr
+                                 : parser.error;
+    return nullptr;
+  }
+  parser.SkipSpace();
+  if (parser.pos != expr.size()) {
+    error = "unexpected text after filter: " + expr;
+    return nullptr;
+  }
+  return root;
+}
+
+void CollectFilterAttributes(const FilterNode& node,
+                             std::set<std::string>& attrs) {
+  if (node.kind == FilterNode::Kind::kCompare) {
+    attrs.insert(node.attribute);
+    return;
+  }
+  for (const auto& child : node.children) {
+    CollectFilterAttributes(*child, attrs);
+  }
+}
+
+// Evaluates one filter node for one member. Returns false with
+// error set when an ordering comparison meets non-numbers; a plain
+// non-match returns false with error clear.
+bool EvalFilterNode(const FilterNode& node, const CommandContext& ctx,
+                    const CollectionMember& member, std::string& error) {
+  if (node.kind == FilterNode::Kind::kAnd) {
+    for (const auto& child : node.children) {
+      if (!EvalFilterNode(*child, ctx, member, error)) return false;
+      if (!error.empty()) return false;
+    }
+    return true;
+  }
+  if (node.kind == FilterNode::Kind::kOr) {
+    for (const auto& child : node.children) {
+      std::string child_error;
+      if (EvalFilterNode(*child, ctx, member, child_error)) return true;
+      if (!child_error.empty()) {
+        error = child_error;
+        return false;
+      }
+    }
+    return false;
+  }
+  const std::string actual =
+      CollectionFilterValue(ctx, member, node.attribute);
+  double actual_num = 0.0;
+  double value_num = 0.0;
+  const bool numeric = ParseDouble(actual, actual_num) &&
+                       ParseDouble(node.value, value_num);
+  if (node.op == "==") return actual == node.value;
+  if (node.op == "!=") return actual != node.value;
+  if (node.op == "=~") return GlobMatch(node.value, actual);
+  if (node.op == "!~") return !GlobMatch(node.value, actual);
+  if (!numeric) {
+    error = "cannot compare '" + node.attribute + "' as numbers: '" +
+            actual + "' vs '" + node.value + "'";
+    return false;
+  }
+  if (node.op == "<") return actual_num < value_num;
+  if (node.op == "<=") return actual_num <= value_num;
+  if (node.op == ">") return actual_num > value_num;
+  if (node.op == ">=") return actual_num >= value_num;
+  error = "unknown filter operator: " + node.op;
+  return false;
+}
+
+// Applies a parsed filter to a member list, keeping matches in
+// stored order. Returns the failing result when evaluation fails.
+std::optional<CommandResult> ApplyFilter(
+    const CommandContext& ctx, const FilterNode& filter,
+    std::vector<CollectionMember>& members) {
+  std::vector<CollectionMember> kept;
+  for (const CollectionMember& member : members) {
+    std::string error;
+    if (!EvalFilterNode(filter, ctx, member, error)) {
+      if (!error.empty()) {
+        return CommandResult::Fail(Diag::kInvalidConfiguration, error);
+      }
+      continue;
+    }
+    kept.push_back(member);
+  }
+  members = std::move(kept);
+  return std::nullopt;
+}
+
+// ---- get_* option parsing (C1/C2) -----------------------------------
+// Parses [pattern] plus -filter <expr> and -of_objects <handle> in
+// any order. Unknown flags and extra positionals fail fast. The
+// -filter value is one argument: in Tcl it is braced, in the GUI
+// console double-quoted.
+struct GetQueryOptions {
+  std::string pattern = "*";
+  std::optional<std::string> filter;
+  std::optional<std::string> of_objects;
+};
+
+std::optional<CommandResult> ParseGetQuery(
+    const std::vector<std::string>& args, const std::string& cmd,
+    GetQueryOptions& out) {
+  const std::string usage = cmd +
+                            " [-filter <expr>] [-of_objects <collection>] "
+                            "[pattern]";
+  bool saw_pattern = false;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string& arg = args[i];
+    if (arg == "-filter" || arg == "-of_objects") {
+      if (i + 1 >= args.size()) {
+        return CommandResult::Fail(
+            Diag::kInvalidConfiguration,
+            "usage: eos::" + usage + " (" + arg + " needs a value)");
+      }
+      if (arg == "-filter") {
+        if (out.filter.has_value()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::" + usage + " (-filter given twice)");
+        }
+        out.filter = args[++i];
+      } else {
+        if (out.of_objects.has_value()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::" + usage + " (-of_objects given twice)");
+        }
+        out.of_objects = args[++i];
+      }
+      continue;
+    }
+    if (!arg.empty() && arg[0] == '-') {
+      return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                 "usage: eos::" + usage +
+                                     " (unknown option: " + arg + ")");
+    }
+    if (saw_pattern) {
+      return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                 "usage: eos::" + usage +
+                                     " (one pattern only)");
+    }
+    saw_pattern = true;
+    out.pattern = arg;
+  }
+  return std::nullopt;
+}
+
+// ---- traversal (C2) ---------------------------------------------------
+// Expands one -of_objects source member into target members.
+// get_pins: from instances (their pins), nets (pins on them), pins
+// (themselves). get_nets: from pins (their nets), instances (nets
+// of their pins), nets (themselves). get_cells: from pins (owning
+// instances), nets (instances with pins on them), instances
+// (themselves). get_clocks: from ports, nets, pins (clocks bound
+// to those objects). Any other source kind fails fast naming it.
+bool TraverseOne(const CommandContext& ctx, const CollectionMember& source,
+                 const std::string& target, std::vector<CollectionMember>& out,
+                 std::string& error) {
+  if (!ctx.HasDesign()) {
+    error = "no design is open (see eos::create_design)";
+    return false;
+  }
+  const db::Design& design = *ctx.project.design;
+  const char* source_class = CollectionObjectClass(source);
+  if (target == "clock") {
+    if (source.IsClock() || std::string(source_class) == "instance" ||
+        std::string(source_class) == "cell") {
+      error = std::string("cannot traverse from ") + source_class +
+              " to clocks: clocks bind to ports, nets, and pins";
+      return false;
+    }
+    for (const std::string& name : CollectionClockNames(ctx)) {
+      for (const db::Constraint& c : ctx.project.constraints.all()) {
+        if (c.name != name) continue;
+        if (c.kind != db::ConstraintKind::kClock &&
+            c.kind != db::ConstraintKind::kGeneratedClock) {
+          continue;
+        }
+        if (c.bound_object == source.object) {
+          out.push_back(CollectionMember::Clock(name));
+          break;
+        }
+      }
+    }
+    return true;
+  }
+  if (source.IsClock()) {
+    error = "cannot traverse from a clock to " + target +
+            "s: traverse from the clock's bound object instead";
+    return false;
+  }
+  const ObjectId id = source.object;
+  if (target == "pin") {
+    if (std::string(source_class) == "pin") {
+      out.push_back(source);
+      return true;
+    }
+    if (std::string(source_class) == "instance") {
+      for (const ObjectId pin : EnumerateKind(design, ObjectKind::kPin)) {
+        const db::PinRecord* record = design.FindPin(pin);
+        if (record != nullptr && record->instance == id) {
+          out.push_back(CollectionMember::Design(pin));
+        }
+      }
+      return true;
+    }
+    if (std::string(source_class) == "net") {
+      for (const ObjectId pin : EnumerateKind(design, ObjectKind::kPin)) {
+        const db::PinRecord* record = design.FindPin(pin);
+        if (record != nullptr && record->net == id) {
+          out.push_back(CollectionMember::Design(pin));
+        }
+      }
+      return true;
+    }
+    error = std::string("cannot traverse from ") + source_class +
+            " to pins: pins belong to instances and nets";
+    return false;
+  }
+  if (target == "net") {
+    if (std::string(source_class) == "net") {
+      out.push_back(source);
+      return true;
+    }
+    if (std::string(source_class) == "pin") {
+      const db::PinRecord* record = design.FindPin(id);
+      if (record != nullptr && !record->net.is_null()) {
+        out.push_back(CollectionMember::Design(record->net));
+      }
+      return true;
+    }
+    if (std::string(source_class) == "instance") {
+      for (const ObjectId pin : EnumerateKind(design, ObjectKind::kPin)) {
+        const db::PinRecord* record = design.FindPin(pin);
+        if (record != nullptr && record->instance == id &&
+            !record->net.is_null()) {
+          out.push_back(CollectionMember::Design(record->net));
+        }
+      }
+      return true;
+    }
+    error = std::string("cannot traverse from ") + source_class +
+            " to nets: nets connect through pins";
+    return false;
+  }
+  if (target == "instance") {
+    if (std::string(source_class) == "instance") {
+      out.push_back(source);
+      return true;
+    }
+    if (std::string(source_class) == "pin") {
+      const db::PinRecord* record = design.FindPin(id);
+      if (record != nullptr) {
+        out.push_back(CollectionMember::Design(record->instance));
+      }
+      return true;
+    }
+    if (std::string(source_class) == "net") {
+      for (const ObjectId pin : EnumerateKind(design, ObjectKind::kPin)) {
+        const db::PinRecord* record = design.FindPin(pin);
+        if (record != nullptr && record->net == id) {
+          out.push_back(CollectionMember::Design(record->instance));
+        }
+      }
+      return true;
+    }
+    error = std::string("cannot traverse from ") + source_class +
+            " to instances";
+    return false;
+  }
+  error = "unknown traversal target: " + target;
+  return false;
+}
+
+// Applies -of_objects to a source handle: every member must
+// traverse, or the whole call fails naming the member.
+std::optional<CommandResult> ApplyOfObjects(
+    const CommandContext& ctx, const std::string& cmd,
+    const std::string& handle, const std::string& target,
+    std::vector<CollectionMember>& out) {
+  const auto it = ctx.collections.find(handle);
+  if (it == ctx.collections.end()) {
+    return CommandResult::Fail(Diag::kInvalidConfiguration,
+                               "unknown collection: " + handle);
+  }
+  for (const CollectionMember& source : it->second) {
+    std::string error;
+    if (!TraverseOne(ctx, source, target, out, error)) {
+      return CommandResult::Fail(
+          Diag::kInvalidConfiguration,
+          cmd + ": -of_objects member " +
+              CollectionDisplayName(ctx, source) + ": " + error);
+    }
+  }
+  return std::nullopt;
+}
+
+// Applies a parsed -filter and a glob pattern to a member list,
+// in that order. Returns the failing result when the filter is
+// unknown or fails to evaluate.
+std::optional<CommandResult> ApplyPatternAndFilter(
+    const CommandContext& ctx, const GetQueryOptions& opts,
+    std::vector<CollectionMember>& members) {
+  std::vector<CollectionMember> kept;
+  for (const CollectionMember& member : members) {
+    if (GlobMatch(opts.pattern, CollectionDisplayName(ctx, member))) {
+      kept.push_back(member);
+    }
+  }
+  members = std::move(kept);
+  if (!opts.filter.has_value()) return std::nullopt;
+  std::string error;
+  std::unique_ptr<FilterNode> filter = ParseFilter(*opts.filter, error);
+  if (filter == nullptr) {
+    return CommandResult::Fail(Diag::kInvalidConfiguration, error);
+  }
+  std::set<std::string> attrs;
+  CollectFilterAttributes(*filter, attrs);
+  for (const std::string& attr : attrs) {
+    if (!CollectionKnownAttribute(ctx, attr)) {
+      return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                 "unknown attribute in filter: " + attr);
+    }
+  }
+  return ApplyFilter(ctx, *filter, members);
+}
+
+// Resolves an attribute target: a collection handle (which must
+// hold exactly one member) or a design object name (ports, then
+// nets, then instances, then pin paths, the constraint-store
+// order) or a clock name. Returns nullopt with error text when
+// nothing resolves.
+std::optional<CollectionMember> ResolveAttributeTarget(
+    const CommandContext& ctx, const std::string& token,
+    std::string& error) {
+  const auto hit = ctx.collections.find(token);
+  if (hit != ctx.collections.end()) {
+    if (hit->second.size() != 1) {
+      error = "collection " + token + " holds " +
+              std::to_string(hit->second.size()) +
+              " members; an attribute needs exactly one object";
+      return std::nullopt;
+    }
+    return hit->second.front();
+  }
+  if (ctx.HasDesign()) {
+    const db::Design& design = *ctx.project.design;
+    ObjectId id = design.Find(ObjectKind::kPort, token);
+    if (!id.is_null()) return CollectionMember::Design(id);
+    id = design.Find(ObjectKind::kNet, token);
+    if (!id.is_null()) return CollectionMember::Design(id);
+    id = design.Find(ObjectKind::kInstance, token);
+    if (!id.is_null()) return CollectionMember::Design(id);
+    id = design.Find(ObjectKind::kPin, token);
+    if (!id.is_null()) return CollectionMember::Design(id);
+    id = design.Find(ObjectKind::kCell, token);
+    if (!id.is_null()) return CollectionMember::Design(id);
+  }
+  if (CollectionClockExists(ctx, token)) {
+    return CollectionMember::Clock(token);
+  }
+  error = "no such object or clock: " + token;
+  return std::nullopt;
+}
+
+// The SDC-addressable names of one collection member: the design
+// object name, or for a clock member every target of the clock.
+// Returns false with error when the member is deleted or a clock
+// has no target to address.
+bool MemberTargetNames(const CommandContext& ctx,
+                       const CollectionMember& member,
+                       std::vector<std::string>& out, std::string& error) {
+  if (member.IsClock()) {
+    bool any = false;
+    for (const db::Constraint& c : ctx.project.constraints.all()) {
+      if (c.name != member.clock) continue;
+      if (c.kind != db::ConstraintKind::kClock &&
+          c.kind != db::ConstraintKind::kGeneratedClock) {
+        continue;
+      }
+      any = true;
+      if (!c.target_spec.empty()) out.push_back(c.target_spec);
+    }
+    if (!any) {
+      error = "clock " + member.clock + " no longer exists";
+      return false;
+    }
+    if (out.empty()) {
+      error = "clock " + member.clock + " has no target to address";
+      return false;
+    }
+    return true;
+  }
+  const std::string name = CollectionDisplayName(ctx, member);
+  if (name == "<deleted>") {
+    error = "collection holds a deleted object";
+    return false;
+  }
+  out.push_back(name);
+  return true;
+}
+
 }  // namespace
 
 void RegisterCoreCommands(CommandRegistry& registry) {
@@ -4198,7 +5129,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           params.emplace_back("waveform_fall_ns", FormatNum(fall));
         }
         std::vector<std::string> targets;
-        if (auto bad = NormalizeTargets(opts.Positionals(), "create_clock",
+        if (auto bad = NormalizeTargets(opts.Positionals(), "create_clock", ctx,
                                         targets)) {
           return *bad;
         }
@@ -4269,11 +5200,20 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               Diag::kInvalidConfiguration,
               "create_generated_clock: option -source is required");
         }
-        std::string source;
-        if (auto bad = NormalizeTarget(*opts.Value("-source"),
-                                       "create_generated_clock", source)) {
+        std::vector<std::string> sources;
+        if (auto bad = ExpandTargetToken(*opts.Value("-source"),
+                                         "create_generated_clock", ctx,
+                                         sources)) {
           return *bad;
         }
+        if (sources.size() != 1) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "create_generated_clock: -source needs exactly one "
+              "object, the collection holds " +
+                  std::to_string(sources.size()));
+        }
+        const std::string source = sources.front();
         const bool combinational = opts.Has("-combinational");
         if (!combinational && !opts.Seen("-master_clock")) {
           return CommandResult::Fail(
@@ -4311,7 +5251,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         std::vector<std::string> targets;
         if (auto bad = NormalizeTargets(opts.Positionals(),
-                                        "create_generated_clock",
+                                        "create_generated_clock", ctx,
                                         targets)) {
           return *bad;
         }
@@ -4410,7 +5350,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             opts.Has("-high") ? "high" : (opts.Has("-low") ? "low" : "both"));
         std::vector<std::string> targets;
         if (auto bad = NormalizeTargets(opts.Positionals(),
-                                        "set_clock_gating_check",
+                                        "set_clock_gating_check", ctx,
                                         targets)) {
           return *bad;
         }
@@ -4481,11 +5421,11 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         std::vector<std::string> froms;
         std::vector<std::string> tos;
         if (auto bad = NormalizeTargets(opts.Values("-from"),
-                                        "set_data_check", froms)) {
+                                        "set_data_check", ctx, froms)) {
           return *bad;
         }
         if (auto bad = NormalizeTargets(opts.Values("-to"),
-                                        "set_data_check", tos)) {
+                                        "set_data_check", ctx, tos)) {
           return *bad;
         }
         // One row per (from, to) pair, bound to the constrained
@@ -4559,7 +5499,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         std::vector<std::string> raw_targets(
             opts.Positionals().begin() + 1, opts.Positionals().end());
         std::vector<std::string> targets;
-        if (auto bad = NormalizeTargets(raw_targets, "set_min_pulse_width",
+        if (auto bad = NormalizeTargets(raw_targets, "set_min_pulse_width", ctx,
                                         targets)) {
           return *bad;
         }
@@ -4603,7 +5543,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               "-stop_propagation is required");
         }
         std::vector<std::string> targets;
-        if (auto bad = NormalizeTargets(opts.Positionals(), "set_sense",
+        if (auto bad = NormalizeTargets(opts.Positionals(), "set_sense", ctx,
                                         targets)) {
           return *bad;
         }
@@ -4647,7 +5587,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = NeedDesign(ctx)) return *bad;
         std::vector<std::string> targets;
         if (auto bad = NormalizeTargets(opts.Positionals(),
-                                        "set_ideal_network", targets)) {
+                                        "set_ideal_network", ctx, targets)) {
           return *bad;
         }
         if (targets.empty()) {
@@ -4707,7 +5647,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         std::vector<std::string> raw_targets(
             opts.Positionals().begin() + 1, opts.Positionals().end());
         std::vector<std::string> targets;
-        if (auto bad = NormalizeTargets(raw_targets, "set_ideal_latency",
+        if (auto bad = NormalizeTargets(raw_targets, "set_ideal_latency", ctx,
                                         targets)) {
           return *bad;
         }
@@ -4773,7 +5713,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         std::vector<std::string> raw_targets(
             opts.Positionals().begin() + 1, opts.Positionals().end());
         std::vector<std::string> targets;
-        if (auto bad = NormalizeTargets(raw_targets, "set_ideal_transition",
+        if (auto bad = NormalizeTargets(raw_targets, "set_ideal_transition", ctx,
                                         targets)) {
           return *bad;
         }
@@ -4859,16 +5799,16 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         std::vector<std::string> froms;
         std::vector<std::string> tos;
         std::vector<std::string> throughs;
-        if (auto bad = NormalizeTargets(opts.Values("-from"), "group_path",
+        if (auto bad = NormalizeTargets(opts.Values("-from"), "group_path", ctx,
                                         froms)) {
           return *bad;
         }
-        if (auto bad = NormalizeTargets(opts.Values("-to"), "group_path",
+        if (auto bad = NormalizeTargets(opts.Values("-to"), "group_path", ctx,
                                         tos)) {
           return *bad;
         }
         if (auto bad = NormalizeTargets(opts.Values("-through"),
-                                        "group_path", throughs)) {
+                                        "group_path", ctx, throughs)) {
           return *bad;
         }
         const auto join = [](const std::vector<std::string>& items) {
@@ -4942,7 +5882,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         std::vector<std::string> raw_targets(
             opts.Positionals().begin() + 1, opts.Positionals().end());
         std::vector<std::string> targets;
-        if (auto bad = NormalizeTargets(raw_targets, "set_max_time_borrow",
+        if (auto bad = NormalizeTargets(raw_targets, "set_max_time_borrow", ctx,
                                         targets)) {
           return *bad;
         }
@@ -5284,32 +6224,39 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(payload);
       });
 
-  add("get_objects", "get_objects <cell|instance|net|port|pin> <pattern>",
+  add("get_objects",
+      "get_objects <cell|instance|net|port|pin|clock> <pattern>",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
         if (auto bad = ExpectCount(
                 args, 2,
-                "get_objects <cell|instance|net|port|pin> <pattern>")) {
+                "get_objects <cell|instance|net|port|pin|clock> "
+                "<pattern>")) {
           return *bad;
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
-        const auto kind = ParseObjectKind(args[0]);
-        if (!kind.has_value()) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
-                                     "unknown object kind: " + args[0]);
-        }
-        std::vector<ObjectId> members;
-        for (const ObjectId id : EnumerateKind(*ctx.project.design, *kind)) {
-          if (GlobMatch(args[1], ctx.project.design->NameOf(id))) {
-            members.push_back(id);
+        std::vector<CollectionMember> members;
+        if (args[0] == "clock") {
+          for (const std::string& name : CollectionClockNames(ctx)) {
+            if (GlobMatch(args[1], name)) {
+              members.push_back(CollectionMember::Clock(name));
+            }
+          }
+        } else {
+          const auto kind = ParseObjectKind(args[0]);
+          if (!kind.has_value()) {
+            return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                       "unknown object kind: " + args[0]);
+          }
+          for (const ObjectId id :
+               EnumerateKind(*ctx.project.design, *kind)) {
+            if (GlobMatch(args[1], ctx.project.design->NameOf(id))) {
+              members.push_back(CollectionMember::Design(id));
+            }
           }
         }
-        const std::string handle =
-            "eos_coll_" + std::to_string(ctx.next_collection++);
-        const std::size_t count = members.size();
-        ctx.collections[handle] = std::move(members);
-        return CommandResult::Ok("collection=" + handle +
-                                 " count=" + std::to_string(count));
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
       });
 
   add("sizeof_collection", "sizeof_collection <collection>",
@@ -5341,13 +6288,721 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                                      "unknown collection: " + args[0]);
         }
         std::string out;
-        for (const ObjectId id : it->second) {
+        for (const CollectionMember& member : it->second) {
           if (!out.empty()) out += "\n";
-          const std::string name =
-              ctx.HasDesign() ? ctx.project.design->NameOf(id) : std::string();
-          out += name.empty() ? std::string("<deleted>") : name;
+          out += CollectionDisplayName(ctx, member);
         }
         return CommandResult::Ok(out);
+      });
+
+  // ---- collections C1: vocabulary -------------------------------------
+  // get_cells returns instances (PrimeTime semantics, and the
+  // meaning the SDC layer already uses when it renders an instance
+  // as [get_cells <name>]). Library-cell masters are queried with
+  // get_objects cell. All get_* commands take an optional glob
+  // pattern (default "*"), -filter <expr>, and -of_objects
+  // <collection> for traversal.
+  add("get_cells",
+      "get_cells [-filter <expr>] [-of_objects <collection>] [pattern]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        GetQueryOptions opts;
+        if (auto bad = ParseGetQuery(args, "get_cells", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        std::vector<CollectionMember> members;
+        if (opts.of_objects.has_value()) {
+          if (auto bad = ApplyOfObjects(ctx, "get_cells",
+                                        *opts.of_objects, "instance",
+                                        members)) {
+            return *bad;
+          }
+        } else {
+          for (const ObjectId id : EnumerateKind(
+                   *ctx.project.design, ObjectKind::kInstance)) {
+            members.push_back(CollectionMember::Design(id));
+          }
+        }
+        if (auto bad = ApplyPatternAndFilter(ctx, opts, members)) {
+          return *bad;
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  add("get_nets",
+      "get_nets [-filter <expr>] [-of_objects <collection>] [pattern]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        GetQueryOptions opts;
+        if (auto bad = ParseGetQuery(args, "get_nets", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        std::vector<CollectionMember> members;
+        if (opts.of_objects.has_value()) {
+          if (auto bad = ApplyOfObjects(ctx, "get_nets",
+                                        *opts.of_objects, "net", members)) {
+            return *bad;
+          }
+        } else {
+          for (const ObjectId id : EnumerateKind(*ctx.project.design,
+                                                  ObjectKind::kNet)) {
+            members.push_back(CollectionMember::Design(id));
+          }
+        }
+        if (auto bad = ApplyPatternAndFilter(ctx, opts, members)) {
+          return *bad;
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  add("get_pins",
+      "get_pins [-filter <expr>] [-of_objects <collection>] [pattern]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        GetQueryOptions opts;
+        if (auto bad = ParseGetQuery(args, "get_pins", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        std::vector<CollectionMember> members;
+        if (opts.of_objects.has_value()) {
+          if (auto bad = ApplyOfObjects(ctx, "get_pins",
+                                        *opts.of_objects, "pin", members)) {
+            return *bad;
+          }
+        } else {
+          for (const ObjectId id : EnumerateKind(*ctx.project.design,
+                                                  ObjectKind::kPin)) {
+            members.push_back(CollectionMember::Design(id));
+          }
+        }
+        if (auto bad = ApplyPatternAndFilter(ctx, opts, members)) {
+          return *bad;
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  add("get_ports",
+      "get_ports [-filter <expr>] [pattern]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        GetQueryOptions opts;
+        if (auto bad = ParseGetQuery(args, "get_ports", opts)) {
+          return *bad;
+        }
+        if (opts.of_objects.has_value()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "get_ports does not traverse -of_objects: ports have no "
+              "fanin or fanout in the flat model");
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        std::vector<CollectionMember> members;
+        for (const ObjectId id : EnumerateKind(*ctx.project.design,
+                                                ObjectKind::kPort)) {
+          members.push_back(CollectionMember::Design(id));
+        }
+        if (auto bad = ApplyPatternAndFilter(ctx, opts, members)) {
+          return *bad;
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  add("get_clocks",
+      "get_clocks [-filter <expr>] [-of_objects <collection>] [pattern]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        GetQueryOptions opts;
+        if (auto bad = ParseGetQuery(args, "get_clocks", opts)) {
+          return *bad;
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        std::vector<CollectionMember> members;
+        if (opts.of_objects.has_value()) {
+          if (auto bad = ApplyOfObjects(ctx, "get_clocks",
+                                        *opts.of_objects, "clock",
+                                        members)) {
+            return *bad;
+          }
+        } else {
+          for (const std::string& name : CollectionClockNames(ctx)) {
+            members.push_back(CollectionMember::Clock(name));
+          }
+        }
+        if (auto bad = ApplyPatternAndFilter(ctx, opts, members)) {
+          return *bad;
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  add("all_inputs", "all_inputs",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "all_inputs")) return *bad;
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        std::vector<CollectionMember> members;
+        for (const ObjectId id : EnumerateKind(*ctx.project.design,
+                                                ObjectKind::kPort)) {
+          const db::PortRecord* port = ctx.project.design->FindPort(id);
+          if (port != nullptr &&
+              port->direction == db::Direction::kInput) {
+            members.push_back(CollectionMember::Design(id));
+          }
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  add("all_outputs", "all_outputs",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "all_outputs")) return *bad;
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        std::vector<CollectionMember> members;
+        for (const ObjectId id : EnumerateKind(*ctx.project.design,
+                                                ObjectKind::kPort)) {
+          const db::PortRecord* port = ctx.project.design->FindPort(id);
+          if (port != nullptr &&
+              port->direction == db::Direction::kOutput) {
+            members.push_back(CollectionMember::Design(id));
+          }
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  add("all_registers", "all_registers",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "all_registers")) return *bad;
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        std::vector<CollectionMember> members;
+        for (const ObjectId id : EnumerateKind(
+                 *ctx.project.design, ObjectKind::kInstance)) {
+          const db::InstanceRecord* inst =
+              ctx.project.design->FindInstance(id);
+          if (inst == nullptr) continue;
+          const db::CellRecord* cell =
+              ctx.project.design->FindCell(inst->cell);
+          if (cell != nullptr && IsSequentialCellName(cell->name)) {
+            members.push_back(CollectionMember::Design(id));
+          }
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  add("all_clocks", "all_clocks",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "all_clocks")) return *bad;
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        std::vector<CollectionMember> members;
+        for (const std::string& name : CollectionClockNames(ctx)) {
+          members.push_back(CollectionMember::Clock(name));
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  // ---- collections C2: filter and attributes --------------------------
+  add("filter_collection", "filter_collection <collection> <expr>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (args.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::filter_collection <collection> <expr>");
+        }
+        const auto it = ctx.collections.find(args[0]);
+        if (it == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[0]);
+        }
+        // The expression is the rest of the line, so a console
+        // caller may write it unquoted and a Tcl caller braced.
+        std::string expr;
+        for (std::size_t i = 1; i < args.size(); ++i) {
+          if (!expr.empty()) expr += " ";
+          expr += args[i];
+        }
+        std::string error;
+        std::unique_ptr<FilterNode> filter = ParseFilter(expr, error);
+        if (filter == nullptr) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration, error);
+        }
+        std::set<std::string> attrs;
+        CollectFilterAttributes(*filter, attrs);
+        for (const std::string& attr : attrs) {
+          if (!CollectionKnownAttribute(ctx, attr)) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "unknown attribute in filter: " + attr);
+          }
+        }
+        std::vector<CollectionMember> members = it->second;
+        if (auto bad = ApplyFilter(ctx, *filter, members)) return *bad;
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollectionOrdered(ctx, std::move(members))));
+      });
+
+  add("sort_collection",
+      "sort_collection <collection> <attribute> [-descending]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (args.size() < 2 || args.size() > 3) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::sort_collection <collection> <attribute> "
+              "[-descending]");
+        }
+        bool descending = false;
+        if (args.size() == 3) {
+          if (args[2] != "-descending") {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "usage: eos::sort_collection <collection> <attribute> "
+                "[-descending] (unknown option: " +
+                    args[2] + ")");
+          }
+          descending = true;
+        }
+        const auto it = ctx.collections.find(args[0]);
+        if (it == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[0]);
+        }
+        if (!CollectionKnownAttribute(ctx, args[1])) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown attribute: " + args[1]);
+        }
+        std::vector<CollectionMember> members = it->second;
+        bool numeric = true;
+        for (const CollectionMember& member : members) {
+          double ignored = 0.0;
+          if (!ParseDouble(
+                  CollectionFilterValue(ctx, member, args[1]), ignored)) {
+            numeric = false;
+            break;
+          }
+        }
+        const std::string attribute = args[1];
+        std::stable_sort(members.begin(), members.end(),
+                         [&ctx, &attribute, numeric](
+                             const CollectionMember& a,
+                             const CollectionMember& b) {
+                           const std::string av =
+                               CollectionFilterValue(ctx, a, attribute);
+                           const std::string bv =
+                               CollectionFilterValue(ctx, b, attribute);
+                           if (numeric) {
+                             double an = 0.0;
+                             double bn = 0.0;
+                             ParseDouble(av, an);
+                             ParseDouble(bv, bn);
+                             return an < bn;
+                           }
+                           return av < bv;
+                         });
+        if (descending) {
+          // Reverse the comparison, not the list, so ties keep
+          // their stored order instead of flipping with it.
+          std::stable_sort(members.begin(), members.end(),
+                           [&ctx, &attribute, numeric](
+                               const CollectionMember& a,
+                               const CollectionMember& b) {
+                             const std::string av =
+                                 CollectionFilterValue(ctx, a, attribute);
+                             const std::string bv =
+                                 CollectionFilterValue(ctx, b, attribute);
+                             if (numeric) {
+                               double an = 0.0;
+                               double bn = 0.0;
+                               ParseDouble(av, an);
+                               ParseDouble(bv, bn);
+                               return an > bn;
+                             }
+                             return av > bv;
+                           });
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollectionOrdered(ctx, std::move(members))));
+      });
+
+  add("get_attribute", "get_attribute <object> <attribute>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(
+                args, 2, "get_attribute <object> <attribute>")) {
+          return *bad;
+        }
+        std::string error;
+        const std::optional<CollectionMember> member =
+            ResolveAttributeTarget(ctx, args[0], error);
+        if (!member.has_value()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration, error);
+        }
+        if (CollectionDisplayName(ctx, *member) == "<deleted>") {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "object no longer exists: " + args[0]);
+        }
+        const auto uit =
+            ctx.user_attributes.find(CollectionMemberKey(*member));
+        if (uit != ctx.user_attributes.end()) {
+          const auto ait = uit->second.find(args[1]);
+          if (ait != uit->second.end()) {
+            return CommandResult::Ok(
+                "object=" + CollectionDisplayName(ctx, *member) +
+                " attribute=" + args[1] + " value=" + ait->second);
+          }
+        }
+        const std::optional<std::string> value =
+            CollectionIntrinsicAttribute(ctx, *member, args[1]);
+        if (!value.has_value()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "unknown attribute '" + args[1] + "' for class " +
+                  CollectionObjectClass(*member) + " (attributes: " +
+                  CollectionJoinAttributes(CollectionClassAttributes(
+                      CollectionObjectClass(*member))) +
+                  ")");
+        }
+        return CommandResult::Ok(
+            "object=" + CollectionDisplayName(ctx, *member) +
+            " attribute=" + args[1] + " value=" + *value);
+      });
+
+  add("set_attribute", "set_attribute <object> <attribute> <value>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(
+                args, 3, "set_attribute <object> <attribute> <value>")) {
+          return *bad;
+        }
+        std::string error;
+        const std::optional<CollectionMember> member =
+            ResolveAttributeTarget(ctx, args[0], error);
+        if (!member.has_value()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration, error);
+        }
+        if (CollectionDisplayName(ctx, *member) == "<deleted>") {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "object no longer exists: " + args[0]);
+        }
+        if (CollectionIntrinsicAttribute(ctx, *member, args[1])
+                .has_value()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "attribute '" + args[1] + "' is read-only for class " +
+                  CollectionObjectClass(*member));
+        }
+        ctx.user_attributes[CollectionMemberKey(*member)][args[1]] =
+            args[2];
+        return CommandResult::Ok(
+            "object=" + CollectionDisplayName(ctx, *member) +
+            " attribute=" + args[1] + " value=" + args[2]);
+      });
+
+  // ---- collections C3: algebra and lifetime ----------------------------
+  add("add_to_collection",
+      "add_to_collection <collection> <collection>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(
+                args, 2, "add_to_collection <collection> <collection>")) {
+          return *bad;
+        }
+        const auto first = ctx.collections.find(args[0]);
+        const auto second = ctx.collections.find(args[1]);
+        if (first == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[0]);
+        }
+        if (second == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[1]);
+        }
+        std::vector<CollectionMember> members = first->second;
+        std::set<std::string> seen;
+        for (const CollectionMember& member : members) {
+          seen.insert(CollectionMemberKey(member));
+        }
+        for (const CollectionMember& member : second->second) {
+          if (seen.insert(CollectionMemberKey(member)).second) {
+            members.push_back(member);
+          }
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  add("append_to_collection",
+      "append_to_collection <collection> <collection>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(
+                args, 2,
+                "append_to_collection <collection> <collection>")) {
+          return *bad;
+        }
+        const auto first = ctx.collections.find(args[0]);
+        const auto second = ctx.collections.find(args[1]);
+        if (first == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[0]);
+        }
+        if (second == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[1]);
+        }
+        std::vector<CollectionMember> members = first->second;
+        std::set<std::string> seen;
+        for (const CollectionMember& member : members) {
+          seen.insert(CollectionMemberKey(member));
+        }
+        for (const CollectionMember& member : second->second) {
+          if (seen.insert(CollectionMemberKey(member)).second) {
+            members.push_back(member);
+          }
+        }
+        SortCollectionMembers(ctx, members);
+        first->second = std::move(members);
+        return CommandResult::Ok(
+            "collection=" + args[0] +
+            " count=" + std::to_string(first->second.size()));
+      });
+
+  add("remove_from_collection",
+      "remove_from_collection [-intersect] <collection> <collection>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        bool intersect = false;
+        std::vector<std::string> handles;
+        for (const std::string& arg : args) {
+          if (arg == "-intersect") {
+            if (intersect) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "usage: eos::remove_from_collection [-intersect] "
+                  "<collection> <collection> (-intersect given twice)");
+            }
+            intersect = true;
+            continue;
+          }
+          if (!arg.empty() && arg[0] == '-') {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "usage: eos::remove_from_collection [-intersect] "
+                "<collection> <collection> (unknown option: " +
+                    arg + ")");
+          }
+          handles.push_back(arg);
+        }
+        if (handles.size() != 2) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::remove_from_collection [-intersect] "
+              "<collection> <collection>");
+        }
+        const auto first = ctx.collections.find(handles[0]);
+        const auto second = ctx.collections.find(handles[1]);
+        if (first == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + handles[0]);
+        }
+        if (second == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + handles[1]);
+        }
+        std::set<std::string> remove;
+        for (const CollectionMember& member : second->second) {
+          remove.insert(CollectionMemberKey(member));
+        }
+        std::vector<CollectionMember> members;
+        for (const CollectionMember& member : first->second) {
+          const bool in_second =
+              remove.count(CollectionMemberKey(member)) != 0;
+          if (in_second == intersect) members.push_back(member);
+        }
+        return CommandResult::Ok(CollectionPayload(
+            ctx, MintCollection(ctx, std::move(members))));
+      });
+
+  add("compare_collections",
+      "compare_collections <collection> <collection>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(
+                args, 2,
+                "compare_collections <collection> <collection>")) {
+          return *bad;
+        }
+        const auto first = ctx.collections.find(args[0]);
+        const auto second = ctx.collections.find(args[1]);
+        if (first == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[0]);
+        }
+        if (second == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[1]);
+        }
+        std::set<std::string> keys_first;
+        std::set<std::string> keys_second;
+        for (const CollectionMember& member : first->second) {
+          keys_first.insert(CollectionMemberKey(member));
+        }
+        for (const CollectionMember& member : second->second) {
+          keys_second.insert(CollectionMemberKey(member));
+        }
+        std::size_t common = 0;
+        for (const std::string& key : keys_first) {
+          if (keys_second.count(key) != 0) ++common;
+        }
+        const bool equal = keys_first == keys_second;
+        return CommandResult::Ok(
+            "equal=" + std::string(equal ? "1" : "0") +
+            " count1=" + std::to_string(first->second.size()) +
+            " count2=" + std::to_string(second->second.size()) +
+            " common=" + std::to_string(common) +
+            " only1=" + std::to_string(keys_first.size() - common) +
+            " only2=" + std::to_string(keys_second.size() - common));
+      });
+
+  add("index_collection", "index_collection <collection> <index>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(
+                args, 2, "index_collection <collection> <index>")) {
+          return *bad;
+        }
+        const auto it = ctx.collections.find(args[0]);
+        if (it == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[0]);
+        }
+        std::uint64_t index = 0;
+        if (!ParseU64(args[1], index)) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "not an index: " + args[1]);
+        }
+        if (index >= it->second.size()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "index " + args[1] + " out of range for collection " +
+                  args[0] + " with " +
+                  std::to_string(it->second.size()) + " members");
+        }
+        const CollectionMember member = it->second[static_cast<std::size_t>(index)];
+        const std::string name = CollectionDisplayName(ctx, member);
+        return CommandResult::Ok(
+            CollectionPayload(ctx, MintCollection(ctx, {member})) +
+            " object=" + name);
+      });
+
+  add("query_objects", "query_objects <collection> [-limit <n>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (args.empty() || args.size() > 3) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::query_objects <collection> [-limit <n>]");
+        }
+        const auto it = ctx.collections.find(args[0]);
+        if (it == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[0]);
+        }
+        std::uint64_t limit = it->second.size();
+        bool limited = false;
+        if (args.size() == 3) {
+          if (args[1] != "-limit") {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "usage: eos::query_objects <collection> [-limit <n>] "
+                "(unknown option: " +
+                    args[1] + ")");
+          }
+          if (!ParseU64(args[2], limit)) {
+            return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                       "not a limit: " + args[2]);
+          }
+          limited = true;
+        } else if (args.size() == 2) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "usage: eos::query_objects <collection> [-limit <n>] "
+              "(unknown option: " +
+                  args[1] + ")");
+        }
+        std::string out;
+        std::size_t shown = 0;
+        for (const CollectionMember& member : it->second) {
+          if (shown >= limit) break;
+          if (!out.empty()) out += "\n";
+          out += CollectionDisplayName(ctx, member);
+          ++shown;
+        }
+        if (limited && it->second.size() > limit) {
+          if (!out.empty()) out += "\n";
+          out += "truncated=1 shown=" + std::to_string(shown) +
+                 " total=" + std::to_string(it->second.size());
+        }
+        return CommandResult::Ok(out);
+      });
+
+  add("foreach_in_collection",
+      "foreach_in_collection <collection> <var> <body>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(
+                args, 3,
+                "foreach_in_collection <collection> <var> <body>")) {
+          return *bad;
+        }
+        const auto it = ctx.collections.find(args[0]);
+        if (it == ctx.collections.end()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "unknown collection: " + args[0]);
+        }
+        if (args[1].empty() ||
+            args[1].find_first_of(" \t\r\n") != std::string::npos) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "not a variable name: " + args[1]);
+        }
+        if (args[2].empty()) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     "empty body");
+        }
+        if (!ctx.eval_script) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "foreach_in_collection needs a script host (the Tcl "
+              "shell): the GUI console runs one registry command per "
+              "line and cannot evaluate a script body");
+        }
+        const std::vector<CollectionMember> members = it->second;
+        for (const CollectionMember& member : members) {
+          const std::string name = CollectionDisplayName(ctx, member);
+          std::string error;
+          if (!ctx.eval_script(args[1], name, args[2], error)) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "foreach_in_collection failed on " + name + ": " + error);
+          }
+        }
+        return CommandResult::Ok("iterations=" +
+                                 std::to_string(members.size()));
       });
 
   add("begin_transaction", "begin_transaction <label>",
@@ -5553,12 +7208,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             ctx.project.LoadProject(args[0]);
         if (!info.ok()) return FromStatus(info.status());
         // Collections named objects of the previous project state;
-        // they do not survive a restore. Report bindings are project
+        // they do not survive a restore. User attributes name the
+        // same objects and go with them. Report bindings are project
         // state: the restored project carries the bindings its file
         // held, linked to its ledger, with any binding whose
         // artifact the ledger lacks already dropped and counted.
         ctx.collections.clear();
         ctx.next_collection = 1;
+        ctx.user_attributes.clear();
         ctx.timing = CommandContext::TimingSession();
         ctx.synth = CommandContext::SynthSession();
         return CommandResult::Ok(
