@@ -55,6 +55,7 @@
 #include "Transition.hh"
 #include "Units.hh"
 #include "VisitPathEnds.hh"
+#include "search/CheckMinPeriods.hh"
 #include "search/CheckMinPulseWidths.hh"
 #include "search/GatedClk.hh"
 
@@ -1103,6 +1104,86 @@ struct StaEngine::Impl {
     }
   }
 
+  // The clocks of the scenario (Immediate unit 10, review item
+  // T8): the SDC of the first mode lists the clocks the engine
+  // read, each with its period in seconds, converted to
+  // nanoseconds. Sorted by name so the order is deterministic.
+  // Note the bulk minimum-period check was not used here: it
+  // only reports Liberty minimum_period constraints and SDF
+  // annotations, none of which exist in EOS fixtures, so it
+  // returns no rows; the per-clock minimum period is a derived
+  // value, period minus the clock group's worst setup slack,
+  // and that derivation lives in the timing service.
+  Result<std::vector<ClockPeriod>> ClockPeriods() {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      const sta::ModeSeq& modes = sta->modes();
+      if (modes.empty()) {
+        return Status::Error(ErrorCode::kInvalidState,
+                             "the timing session has no scenario");
+      }
+      const sta::Sdc* sdc = (*modes.begin())->sdc();
+      std::vector<ClockPeriod> out;
+      for (const sta::Clock* clock : sdc->clocks()) {
+        if (clock == nullptr) continue;
+        out.push_back(ClockPeriod{clock->name(), ToNs(clock->period())});
+      }
+      std::sort(out.begin(), out.end(),
+                [](const ClockPeriod& a, const ClockPeriod& b) {
+                  return a.name < b.name;
+                });
+      return out;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
+  // The minimum-pulse-width checks (Immediate unit 10, review
+  // item T8): the upstream bulk check, constructed directly
+  // exactly as the coverage query does, after ensuring the clock
+  // arrivals the check needs. One row per evaluated pulse; the
+  // opening edge names the pulse (rise opens the high pulse,
+  // fall the low pulse). The bulk check returns the rows worst
+  // slack first; the facade copies the pin, transition, width,
+  // minimum width and slack out before returning, sorted again
+  // with the pin and transition as tie-breakers.
+  Result<std::vector<MinPulseWidthCheck>> MinPulseWidthChecks() {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      sta->ensureClkArrivals();
+      sta::CheckMinPulseWidths checker(sta);
+      const sta::MinPulseWidthCheckSeq& checks = checker.check(
+          nullptr, std::numeric_limits<std::size_t>::max(), false,
+          sta->makeSceneSeq(nullptr));
+      std::vector<MinPulseWidthCheck> out;
+      for (const sta::MinPulseWidthCheck& check : checks) {
+        if (check.isNull()) continue;
+        const sta::Pin* pin = check.pin(sta);
+        if (pin == nullptr) continue;
+        out.push_back(MinPulseWidthCheck{
+            sta->network()->pathName(pin),
+            check.openTransition(sta) == sta::RiseFall::rise()
+                ? "rise"
+                : "fall",
+            ToNs(check.width(sta)), ToNs(check.minWidth(sta)),
+            ToNs(check.slack(sta))});
+      }
+      std::sort(out.begin(), out.end(),
+                [](const MinPulseWidthCheck& a,
+                   const MinPulseWidthCheck& b) {
+                  if (a.slack_ns != b.slack_ns)
+                    return a.slack_ns < b.slack_ns;
+                  if (a.pin != b.pin) return a.pin < b.pin;
+                  return a.transition < b.transition;
+                });
+      return out;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
   // The cell census: one row per Liberty cell type over the leaf
   // instances, in the same visit order as VisitAllPins, so a
   // hierarchical instance's leaves are counted exactly once and
@@ -1241,6 +1322,14 @@ Result<PathReport> StaEngine::WorstPathReport(
 Result<std::vector<PathGroupSlack>> StaEngine::PathGroupSlacks(
     CheckKind kind) {
   return impl_->PathGroupSlacks(kind == CheckKind::kHold);
+}
+
+Result<std::vector<ClockPeriod>> StaEngine::ClockPeriods() {
+  return impl_->ClockPeriods();
+}
+
+Result<std::vector<MinPulseWidthCheck>> StaEngine::MinPulseWidthChecks() {
+  return impl_->MinPulseWidthChecks();
 }
 
 Result<CellAreaResult> StaEngine::CellArea() {

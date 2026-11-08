@@ -4,6 +4,7 @@
 // with its own corner's Liberty and its own parasitics).
 #include "eos/analysis/timing.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <set>
 #include <utility>
@@ -335,6 +336,122 @@ Result<QorResult> QorScene(const VerilogDesign& design,
   return out;
 }
 
+// One scene's check-specific data (Immediate unit 10, review
+// item T8): the per-endpoint slacks, the per-group endpoints
+// and the worst path of each group's worst endpoint, the
+// minimum-period and minimum-pulse-width checks, and the
+// analysis-coverage pins. The worst path of a group comes from
+// the group's worst endpoint, which the groups list worst
+// first; the endpoint carries a constrained path end for the
+// kind by construction, so the worst-path query cannot fail
+// for it.
+Result<CheckReportsResult> CheckReportsScene(
+    const VerilogDesign& design, const SceneAnalysis& scene) {
+  StaEngine engine;
+  const Status prepared = PrepareEngine(engine, design, scene);
+  if (!prepared.ok()) return prepared;
+  CheckReportsResult out;
+  out.scenario = scene.scenario;
+  const auto add_endpoints =
+      [&out, &engine, &scene](
+          std::vector<EndpointSlack>& endpoints_out, CheckKind kind)
+      -> Status {
+    Result<std::vector<EndpointSlack>> endpoints =
+        engine.EndpointsBySlack(kind);
+    if (!endpoints.ok()) return SceneError(scene, endpoints.status());
+    endpoints_out = std::move(endpoints).value();
+    return Status::Ok();
+  };
+  Status status =
+      add_endpoints(out.setup_endpoints, CheckKind::kSetup);
+  if (!status.ok()) return status;
+  status = add_endpoints(out.hold_endpoints, CheckKind::kHold);
+  if (!status.ok()) return status;
+  const auto add_groups =
+      [&out, &engine, &scene](
+          std::vector<PathGroupResult>& groups_out,
+          std::vector<GroupWorstPath>& paths_out, CheckKind kind)
+      -> Status {
+    Result<std::vector<PathGroupSlack>> groups =
+        engine.PathGroupSlacks(kind);
+    if (!groups.ok()) return SceneError(scene, groups.status());
+    for (PathGroupSlack& group : groups.value()) {
+      if (group.endpoints.empty()) continue;
+      const std::string name = group.name;
+      Result<PathReport> path =
+          engine.WorstPathReport(kind, group.endpoints[0].pin);
+      if (!path.ok()) return SceneError(scene, path.status());
+      paths_out.push_back(
+          GroupWorstPath{name, std::move(path).value()});
+      groups_out.push_back(PathGroupResult{
+          std::move(group.name), std::move(group.endpoints)});
+    }
+    return Status::Ok();
+  };
+  status = add_groups(out.setup_groups, out.setup_group_paths,
+                      CheckKind::kSetup);
+  if (!status.ok()) return status;
+  status = add_groups(out.hold_groups, out.hold_group_paths,
+                      CheckKind::kHold);
+  if (!status.ok()) return status;
+  // The derived minimum periods (Immediate unit 10, review
+  // item T8): per clock, period minus the worst setup slack of
+  // the clock's setup group; per endpoint, period minus that
+  // endpoint's setup slack. Only groups named after a clock
+  // contribute: a named group_path is not a clock, and a clock
+  // with no setup group has no row. Setup only: hold slack
+  // does not depend on the period.
+  Result<std::vector<ClockPeriod>> clock_periods =
+      engine.ClockPeriods();
+  if (!clock_periods.ok()) {
+    return SceneError(scene, clock_periods.status());
+  }
+  for (const ClockPeriod& clock : clock_periods.value()) {
+    const auto group = std::find_if(
+        out.setup_groups.begin(), out.setup_groups.end(),
+        [&clock](const PathGroupResult& g) {
+          return g.name == clock.name;
+        });
+    if (group == out.setup_groups.end() || group->endpoints.empty()) {
+      continue;
+    }
+    const double worst = group->endpoints[0].slack_ns;
+    out.min_period_clocks.push_back(MinPeriodClockRow{
+        clock.name, clock.period_ns, clock.period_ns - worst, worst,
+        group->endpoints[0].pin});
+    for (const EndpointSlack& endpoint : group->endpoints) {
+      out.min_period_endpoints.push_back(MinPeriodEndpointRow{
+          endpoint.pin, clock.name, clock.period_ns,
+          clock.period_ns - endpoint.slack_ns, endpoint.slack_ns});
+    }
+  }
+  std::sort(out.min_period_clocks.begin(), out.min_period_clocks.end(),
+            [](const MinPeriodClockRow& a, const MinPeriodClockRow& b) {
+              if (a.slack_ns != b.slack_ns)
+                return a.slack_ns < b.slack_ns;
+              return a.clock < b.clock;
+            });
+  std::sort(out.min_period_endpoints.begin(),
+            out.min_period_endpoints.end(),
+            [](const MinPeriodEndpointRow& a,
+               const MinPeriodEndpointRow& b) {
+              if (a.slack_ns != b.slack_ns)
+                return a.slack_ns < b.slack_ns;
+              if (a.pin != b.pin) return a.pin < b.pin;
+              return a.clock < b.clock;
+            });
+  Result<std::vector<MinPulseWidthCheck>> min_pulse_width =
+      engine.MinPulseWidthChecks();
+  if (!min_pulse_width.ok()) {
+    return SceneError(scene, min_pulse_width.status());
+  }
+  out.min_pulse_width_checks = std::move(min_pulse_width).value();
+  Result<std::vector<CoveragePin>> coverage = engine.AnalysisCoverage();
+  if (!coverage.ok()) return SceneError(scene, coverage.status());
+  out.coverage_pins = std::move(coverage).value();
+  return out;
+}
+
 }  // namespace
 
 Result<std::vector<SceneResult>> TimingService::Analyze(
@@ -511,6 +628,52 @@ Result<std::vector<QorResult>> TimingService::AnalyzeQor(
   const VerilogDesign design{netlist.string(), database.TopBlockName(),
                              sdc_path};
   return AnalyzeQor(design, scenes);
+}
+
+Result<std::vector<CheckReportsResult>>
+TimingService::AnalyzeCheckReports(
+    const VerilogDesign& design,
+    const std::vector<SceneAnalysis>& scenes) {
+  if (design.verilog_path.empty() || design.top_cell.empty()) {
+    return Invalid("timing analysis needs a netlist and its top cell");
+  }
+  const Status valid = Validate(design.sdc_path, scenes);
+  if (!valid.ok()) return valid;
+  std::vector<CheckReportsResult> results;
+  for (const SceneAnalysis& scene : scenes) {
+    Result<CheckReportsResult> result = CheckReportsScene(design, scene);
+    if (!result.ok()) return result.status();
+    results.push_back(std::move(result).value());
+  }
+  return results;
+}
+
+Result<std::vector<CheckReportsResult>>
+TimingService::AnalyzeCheckReports(
+    db::OdbDatabase& database, const std::string& sdc_path,
+    const std::vector<SceneAnalysis>& scenes) {
+  if (!database.has_top_block()) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "timing analysis of an ODB database with no "
+                         "top block");
+  }
+  // The netlist is a scratch product of the database, never a
+  // deliverable: it lives in the temp directory and is removed
+  // when this call returns, whatever the outcome.
+  const std::filesystem::path netlist =
+      std::filesystem::temp_directory_path() / "eos_timing_service_netlist.v";
+  const Status written = database.WriteVerilog(netlist.string());
+  if (!written.ok()) return written;
+  struct NetlistGuard {
+    std::filesystem::path path;
+    ~NetlistGuard() {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
+  } guard{netlist};
+  const VerilogDesign design{netlist.string(), database.TopBlockName(),
+                             sdc_path};
+  return AnalyzeCheckReports(design, scenes);
 }
 
 }  // namespace eos::analysis

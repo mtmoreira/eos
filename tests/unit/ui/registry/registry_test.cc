@@ -75,8 +75,11 @@ TEST(Registry, CoreSetIsComplete) {
   // set_bottleneck_capture (three commands: the two reports plus
   // the capture setting the bottleneck report requires before
   // the first timing update).
-  // F0 adds write_def, read_lef, and read_def.
-  EXPECT_EQ(shell.registry.Names().size(), 83u);
+  // F0 adds write_def, read_lef, and read_def. Immediate unit
+  // 10 adds the five check-specific reports:
+  // report_global_timing, report_global_slack, report_min_period,
+  // report_min_pulse_width and report_clock_gating_check.
+  EXPECT_EQ(shell.registry.Names().size(), 88u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -92,6 +95,11 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("report_qor"), nullptr);
   EXPECT_NE(shell.registry.Find("report_bottleneck"), nullptr);
   EXPECT_NE(shell.registry.Find("set_bottleneck_capture"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_global_timing"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_global_slack"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_min_period"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_min_pulse_width"), nullptr);
+  EXPECT_NE(shell.registry.Find("report_clock_gating_check"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
@@ -572,6 +580,165 @@ const char kTimingLibertyElectrical[] = R"LIB(library (eos_fixture_elec) {
 
 const char kTimingSdcTight[] =
     "create_clock -name clk -period 0.5 [get_ports clk]\n";
+
+const char kTimingSdcMinPulseWidth[] =
+    "create_clock -name clk -period 10 [get_ports clk]\n"
+    "set_min_pulse_width 1.0 [get_pins r1/CK]\n"
+    "set_min_pulse_width 1.0 [get_pins r2/CK]\n";
+
+// The gated-clock fixture liberty: the timing fixture cells plus
+// an AND2, so the second flop's clock can be gated by an AND
+// whose enable is a primary input (untested gating checks) or a
+// flop output (tested gating checks).
+const char kTimingLibertyGated[] = R"LIB(library (eos_fixture_gated) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) {
+      direction : input;
+      capacitance : 0.001;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (scalar) { values ("0.05"); }
+        fall_constraint (scalar) { values ("0.05"); }
+      }
+    }
+    pin (CK) {
+      direction : input;
+      capacitance : 0.001;
+      clock : true;
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (BUF) {
+    area : 2.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (AND2) {
+    area : 4.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (B) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A & B";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+// The gated-clock fixture: the second flop's clock is gated by
+// an AND2 whose enable is the unclocked primary input e, so the
+// gating checks live on the enable pin of the gate itself
+// (g1/B) and are untested with no clocked startpoint.
+const char kTimingVerilogGated[] = R"V(module top (clk, e, d, q);
+  input clk, e, d;
+  output q;
+  wire n1, n2, gclk;
+
+  AND2 g1 (.A(clk), .B(e), .Y(gclk));
+  DFF r1 (.D(d), .CK(clk), .Q(n1));
+  BUF u1 (.A(n1), .Y(n2));
+  DFF r2 (.D(n2), .CK(gclk), .Q(q));
+endmodule
+)V";
+
+// The tested gated-clock fixture: the enable is driven by a
+// flop clocked by clk, so a clocked path reaches the enable
+// and the coverage marks the gating checks tested. Note the
+// engine produces no gated-clock path end for this session,
+// so the gating report lists the checks with unmeasured
+// slacks (see ReportClockGatingCheck.TestedEnableReportsNoMeasuredSlack);
+// the 9.8/0.2 ns values a hand calculation gives are NOT
+// asserted, because the engine never measures them.
+const char kTimingVerilogGatedTested[] = R"V(module top (clk, d, q);
+  input clk, d;
+  output q;
+  wire n1, n2, gclk, e;
+
+  DFF r0 (.D(d), .CK(clk), .Q(e));
+  AND2 g1 (.A(clk), .B(e), .Y(gclk));
+  DFF r1 (.D(d), .CK(clk), .Q(n1));
+  BUF u1 (.A(n1), .Y(n2));
+  DFF r2 (.D(n2), .CK(gclk), .Q(q));
+endmodule
+)V";
 
 const char kTimingLef[] = R"LEF(VERSION 5.8 ;
 BUSBITCHARS "[]" ;
@@ -3756,6 +3923,351 @@ TEST(ReportBottleneck, RejectsBadOptions) {
   EXPECT_FALSE(shell.Run("report_bottleneck", {"top"}).ok);
 }
 
+// Check-specific reports (Immediate unit 10, review item T8).
+void BuildGatedCheckDesign(Shell& shell, const TimingTempDir& dir,
+                           const char* verilog) {
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kTimingLibertyGated)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", verilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+}
+
+TEST(ReportGlobalTiming, CleanDesignReportsWorstPaths) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report = shell.Run("report_global_timing", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt setup_wns=9.4 "
+                                "setup_tns=0 setup_violating=0 "
+                                "hold_wns=0.45 hold_tns=0 "
+                                "hold_violating=0 report="
+                                "global_timing_report_func_tt"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt group=clk check=setup "
+                                "endpoint=r2/D startpoint=r1/Q "
+                                "slack=9.4"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt group=clk check=hold "
+                                "endpoint=r2/D startpoint=r1/Q "
+                                "slack=0.45"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Global timing (scene func_tt):"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Worst paths (setup):"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Worst paths (hold):"),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "global_timing_report_func_tt"),
+            nullptr);
+}
+
+TEST(ReportGlobalTiming, DelayTypeSelectsKind) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report =
+      shell.Run("report_global_timing", {"-delay_type", "min"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("check=hold"), std::string::npos);
+  EXPECT_EQ(report.payload.find("check=setup"), std::string::npos);
+  EXPECT_EQ(report.payload.find("Worst paths (setup):"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Worst paths (hold):"),
+            std::string::npos);
+}
+
+TEST(ReportGlobalTiming, RejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  EXPECT_FALSE(shell.Run("report_global_timing", {"-bogus"}).ok);
+  EXPECT_FALSE(shell.Run("report_global_timing", {"top"}).ok);
+  EXPECT_FALSE(
+      shell.Run("report_global_timing", {"-delay_type", "ave"}).ok);
+  EXPECT_FALSE(
+      shell.Run("report_global_timing", {"-scene", "func_xx"}).ok);
+}
+
+TEST(ReportGlobalTiming, FileWritesReport) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const std::string file = dir.Path("global-timing.txt");
+  const CommandResult report =
+      shell.Run("report_global_timing", {"-file", file});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("file=" + file), std::string::npos);
+  std::ifstream in(file);
+  ASSERT_TRUE(in);
+  std::stringstream contents;
+  contents << in.rdbuf();
+  EXPECT_NE(contents.str().find("Global timing (scene func_tt):"),
+            std::string::npos);
+  EXPECT_NE(contents.str().find("r2/D"), std::string::npos);
+}
+
+TEST(ReportGlobalSlack, CleanDesignListsEveryEndpoint) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report = shell.Run("report_global_slack", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt check=setup pin=r2/D "
+                                "slack=9.4"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt check=hold pin=r2/D "
+                                "slack=0.45"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt check=setup "
+                                "endpoints=1 violating=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Global slack (scene func_tt):"),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "global_slack_report_func_tt"),
+            nullptr);
+}
+
+TEST(ReportGlobalSlack, SlackCeilingFilters) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report = shell.Run(
+      "report_global_slack", {"-slack_lesser_than", "1.0"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt check=hold pin=r2/D "
+                                "slack=0.45"),
+            std::string::npos);
+  EXPECT_EQ(report.payload.find("check=setup pin=r2/D"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt check=setup "
+                                "endpoints=0 violating=0"),
+            std::string::npos);
+}
+
+TEST(ReportGlobalSlack, RejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  EXPECT_FALSE(shell.Run("report_global_slack", {"-bogus"}).ok);
+  EXPECT_FALSE(shell.Run("report_global_slack", {"top"}).ok);
+  EXPECT_FALSE(
+      shell.Run("report_global_slack", {"-delay_type", "ave"}).ok);
+  EXPECT_FALSE(shell.Run("report_global_slack",
+                         {"-slack_lesser_than", "x"})
+                   .ok);
+  EXPECT_FALSE(
+      shell.Run("report_global_slack", {"-scene", "func_xx"}).ok);
+}
+
+TEST(ReportGlobalSlack, NoTimingSessionFails) {
+  Shell shell;
+  EXPECT_FALSE(shell.Run("report_global_slack", {}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  EXPECT_FALSE(shell.Run("report_global_slack", {}).ok);
+}
+
+TEST(ReportMinPeriod, CleanDesignReportsClockRow) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report = shell.Run("report_min_period", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt checks=1 violating=0 "
+                                "worst_slack=9.4 report="
+                                "min_period_report_func_tt"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt clock=clk period=10 "
+                                "min_period=0.6 slack=9.4 "
+                                "worst_pin=r2/D"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Minimum period (scene func_tt):"),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(shell.ctx.project,
+                                         "min_period_report_func_tt"),
+            nullptr);
+}
+
+TEST(ReportMinPeriod, VerboseListsPinChecks) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report =
+      shell.Run("report_min_period", {"-verbose"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt pin=r2/D clock=clk "
+                                "period=10 min_period=0.6 slack=9.4"),
+            std::string::npos);
+}
+
+TEST(ReportMinPeriod, TightClockReportsViolation) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdcTight);
+  const CommandResult report = shell.Run("report_min_period", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt clock=clk period=0.5 "
+                                "min_period=0.6 slack=-0.1 "
+                                "worst_pin=r2/D"),
+            std::string::npos);
+}
+
+TEST(ReportMinPeriod, RejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  EXPECT_FALSE(shell.Run("report_min_period", {"-bogus"}).ok);
+  EXPECT_FALSE(shell.Run("report_min_period", {"top"}).ok);
+  EXPECT_FALSE(shell.Run("report_min_period", {"-scene", "func_xx"}).ok);
+}
+
+TEST(ReportMinPulseWidth, ReportsWidths) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcMinPulseWidth);
+  const CommandResult report = shell.Run("report_min_pulse_width", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt checks=4 violating=0 "
+                                "worst_slack=4 unevaluated=0 report="
+                                "min_pulse_width_report_func_tt"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt pin=r1/CK "
+                                "transition=rise width=5 min_width=1 "
+                                "slack=4"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt pin=r2/CK "
+                                "transition=fall width=5 min_width=1 "
+                                "slack=4"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Minimum pulse width (scene func_tt):"),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(
+                shell.ctx.project, "min_pulse_width_report_func_tt"),
+            nullptr);
+}
+
+TEST(ReportMinPulseWidth, ViolatorsOnlyEmptyOnClean) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcMinPulseWidth);
+  const CommandResult report =
+      shell.Run("report_min_pulse_width", {"-violators"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("(no checks pass the selection)"),
+            std::string::npos);
+  EXPECT_EQ(report.payload.find("pin=r1/CK"), std::string::npos);
+}
+
+TEST(ReportMinPulseWidth, NoConstraintReportsEmpty) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report = shell.Run("report_min_pulse_width", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt checks=0 violating=0 "
+                                "worst_slack=- unevaluated=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("(no checks pass the selection)"),
+            std::string::npos);
+}
+
+TEST(ReportMinPulseWidth, RejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcMinPulseWidth);
+  EXPECT_FALSE(shell.Run("report_min_pulse_width", {"-bogus"}).ok);
+  EXPECT_FALSE(shell.Run("report_min_pulse_width", {"top"}).ok);
+  EXPECT_FALSE(
+      shell.Run("report_min_pulse_width", {"-scene", "func_xx"}).ok);
+}
+
+TEST(ReportClockGatingCheck, UntestedEnableReportsReason) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildGatedCheckDesign(shell, dir, kTimingVerilogGated);
+  const CommandResult report =
+      shell.Run("report_clock_gating_check", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt checks=1 tested=0 "
+                                "violating=0 report="
+                                "clock_gating_check_report_func_tt"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt enable=g1/B clock=g1/A "
+                                "setup_slack=- hold_slack=- "
+                                "status=untested: no_startpoint_clock"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Clock gating checks (scene func_tt):"),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.reports.FindByName(
+                shell.ctx.project,
+                "clock_gating_check_report_func_tt"),
+            nullptr);
+}
+
+TEST(ReportClockGatingCheck, TestedEnableReportsNoMeasuredSlack) {
+  // The enable is driven by a flop clocked by clk, so the
+  // coverage marks the check tested. But the engine produces
+  // no gated-clock path end for this session (verified with
+  // and without an explicit set_clock_gating_check in the
+  // SDC), so there is no measured slack to report: the report
+  // lists the check as tested with unmeasured slacks, never
+  // as passing. If the engine ever produces a gated-clock
+  // end, the slack columns will carry its values.
+  TimingTempDir dir;
+  Shell shell;
+  BuildGatedCheckDesign(shell, dir, kTimingVerilogGatedTested);
+  const CommandResult report =
+      shell.Run("report_clock_gating_check", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt checks=1 tested=1 "
+                                "violating=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt enable=g1/B clock=g1/A "
+                                "setup_slack=- hold_slack=- "
+                                "status=tested"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("no measured slack"),
+            std::string::npos);
+}
+
+TEST(ReportClockGatingCheck, NoGateReportsEmpty) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  const CommandResult report =
+      shell.Run("report_clock_gating_check", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt checks=0 tested=0 "
+                                "violating=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("No clock-gating checks defined: no "
+                                "gated-clock enable in the design."),
+            std::string::npos);
+}
+
+TEST(ReportClockGatingCheck, RejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildGatedCheckDesign(shell, dir, kTimingVerilogGated);
+  EXPECT_FALSE(shell.Run("report_clock_gating_check", {"-bogus"}).ok);
+  EXPECT_FALSE(shell.Run("report_clock_gating_check", {"top"}).ok);
+  EXPECT_FALSE(
+      shell.Run("report_clock_gating_check", {"-scene", "func_xx"}).ok);
+}
+
 TEST(CoreCommands, HelpListsAndDescribesCommands) {
   Shell shell;
   const CommandResult all = shell.Run("help", {});
@@ -3788,10 +4300,11 @@ TEST(CoreCommands, HelpWildcardPatterns) {
   // registry order, one "name usage" line each.
   const CommandResult tim = shell.Run("help", {"*tim*"});
   ASSERT_TRUE(tim.ok) << tim.message;
-  EXPECT_EQ(lines(tim.payload), 6u);
+  EXPECT_EQ(lines(tim.payload), 7u);
   for (const char* name :
        {"check_timing", "close_timing", "report_timing", "run_timing",
-        "set_max_time_borrow", "repair_timing"}) {
+        "set_max_time_borrow", "repair_timing",
+        "report_global_timing"}) {
     EXPECT_NE(tim.payload.find(name), std::string::npos) << name;
   }
   EXPECT_EQ(tim.payload.find("create_clock"), std::string::npos);
@@ -3799,11 +4312,13 @@ TEST(CoreCommands, HelpWildcardPatterns) {
   // set_max_time_borrow, which ends in "borrow".
   const CommandResult suffix = shell.Run("help", {"*_timing"});
   ASSERT_TRUE(suffix.ok) << suffix.message;
-  EXPECT_EQ(lines(suffix.payload), 5u);
+  EXPECT_EQ(lines(suffix.payload), 6u);
   EXPECT_EQ(suffix.payload.find("set_max_time_borrow"),
             std::string::npos);
   EXPECT_NE(suffix.payload.find("repair_timing"), std::string::npos);
   EXPECT_NE(suffix.payload.find("check_timing"), std::string::npos);
+  EXPECT_NE(suffix.payload.find("report_global_timing"),
+            std::string::npos);
   // "?" matches exactly one character.
   const CommandResult one_char = shell.Run("help", {"?eport_timing"});
   ASSERT_TRUE(one_char.ok) << one_char.message;

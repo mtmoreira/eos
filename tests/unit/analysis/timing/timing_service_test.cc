@@ -822,5 +822,63 @@ TEST(TimingService, ReportPathsRespectsMaxPathsAndSlackFilter) {
   EXPECT_EQ(rejected.status().code(), ErrorCode::kInvalidArgument);
 }
 
+// Check-specific report data (Immediate unit 10, review item
+// T8): the per-endpoint slacks, the per-group worst paths, the
+// minimum-period check and the empty pulse-width list on the
+// clean fixture, which defines no minimum width.
+TEST(TimingService, AnalyzeCheckReportsCleanFixture) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  const auto results = service.AnalyzeCheckReports(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)});
+  ASSERT_TRUE(results.ok()) << results.status().message();
+  ASSERT_EQ(results.value().size(), 1u);
+  const CheckReportsResult& result = results.value()[0];
+  EXPECT_EQ(result.scenario.name, "func_tt");
+  // Only r2/D is a constrained endpoint: r1/D is driven by the
+  // unclocked primary input.
+  ASSERT_EQ(result.setup_endpoints.size(), 1u);
+  EXPECT_EQ(result.setup_endpoints[0].pin, "r2/D");
+  EXPECT_NEAR(result.setup_endpoints[0].slack_ns, 9.4, 1e-6);
+  ASSERT_EQ(result.hold_endpoints.size(), 1u);
+  EXPECT_EQ(result.hold_endpoints[0].pin, "r2/D");
+  EXPECT_NEAR(result.hold_endpoints[0].slack_ns, 0.45, 1e-6);
+  ASSERT_EQ(result.setup_groups.size(), 1u);
+  EXPECT_EQ(result.setup_groups[0].name, "clk");
+  ASSERT_EQ(result.setup_group_paths.size(), 1u);
+  EXPECT_EQ(result.setup_group_paths[0].group, "clk");
+  EXPECT_EQ(result.setup_group_paths[0].path.endpoint, "r2/D");
+  EXPECT_EQ(result.setup_group_paths[0].path.startpoint, "r1/Q");
+  EXPECT_NEAR(result.setup_group_paths[0].path.slack_ns, 9.4, 1e-6);
+  ASSERT_EQ(result.hold_group_paths.size(), 1u);
+  EXPECT_EQ(result.hold_group_paths[0].group, "clk");
+  EXPECT_EQ(result.hold_group_paths[0].path.endpoint, "r2/D");
+  // The derived minimum period: the 10 ns clock's group has
+  // worst setup slack 9.4 ns, so the clock can close at 0.6 ns.
+  ASSERT_EQ(result.min_period_clocks.size(), 1u);
+  EXPECT_EQ(result.min_period_clocks[0].clock, "clk");
+  EXPECT_NEAR(result.min_period_clocks[0].period_ns, 10.0, 1e-6);
+  EXPECT_NEAR(result.min_period_clocks[0].min_period_ns, 0.6, 1e-6);
+  EXPECT_NEAR(result.min_period_clocks[0].slack_ns, 9.4, 1e-6);
+  EXPECT_EQ(result.min_period_clocks[0].worst_pin, "r2/D");
+  ASSERT_EQ(result.min_period_endpoints.size(), 1u);
+  EXPECT_EQ(result.min_period_endpoints[0].pin, "r2/D");
+  EXPECT_EQ(result.min_period_endpoints[0].clock, "clk");
+  EXPECT_NEAR(result.min_period_endpoints[0].min_period_ns, 0.6, 1e-6);
+  EXPECT_NEAR(result.min_period_endpoints[0].slack_ns, 9.4, 1e-6);
+  EXPECT_TRUE(result.min_pulse_width_checks.empty());
+  // The clean fixture defines setup and hold checks at both D
+  // pins, so the coverage carries four rows and no gating or
+  // pulse-width rows.
+  EXPECT_EQ(result.coverage_pins.size(), 4u);
+  for (const CoveragePin& row : result.coverage_pins) {
+    EXPECT_TRUE(row.check_type == "setup" || row.check_type == "hold")
+        << row.check_type;
+  }
+}
+
 }  // namespace
 }  // namespace eos::analysis

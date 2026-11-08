@@ -3672,6 +3672,93 @@ std::string ReportClockBrace(const std::vector<std::string>& sources) {
   return out;
 }
 
+  // Selects the scenes for a check-specific report and runs
+  // the analysis for them: BuildTimingScenes plus the -scene
+  // filter, then one AnalyzeCheckReports call. Returns the
+  // failing CommandResult on any error, or nullopt with scenes
+  // and analyzed filled in.
+  std::optional<CommandResult> AnalyzeCheckReportsScenes(
+      CommandContext& ctx, const char* command,
+      const SdcOptions& opts,
+      std::vector<analysis::SceneAnalysis>& scenes,
+      std::vector<analysis::CheckReportsResult>& analyzed) {
+    bool from_odb = false;
+    if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+      return bad;
+    }
+    if (opts.Seen("-scene")) {
+      const std::string wanted = *opts.Value("-scene");
+      std::vector<analysis::SceneAnalysis> selected;
+      for (const analysis::SceneAnalysis& scene : scenes) {
+        if (scene.scenario.name == wanted) {
+          selected.push_back(scene);
+        }
+      }
+      if (selected.empty()) {
+        return CommandResult::Fail(
+            Diag::kInvalidConfiguration,
+            std::string(command) + ": unknown scenario: " + wanted);
+      }
+      scenes = std::move(selected);
+    }
+    analysis::TimingService service;
+    const Result<std::vector<analysis::CheckReportsResult>> result =
+        from_odb
+            ? service.AnalyzeCheckReports(*ctx.timing.odb,
+                                          ctx.timing.sdc_path, scenes)
+            : service.AnalyzeCheckReports(
+                  analysis::VerilogDesign{ctx.timing.verilog_path,
+                                          ctx.timing.top_cell,
+                                          ctx.timing.sdc_path},
+                  scenes);
+    if (!result.ok()) return FromStatus(result.status());
+    analyzed = std::move(result).value();
+    return std::nullopt;
+  }
+
+  // Parses -delay_type for the check-specific reports that take
+  // it: max selects the setup (max) kind, min the hold (min)
+  // kind, and absence selects both. Returns nullopt for both.
+  std::optional<CommandResult> ParseCheckDelayType(
+      const SdcOptions& opts, const char* command,
+      std::optional<analysis::CheckKind>& kind) {
+    kind = std::nullopt;
+    if (!opts.Seen("-delay_type")) return std::nullopt;
+    const std::string delay_type = *opts.Value("-delay_type");
+    if (delay_type == "max") {
+      kind = analysis::CheckKind::kSetup;
+    } else if (delay_type == "min") {
+      kind = analysis::CheckKind::kHold;
+    } else {
+      return CommandResult::Fail(
+          Diag::kInvalidConfiguration,
+          std::string(command) +
+              ": -delay_type must be max or min, got: " + delay_type);
+    }
+    return std::nullopt;
+  }
+
+  // Writes a check-specific report's text to -file when the
+  // option was given. Returns the failing CommandResult when
+  // the file cannot be written, or nullopt.
+  std::optional<CommandResult> WriteCheckReportFile(
+      const SdcOptions& opts, const std::string& text) {
+    if (!opts.Seen("-file")) return std::nullopt;
+    const std::string file = *opts.Value("-file");
+    std::ofstream out(file);
+    if (!out) {
+      return CommandResult::Fail(Diag::kIoError,
+                                 "could not write file: " + file);
+    }
+    out << text;
+    out.close();
+    if (!out) {
+      return CommandResult::Fail(Diag::kIoError,
+                                 "could not write file: " + file);
+    }
+    return std::nullopt;
+  }
+
 }  // namespace
 
 void RegisterCoreCommands(CommandRegistry& registry) {
@@ -9414,6 +9501,741 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                                        "could not write file: " + file);
           }
           payload += "\nfile=" + file;
+        }
+        payload += "\n" + text;
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- Check-specific reports (Immediate unit 10, review item
+  // T8) ---------------------------------------------------------
+  // Five from-scratch reports over the timing session, all run
+  // through one TimingService::AnalyzeCheckReports call per
+  // scene (one engine session per scene, exactly as report_qor):
+  // report_global_timing (the worst path of every path group),
+  // report_global_slack (the worst slack of every constrained
+  // endpoint pin), report_min_period (the smallest period each
+  // clock can close at), report_min_pulse_width (the measured
+  // pulse widths against their minimums), and
+  // report_clock_gating_check (the setup and hold slacks of
+  // every gated-clock enable). Every value is measured by the
+  // engine under the SDC file the session read: nothing is
+  // invented, and a check the engine did not evaluate is
+  // reported as not evaluated, never as a pass. The margins the
+  // gating and pulse-width checks are measured against come
+  // from that SDC file; EOS-native set_clock_gating_check and
+  // set_min_pulse_width rows live in the session constraint set
+  // and reach the engine only after write_sdc and a fresh
+  // read_sdc, exactly as report_clock documents for clocks.
+
+  // ---- report_global_timing (Immediate unit 10, review item
+  // T8) ---------------------------------------------------------
+  // The global timing summary: the design-wide worst slack and
+  // total negative slack (the union over every constrained
+  // endpoint, so they equal the run_timing scalars), then the
+  // worst path of every path group for the selected check kinds.
+  // The worst path of a group is the worst path to the group's
+  // worst endpoint: the startpoint names the launch, the slack
+  // is the group's WNS.
+  add("report_global_timing",
+      "report_global_timing [-delay_type max|min] [-scene <name>] "
+      "[-file <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-delay_type", 1, false},
+                 {"-scene", 1, false},
+                 {"-file", 1, false}},
+                "report_global_timing", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "report_global_timing: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        std::optional<analysis::CheckKind> kind;
+        if (auto bad = ParseCheckDelayType(opts, "report_global_timing",
+                                           kind)) {
+          return *bad;
+        }
+        std::vector<analysis::SceneAnalysis> scenes;
+        std::vector<analysis::CheckReportsResult> analyzed;
+        if (auto bad = AnalyzeCheckReportsScenes(
+                ctx, "report_global_timing", opts, scenes, analyzed)) {
+          return *bad;
+        }
+        const auto union_slack =
+            [](const std::vector<analysis::EndpointSlack>& endpoints) {
+              std::optional<double> worst;
+              double tns = 0.0;
+              std::size_t violating = 0;
+              for (const analysis::EndpointSlack& endpoint : endpoints) {
+                if (!worst.has_value() ||
+                    endpoint.slack_ns < *worst) {
+                  worst = endpoint.slack_ns;
+                }
+                if (endpoint.slack_ns < 0.0) {
+                  tns += endpoint.slack_ns;
+                  ++violating;
+                }
+              }
+              return std::make_tuple(worst, tns, violating);
+            };
+        const auto slack_text = [](const std::optional<double>& slack) {
+          return slack.has_value() ? FormatNum(*slack)
+                                   : std::string("-");
+        };
+        std::string payload =
+            std::string("scenes=") + std::to_string(analyzed.size()) +
+            " revision=" +
+            std::to_string(ctx.project.ledger.current_revision());
+        std::string text;
+        for (const analysis::CheckReportsResult& result :
+             analyzed) {
+          const std::string report =
+              "global_timing_report_" + result.scenario.name;
+          const Result<session::ArtifactId> artifact =
+              ctx.reports.RegisterReport(ctx.project, report,
+                                         session::ProofStatus::kPass,
+                                         "NLDM");
+          if (!artifact.ok()) return FromStatus(artifact.status());
+          const auto [setup_worst, setup_tns, setup_violating] =
+              union_slack(result.setup_endpoints);
+          const auto [hold_worst, hold_tns, hold_violating] =
+              union_slack(result.hold_endpoints);
+          payload += "\nscene=" + result.scenario.name +
+                     " setup_wns=" + slack_text(setup_worst) +
+                     " setup_tns=" + FormatNum(setup_tns) +
+                     " setup_violating=" +
+                     std::to_string(setup_violating) +
+                     " hold_wns=" + slack_text(hold_worst) +
+                     " hold_tns=" + FormatNum(hold_tns) +
+                     " hold_violating=" +
+                     std::to_string(hold_violating) +
+                     " report=" + report +
+                     " artifact=" + std::to_string(artifact.value());
+          text += "\nGlobal timing (scene " + result.scenario.name +
+                  "):\n";
+          text += "Setup WNS " + slack_text(setup_worst) + " ns, TNS " +
+                  FormatNum(setup_tns) + " ns, " +
+                  std::to_string(setup_violating) +
+                  " violating endpoints.\n";
+          text += "Hold WNS " + slack_text(hold_worst) + " ns, TNS " +
+                  FormatNum(hold_tns) + " ns, " +
+                  std::to_string(hold_violating) +
+                  " violating endpoints.\n";
+          const auto render_kind =
+              [&](const char* label, analysis::CheckKind wanted,
+                  const std::vector<analysis::GroupWorstPath>& paths) {
+                if (kind.has_value() && *kind != wanted) return;
+                text += std::string("Worst paths (") + label + "):\n";
+                std::vector<std::vector<std::string>> table;
+                table.push_back({"Group", "WNS (ns)", "Worst endpoint",
+                                 "Startpoint", "Slack (ns)"});
+                for (const analysis::GroupWorstPath& entry : paths) {
+                  table.push_back(
+                      {entry.group, FormatNum(entry.path.slack_ns),
+                       entry.path.endpoint, entry.path.startpoint,
+                       FormatNum(entry.path.slack_ns)});
+                  payload += "\nscene=" + result.scenario.name +
+                             " group=" + entry.group +
+                             " check=" + label +
+                             " endpoint=" + entry.path.endpoint +
+                             " startpoint=" + entry.path.startpoint +
+                             " slack=" + FormatNum(entry.path.slack_ns);
+                }
+                if (paths.empty()) {
+                  table.push_back({"-", "-", "(no constrained endpoints)",
+                                   "-", "-"});
+                }
+                text += ReportClockRenderTable(std::move(table));
+              };
+          render_kind("setup", analysis::CheckKind::kSetup,
+                      result.setup_group_paths);
+          render_kind("hold", analysis::CheckKind::kHold,
+                      result.hold_group_paths);
+        }
+        if (auto bad = WriteCheckReportFile(opts, text)) return *bad;
+        if (opts.Seen("-file")) {
+          payload += "\nfile=" + *opts.Value("-file");
+        }
+        payload += "\n" + text;
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- report_global_slack (Immediate unit 10, review item
+  // T8) ---------------------------------------------------------
+  // The per-pin slack table: every constrained endpoint pin
+  // with its worst slack for the selected check kinds, worst
+  // first. This is the report that names every pin that
+  // violates, not just the worst one per group: an endpoint
+  // that meets timing appears too, so a clean design reports
+  // its margins rather than an empty table.
+  add("report_global_slack",
+      "report_global_slack [-delay_type max|min] "
+      "[-slack_lesser_than <ns>] [-scene <name>] [-file <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-delay_type", 1, false},
+                 {"-slack_lesser_than", 1, false},
+                 {"-scene", 1, false},
+                 {"-file", 1, false}},
+                "report_global_slack", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "report_global_slack: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        std::optional<analysis::CheckKind> kind;
+        if (auto bad =
+                ParseCheckDelayType(opts, "report_global_slack", kind)) {
+          return *bad;
+        }
+        std::optional<double> ceiling;
+        if (opts.Seen("-slack_lesser_than")) {
+          double value = 0.0;
+          if (auto bad = ParseOptDouble(opts, "-slack_lesser_than",
+                                        "report_global_slack", value)) {
+            return *bad;
+          }
+          ceiling = value;
+        }
+        std::vector<analysis::SceneAnalysis> scenes;
+        std::vector<analysis::CheckReportsResult> analyzed;
+        if (auto bad = AnalyzeCheckReportsScenes(
+                ctx, "report_global_slack", opts, scenes, analyzed)) {
+          return *bad;
+        }
+        std::string payload =
+            std::string("scenes=") + std::to_string(analyzed.size()) +
+            " revision=" +
+            std::to_string(ctx.project.ledger.current_revision());
+        std::string text;
+        for (const analysis::CheckReportsResult& result :
+             analyzed) {
+          const std::string report =
+              "global_slack_report_" + result.scenario.name;
+          const Result<session::ArtifactId> artifact =
+              ctx.reports.RegisterReport(ctx.project, report,
+                                         session::ProofStatus::kPass,
+                                         "NLDM");
+          if (!artifact.ok()) return FromStatus(artifact.status());
+          payload += "\nscene=" + result.scenario.name +
+                     " report=" + report +
+                     " artifact=" + std::to_string(artifact.value());
+          text += "\nGlobal slack (scene " + result.scenario.name +
+                  "):\n";
+          const auto render_kind =
+              [&](const char* label, analysis::CheckKind wanted,
+                  const std::vector<analysis::EndpointSlack>& endpoints) {
+                if (kind.has_value() && *kind != wanted) return;
+                std::size_t violating = 0;
+                for (const analysis::EndpointSlack& endpoint :
+                     endpoints) {
+                  if (endpoint.slack_ns < 0.0) ++violating;
+                }
+                text += std::string("Endpoints (") + label + "): " +
+                        std::to_string(endpoints.size()) +
+                        " endpoints, " + std::to_string(violating) +
+                        " violating";
+                if (ceiling.has_value()) {
+                  text += ", slack below " + FormatNum(*ceiling) + " ns";
+                }
+                text += ".\n";
+                std::vector<std::vector<std::string>> table;
+                table.push_back({"Endpoint pin", "Slack (ns)"});
+                std::size_t shown = 0;
+                for (const analysis::EndpointSlack& endpoint :
+                     endpoints) {
+                  if (ceiling.has_value() &&
+                      endpoint.slack_ns >= *ceiling) {
+                    continue;
+                  }
+                  table.push_back(
+                      {endpoint.pin, FormatNum(endpoint.slack_ns)});
+                  payload += "\nscene=" + result.scenario.name +
+                             " check=" + label +
+                             " pin=" + endpoint.pin +
+                             " slack=" + FormatNum(endpoint.slack_ns);
+                  ++shown;
+                }
+                if (shown == 0) {
+                  table.push_back(
+                      {"-", "(no endpoints pass the selection)"});
+                }
+                text += ReportClockRenderTable(std::move(table));
+                payload += "\nscene=" + result.scenario.name +
+                           " check=" + label +
+                           " endpoints=" + std::to_string(shown) +
+                           " violating=" + std::to_string(violating);
+              };
+          render_kind("setup", analysis::CheckKind::kSetup,
+                      result.setup_endpoints);
+          render_kind("hold", analysis::CheckKind::kHold,
+                      result.hold_endpoints);
+        }
+        if (auto bad = WriteCheckReportFile(opts, text)) return *bad;
+        if (opts.Seen("-file")) {
+          payload += "\nfile=" + *opts.Value("-file");
+        }
+        payload += "\n" + text;
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- report_min_period (Immediate unit 10, review item T8)
+  // ------------------------------------------------------------
+  // The minimum period each clock can close at: for every
+  // clock, period minus the worst setup slack of the clock's
+  // setup group. One row per clock (its worst endpoint) by
+  // default; -verbose lists every endpoint of each clock's
+  // group. A clock with no setup group (no constrained
+  // endpoints) yields no row: the report says so instead of
+  // inventing a period. Endpoints reassigned to a named
+  // group_path are not in their clock group, so they do not
+  // contribute to the clock's minimum period. Setup only:
+  // hold slack does not depend on the period.
+  add("report_min_period",
+      "report_min_period [-verbose] [-scene <name>] [-file <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-verbose", 0, false},
+                 {"-scene", 1, false},
+                 {"-file", 1, false}},
+                "report_min_period", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "report_min_period: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        const bool verbose = opts.Has("-verbose");
+        std::vector<analysis::SceneAnalysis> scenes;
+        std::vector<analysis::CheckReportsResult> analyzed;
+        if (auto bad = AnalyzeCheckReportsScenes(
+                ctx, "report_min_period", opts, scenes, analyzed)) {
+          return *bad;
+        }
+        std::string payload =
+            std::string("scenes=") + std::to_string(analyzed.size()) +
+            " revision=" +
+            std::to_string(ctx.project.ledger.current_revision());
+        std::string text;
+        for (const analysis::CheckReportsResult& result :
+             analyzed) {
+          const std::string report =
+              "min_period_report_" + result.scenario.name;
+          const Result<session::ArtifactId> artifact =
+              ctx.reports.RegisterReport(ctx.project, report,
+                                         session::ProofStatus::kPass,
+                                         "NLDM");
+          if (!artifact.ok()) return FromStatus(artifact.status());
+          std::size_t violating = 0;
+          std::optional<double> worst_slack;
+          for (const analysis::MinPeriodClockRow& row :
+               result.min_period_clocks) {
+            if (row.slack_ns < 0.0) ++violating;
+            if (!worst_slack.has_value() ||
+                row.slack_ns < *worst_slack) {
+              worst_slack = row.slack_ns;
+            }
+          }
+          payload += "\nscene=" + result.scenario.name +
+                     " checks=" +
+                     std::to_string(result.min_period_clocks.size()) +
+                     " violating=" + std::to_string(violating) +
+                     " worst_slack=" +
+                     (worst_slack.has_value() ? FormatNum(*worst_slack)
+                                              : std::string("-")) +
+                     " report=" + report +
+                     " artifact=" + std::to_string(artifact.value());
+          text += "\nMinimum period (scene " + result.scenario.name +
+                  "): " +
+                  std::to_string(result.min_period_clocks.size()) +
+                  " checks, " + std::to_string(violating) +
+                  " violating";
+          if (worst_slack.has_value()) {
+            text += ", worst slack " + FormatNum(*worst_slack) + " ns";
+          }
+          text += ".\n";
+          if (result.min_period_clocks.empty()) {
+            text += "No min-period checks evaluated: no clock has a "
+                    "setup group with constrained endpoints.\n";
+          } else if (verbose) {
+            std::vector<std::vector<std::string>> table;
+            table.push_back({"Pin", "Clock", "Period (ns)",
+                             "Min period (ns)", "Slack (ns)"});
+            for (const analysis::MinPeriodEndpointRow& row :
+                 result.min_period_endpoints) {
+              table.push_back({row.pin, row.clock,
+                               FormatNum(row.period_ns),
+                               FormatNum(row.min_period_ns),
+                               FormatNum(row.slack_ns)});
+              payload += "\nscene=" + result.scenario.name +
+                         " pin=" + row.pin +
+                         " clock=" + row.clock +
+                         " period=" + FormatNum(row.period_ns) +
+                         " min_period=" +
+                         FormatNum(row.min_period_ns) +
+                         " slack=" + FormatNum(row.slack_ns);
+            }
+            text += ReportClockRenderTable(std::move(table));
+          } else {
+            // One row per clock: its worst endpoint. The rows
+            // arrive worst slack first, already per clock.
+            std::vector<std::vector<std::string>> table;
+            table.push_back({"Clock", "Period (ns)",
+                             "Min period (ns)", "Slack (ns)",
+                             "Worst pin"});
+            for (const analysis::MinPeriodClockRow& row :
+                 result.min_period_clocks) {
+              table.push_back({row.clock,
+                               FormatNum(row.period_ns),
+                               FormatNum(row.min_period_ns),
+                               FormatNum(row.slack_ns), row.worst_pin});
+              payload += "\nscene=" + result.scenario.name +
+                         " clock=" + row.clock +
+                         " period=" + FormatNum(row.period_ns) +
+                         " min_period=" +
+                         FormatNum(row.min_period_ns) +
+                         " slack=" + FormatNum(row.slack_ns) +
+                         " worst_pin=" + row.worst_pin;
+            }
+            text += ReportClockRenderTable(std::move(table));
+          }
+        }
+        if (auto bad = WriteCheckReportFile(opts, text)) return *bad;
+        if (opts.Seen("-file")) {
+          payload += "\nfile=" + *opts.Value("-file");
+        }
+        payload += "\n" + text;
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- report_min_pulse_width (Immediate unit 10, review item
+  // T8) ---------------------------------------------------------
+  // The minimum-pulse-width checks: every evaluated clock
+  // pulse, its measured width against the required minimum,
+  // worst slack first. A pin with a minimum-width constraint
+  // but no evaluated pulse (no clock path, or no close path)
+  // is listed separately as defined but not evaluated, with
+  // the coverage reason: a missing row is never presented as
+  // a pass.
+  add("report_min_pulse_width",
+      "report_min_pulse_width [-violators] [-scene <name>] "
+      "[-file <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-violators", 0, false},
+                 {"-scene", 1, false},
+                 {"-file", 1, false}},
+                "report_min_pulse_width", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "report_min_pulse_width: unexpected positional "
+              "argument: " + opts.Positionals()[0]);
+        }
+        const bool violators_only = opts.Has("-violators");
+        std::vector<analysis::SceneAnalysis> scenes;
+        std::vector<analysis::CheckReportsResult> analyzed;
+        if (auto bad = AnalyzeCheckReportsScenes(
+                ctx, "report_min_pulse_width", opts, scenes, analyzed)) {
+          return *bad;
+        }
+        std::string payload =
+            std::string("scenes=") + std::to_string(analyzed.size()) +
+            " revision=" +
+            std::to_string(ctx.project.ledger.current_revision());
+        std::string text;
+        for (const analysis::CheckReportsResult& result :
+             analyzed) {
+          const std::string report =
+              "min_pulse_width_report_" + result.scenario.name;
+          const Result<session::ArtifactId> artifact =
+              ctx.reports.RegisterReport(ctx.project, report,
+                                         session::ProofStatus::kPass,
+                                         "NLDM");
+          if (!artifact.ok()) return FromStatus(artifact.status());
+          std::size_t violating = 0;
+          std::optional<double> worst_slack;
+          for (const analysis::MinPulseWidthCheck& check :
+               result.min_pulse_width_checks) {
+            if (check.slack_ns < 0.0) ++violating;
+            if (!worst_slack.has_value() ||
+                check.slack_ns < *worst_slack) {
+              worst_slack = check.slack_ns;
+            }
+          }
+          // Defined but not evaluated: a min-pulse-width
+          // coverage row that was never tested, with its
+          // reason. Evaluated checks are exactly the tested
+          // rows, so this is the complement.
+          std::vector<const analysis::CoveragePin*> unevaluated;
+          for (const analysis::CoveragePin& row :
+               result.coverage_pins) {
+            if (row.check_type == "min_pulse_width" && !row.tested) {
+              unevaluated.push_back(&row);
+            }
+          }
+          payload += "\nscene=" + result.scenario.name +
+                     " checks=" +
+                     std::to_string(
+                         result.min_pulse_width_checks.size()) +
+                     " violating=" + std::to_string(violating) +
+                     " worst_slack=" +
+                     (worst_slack.has_value() ? FormatNum(*worst_slack)
+                                              : std::string("-")) +
+                     " unevaluated=" +
+                     std::to_string(unevaluated.size()) +
+                     " report=" + report +
+                     " artifact=" + std::to_string(artifact.value());
+          text += "\nMinimum pulse width (scene " +
+                  result.scenario.name + "): " +
+                  std::to_string(result.min_pulse_width_checks.size()) +
+                  " checks, " + std::to_string(violating) +
+                  " violating";
+          if (worst_slack.has_value()) {
+            text += ", worst slack " + FormatNum(*worst_slack) + " ns";
+          }
+          text += ".\n";
+          std::vector<std::vector<std::string>> table;
+          table.push_back({"Pin", "Transition", "Width (ns)",
+                           "Min width (ns)", "Slack (ns)"});
+          std::size_t shown = 0;
+          for (const analysis::MinPulseWidthCheck& check :
+               result.min_pulse_width_checks) {
+            if (violators_only && check.slack_ns >= 0.0) continue;
+            table.push_back({check.pin, check.transition,
+                             FormatNum(check.width_ns),
+                             FormatNum(check.min_width_ns),
+                             FormatNum(check.slack_ns)});
+            payload += "\nscene=" + result.scenario.name +
+                       " pin=" + check.pin +
+                       " transition=" + check.transition +
+                       " width=" + FormatNum(check.width_ns) +
+                       " min_width=" + FormatNum(check.min_width_ns) +
+                       " slack=" + FormatNum(check.slack_ns);
+            ++shown;
+          }
+          if (shown == 0) {
+            table.push_back({"-", "-", "(no checks pass the selection)",
+                             "-", "-"});
+          }
+          text += ReportClockRenderTable(std::move(table));
+          if (!unevaluated.empty()) {
+            text += "Defined but not evaluated:\n";
+            std::vector<std::vector<std::string>> unevaluated_table;
+            unevaluated_table.push_back({"Pin", "Reason"});
+            for (const analysis::CoveragePin* row : unevaluated) {
+              unevaluated_table.push_back(
+                  {row->pin, row->untested_reason});
+              payload += "\nscene=" + result.scenario.name +
+                         " unevaluated_pin=" + row->pin +
+                         " reason=" + row->untested_reason;
+            }
+            text += ReportClockRenderTable(std::move(unevaluated_table));
+          }
+        }
+        if (auto bad = WriteCheckReportFile(opts, text)) return *bad;
+        if (opts.Seen("-file")) {
+          payload += "\nfile=" + *opts.Value("-file");
+        }
+        payload += "\n" + text;
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- report_clock_gating_check (Immediate unit 10, review
+  // item T8) ----------------------------------------------------
+  // The clock-gating checks: every gated-clock enable the
+  // engine recognizes, with the setup and hold slacks the
+  // engine measured for it. The enable pin and its gated clock
+  // pin come from the analysis coverage (the coverage row
+  // names both); the slacks come from the gated-clock path
+  // group, whose endpoint is the enable pin. A defined check
+  // the engine never evaluated (no clocked path reaches the
+  // enable) is listed with its coverage reason and no slack,
+  // never as a pass.
+  add("report_clock_gating_check",
+      "report_clock_gating_check [-scene <name>] [-file <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-scene", 1, false}, {"-file", 1, false}},
+                "report_clock_gating_check", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "report_clock_gating_check: unexpected positional "
+              "argument: " + opts.Positionals()[0]);
+        }
+        std::vector<analysis::SceneAnalysis> scenes;
+        std::vector<analysis::CheckReportsResult> analyzed;
+        if (auto bad = AnalyzeCheckReportsScenes(
+                ctx, "report_clock_gating_check", opts, scenes,
+                analyzed)) {
+          return *bad;
+        }
+        std::string payload =
+            std::string("scenes=") + std::to_string(analyzed.size()) +
+            " revision=" +
+            std::to_string(ctx.project.ledger.current_revision());
+        std::string text;
+        for (const analysis::CheckReportsResult& result :
+             analyzed) {
+          const std::string report =
+              "clock_gating_check_report_" + result.scenario.name;
+          const Result<session::ArtifactId> artifact =
+              ctx.reports.RegisterReport(ctx.project, report,
+                                         session::ProofStatus::kPass,
+                                         "NLDM");
+          if (!artifact.ok()) return FromStatus(artifact.status());
+          // The defined checks: one coverage row per (enable,
+          // kind); the setup and hold rows of one enable share
+          // the pin, the gated clock pin, and the tested state.
+          struct GatingCheck {
+            std::string enable;
+            std::string clock = "-";
+            bool tested = false;
+            std::string reason;
+            std::optional<double> setup_slack;
+            std::optional<double> hold_slack;
+          };
+          std::map<std::string, GatingCheck> by_enable;
+          for (const analysis::CoveragePin& row :
+               result.coverage_pins) {
+            if (row.check_type != "clock_gating_setup" &&
+                row.check_type != "clock_gating_hold") {
+              continue;
+            }
+            GatingCheck& check = by_enable[row.pin];
+            check.enable = row.pin;
+            check.clock = row.related_pin;
+            check.tested = row.tested;
+            if (!row.tested) check.reason = row.untested_reason;
+          }
+          // The measured slacks: the gated-clock path group,
+          // whose endpoint is the enable pin, per check kind.
+          const auto add_group_slack =
+              [&by_enable](
+                  const std::vector<analysis::PathGroupResult>& groups,
+                  bool setup) {
+                for (const analysis::PathGroupResult& group : groups) {
+                  if (group.name != "gated clock") continue;
+                  for (const analysis::EndpointSlack& endpoint :
+                       group.endpoints) {
+                    GatingCheck& check = by_enable[endpoint.pin];
+                    check.enable = endpoint.pin;
+                    if (setup) {
+                      check.setup_slack = endpoint.slack_ns;
+                    } else {
+                      check.hold_slack = endpoint.slack_ns;
+                    }
+                  }
+                }
+              };
+          add_group_slack(result.setup_groups, true);
+          add_group_slack(result.hold_groups, false);
+          std::size_t tested = 0;
+          std::size_t violating = 0;
+          for (const auto& entry : by_enable) {
+            const GatingCheck& check = entry.second;
+            if (check.tested) ++tested;
+            if ((check.setup_slack.has_value() &&
+                 *check.setup_slack < 0.0) ||
+                (check.hold_slack.has_value() &&
+                 *check.hold_slack < 0.0)) {
+              ++violating;
+            }
+          }
+          payload += "\nscene=" + result.scenario.name +
+                     " checks=" + std::to_string(by_enable.size()) +
+                     " tested=" + std::to_string(tested) +
+                     " violating=" + std::to_string(violating) +
+                     " report=" + report +
+                     " artifact=" + std::to_string(artifact.value());
+          text += "\nClock gating checks (scene " +
+                  result.scenario.name + "): " +
+                  std::to_string(by_enable.size()) + " checks, " +
+                  std::to_string(tested) + " evaluated, " +
+                  std::to_string(violating) + " violating.\n";
+          if (by_enable.empty()) {
+            text += "No clock-gating checks defined: no gated-clock "
+                    "enable in the design.\n";
+          } else {
+            std::vector<std::vector<std::string>> table;
+            table.push_back({"Enable pin", "Gated clock pin",
+                             "Setup slack (ns)", "Hold slack (ns)",
+                             "Status"});
+            for (const auto& entry : by_enable) {
+              const GatingCheck& check = entry.second;
+              const std::string setup =
+                  check.setup_slack.has_value()
+                      ? FormatNum(*check.setup_slack)
+                      : std::string("-");
+              const std::string hold =
+                  check.hold_slack.has_value()
+                      ? FormatNum(*check.hold_slack)
+                      : std::string("-");
+              const std::string status =
+                  check.tested ? "tested"
+                               : "untested: " + check.reason;
+              table.push_back({check.enable, check.clock, setup, hold,
+                               status});
+              payload += "\nscene=" + result.scenario.name +
+                         " enable=" + check.enable +
+                         " clock=" + check.clock +
+                         " setup_slack=" + setup +
+                         " hold_slack=" + hold + " status=" + status;
+            }
+            text += ReportClockRenderTable(std::move(table));
+            // A tested check with no measured slack is
+            // unmeasured, not passing: the engine produced no
+            // gated-clock path end for this session, so there
+            // is no slack to report. Say so plainly instead of
+            // letting the dash read as a pass.
+            std::size_t unmeasured = 0;
+            for (const auto& entry : by_enable) {
+              const GatingCheck& check = entry.second;
+              if (check.tested &&
+                  (!check.setup_slack.has_value() ||
+                   !check.hold_slack.has_value())) {
+                ++unmeasured;
+              }
+            }
+            if (unmeasured > 0) {
+              text += "Note: " + std::to_string(unmeasured) +
+                      " tested check(s) have no measured slack: the "
+                      "engine produced no gated-clock path end for "
+                      "this session.\n";
+            }
+          }
+        }
+        if (auto bad = WriteCheckReportFile(opts, text)) return *bad;
+        if (opts.Seen("-file")) {
+          payload += "\nfile=" + *opts.Value("-file");
         }
         payload += "\n" + text;
         return CommandResult::Ok(payload);
