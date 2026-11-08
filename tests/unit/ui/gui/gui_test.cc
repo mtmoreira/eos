@@ -142,7 +142,13 @@ TEST(GuiSessionView, DispatchEchoesAndRuns) {
   EXPECT_EQ(result.payload, "pong=1");
   ASSERT_EQ(view.EchoLog().size(), 2u);
   EXPECT_EQ(view.EchoLog()[0], "eos::ping");
-  EXPECT_EQ(view.EchoLog()[1], "pong=1");
+  EXPECT_EQ(view.EchoLog()[1], "ok");
+  // The output line goes to the log, not the transcript.
+  ASSERT_EQ(view.Log().size(), 2u);
+  EXPECT_EQ(view.Log()[0].text, "eos::ping");
+  EXPECT_EQ(view.Log()[0].severity, "info");
+  EXPECT_EQ(view.Log()[1].text, "pong=1");
+  EXPECT_EQ(view.Log()[1].severity, "info");
 }
 
 TEST(GuiSessionView, DispatchQuotesArgsWithSpaces) {
@@ -154,7 +160,7 @@ TEST(GuiSessionView, DispatchQuotesArgsWithSpaces) {
   EXPECT_TRUE(result.ok);
   ASSERT_EQ(view.EchoLog().size(), 2u);
   EXPECT_EQ(view.EchoLog()[0], "eos::ping \"a b\" plain");
-  EXPECT_EQ(view.EchoLog()[1], "pong=1");
+  EXPECT_EQ(view.EchoLog()[1], "ok");
 }
 
 TEST(GuiSessionView, DispatchUnknownStillEchoed) {
@@ -2208,7 +2214,7 @@ TEST(GuiSessionView, DispatchEntryRunsAndEchoes) {
   EXPECT_TRUE(result.ok);
   ASSERT_EQ(view.EchoLog().size(), 2u);
   EXPECT_EQ(view.EchoLog()[0], "eos::ping \"a b\" plain");
-  EXPECT_EQ(view.EchoLog()[1], "pong=1");
+  EXPECT_EQ(view.EchoLog()[1], "ok");
 }
 
 TEST(GuiSessionView, DispatchEntryBlankRecordsNothing) {
@@ -2246,9 +2252,9 @@ TEST(GuiSessionView, DispatchEntryMultiLineRunsEach) {
   EXPECT_TRUE(result.ok);
   ASSERT_EQ(view.EchoLog().size(), 4u);
   EXPECT_EQ(view.EchoLog()[0], "eos::ping a");
-  EXPECT_EQ(view.EchoLog()[1], "pong=1");
+  EXPECT_EQ(view.EchoLog()[1], "ok");
   EXPECT_EQ(view.EchoLog()[2], "eos::ping b");
-  EXPECT_EQ(view.EchoLog()[3], "pong=1");
+  EXPECT_EQ(view.EchoLog()[3], "ok");
 }
 
 TEST(GuiSessionView, DispatchEntryPastedBlobRunsEach) {
@@ -2261,11 +2267,11 @@ TEST(GuiSessionView, DispatchEntryPastedBlobRunsEach) {
   EXPECT_TRUE(result.ok);
   ASSERT_EQ(view.EchoLog().size(), 6u);
   EXPECT_EQ(view.EchoLog()[0], "eos::ping a");
-  EXPECT_EQ(view.EchoLog()[1], "pong=1");
+  EXPECT_EQ(view.EchoLog()[1], "ok");
   EXPECT_EQ(view.EchoLog()[2], "eos::ping b");
-  EXPECT_EQ(view.EchoLog()[3], "pong=1");
+  EXPECT_EQ(view.EchoLog()[3], "ok");
   EXPECT_EQ(view.EchoLog()[4], "eos::ping c");
-  EXPECT_EQ(view.EchoLog()[5], "pong=1");
+  EXPECT_EQ(view.EchoLog()[5], "ok");
 }
 
 TEST(GuiSessionView, DispatchEntryContinuesPastFailure) {
@@ -2278,12 +2284,12 @@ TEST(GuiSessionView, DispatchEntryContinuesPastFailure) {
   EXPECT_FALSE(result.ok);
   ASSERT_EQ(view.EchoLog().size(), 6u);
   EXPECT_EQ(view.EchoLog()[0], "eos::ping a");
-  EXPECT_EQ(view.EchoLog()[1], "pong=1");
+  EXPECT_EQ(view.EchoLog()[1], "ok");
   EXPECT_EQ(view.EchoLog()[2], "eos::nope");
   EXPECT_EQ(view.EchoLog()[3],
             "eos::nope: EOS invalid_command: unknown command: eos::nope");
   EXPECT_EQ(view.EchoLog()[4], "eos::ping b");
-  EXPECT_EQ(view.EchoLog()[5], "pong=1");
+  EXPECT_EQ(view.EchoLog()[5], "ok");
 }
 
 TEST(GuiSessionView, DispatchEntryBareMultiCommandReportsError) {
@@ -2311,7 +2317,7 @@ TEST(GuiSessionView, DispatchEntryBareMultiCommandReportsError) {
             "eos::one a one b: EOS invalid_command: want 1 arg");
 }
 
-TEST(GuiSessionView, DispatchEntryShowsMultiLinePayload) {
+TEST(GuiSessionView, DispatchEntrySendsMultiLinePayloadToLog) {
   CommandRegistry registry;
   auto status = registry.Register(
       "multi", "multi",
@@ -2322,10 +2328,15 @@ TEST(GuiSessionView, DispatchEntryShowsMultiLinePayload) {
   CommandContext context;
   SessionView view(registry, context);
   EXPECT_TRUE(view.DispatchEntry("multi").ok);
-  ASSERT_EQ(view.EchoLog().size(), 3u);
+  // The transcript keeps the echo plus one outcome line; the
+  // output lines live in the log.
+  ASSERT_EQ(view.EchoLog().size(), 2u);
   EXPECT_EQ(view.EchoLog()[0], "eos::multi");
-  EXPECT_EQ(view.EchoLog()[1], "a=1");
-  EXPECT_EQ(view.EchoLog()[2], "b=2");
+  EXPECT_EQ(view.EchoLog()[1], "ok");
+  ASSERT_EQ(view.Log().size(), 3u);
+  EXPECT_EQ(view.Log()[0].text, "eos::multi");
+  EXPECT_EQ(view.Log()[1].text, "a=1");
+  EXPECT_EQ(view.Log()[2].text, "b=2");
 }
 
 // The history sink gets every successfully parsed console line in
@@ -4511,25 +4522,74 @@ TEST(GuiSessionView, DispatchFloorplanShowsFloorplanCenter) {
 }
 
 // Panel rework: the log window's entries. A dispatch logs its
-// command line as info; a failed dispatch logs the diagnostic
-// as an error as well.
+// command line as info plus its output lines as info; a failed
+// dispatch logs the diagnostic as an error as well.
 TEST(GuiSessionView, DispatchLogsCommandAndFailure) {
   CommandRegistry registry;
   RegisterPing(registry);
   CommandContext context;
   SessionView view(registry, context);
   ASSERT_TRUE(view.Dispatch("ping", {}).ok);
-  ASSERT_EQ(view.Log().size(), 1u);
+  ASSERT_EQ(view.Log().size(), 2u);
   EXPECT_EQ(view.Log()[0].severity, "info");
   EXPECT_EQ(view.Log()[0].text, "eos::ping");
   ASSERT_EQ(view.Log()[0].timestamp.size(), 8u);
-  EXPECT_FALSE(view.Dispatch("nope", {}).ok);
-  ASSERT_EQ(view.Log().size(), 3u);
   EXPECT_EQ(view.Log()[1].severity, "info");
-  EXPECT_EQ(view.Log()[1].text, "eos::nope");
-  EXPECT_EQ(view.Log()[2].severity, "error");
-  EXPECT_NE(view.Log()[2].text.find("EOS invalid_command"),
+  EXPECT_EQ(view.Log()[1].text, "pong=1");
+  EXPECT_FALSE(view.Dispatch("nope", {}).ok);
+  ASSERT_EQ(view.Log().size(), 4u);
+  EXPECT_EQ(view.Log()[2].severity, "info");
+  EXPECT_EQ(view.Log()[2].text, "eos::nope");
+  EXPECT_EQ(view.Log()[3].severity, "error");
+  EXPECT_NE(view.Log()[3].text.find("EOS invalid_command"),
             std::string::npos);
+}
+
+// Console/log routing: a command that prints output leaves
+// the transcript with only the echo plus one outcome line,
+// while the log keeps every output line in order.
+TEST(GuiSessionView, DispatchPayloadGoesToLogNotTranscript) {
+  CommandRegistry registry;
+  auto status = registry.Register(
+      "report", "report",
+      [](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Ok("line1\nline2\nline3\n");
+      });
+  EXPECT_TRUE(status.ok());
+  CommandContext context;
+  SessionView view(registry, context);
+  ASSERT_TRUE(view.Dispatch("report", {}).ok);
+  ASSERT_EQ(view.EchoLog().size(), 2u);
+  EXPECT_EQ(view.EchoLog()[0], "eos::report");
+  EXPECT_EQ(view.EchoLog()[1], "ok");
+  for (const std::string& line : view.EchoLog()) {
+    EXPECT_EQ(line.find("line"), std::string::npos) << line;
+  }
+  ASSERT_EQ(view.Log().size(), 4u);
+  EXPECT_EQ(view.Log()[0].text, "eos::report");
+  EXPECT_EQ(view.Log()[1].text, "line1");
+  EXPECT_EQ(view.Log()[2].text, "line2");
+  EXPECT_EQ(view.Log()[3].text, "line3");
+}
+
+// Console/log routing: a failing command shows its one-line
+// diagnostic in the transcript, the same line in Messages,
+// and the diagnostic as an error in the log.
+TEST(GuiSessionView, DispatchFailureShowsOneLineOutcomeInTranscript) {
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_FALSE(view.Dispatch("nope", {}).ok);
+  ASSERT_EQ(view.EchoLog().size(), 2u);
+  EXPECT_EQ(view.EchoLog()[0], "eos::nope");
+  EXPECT_EQ(view.EchoLog()[1],
+            "eos::nope: EOS invalid_command: unknown command: eos::nope");
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0], view.EchoLog()[1]);
+  ASSERT_EQ(view.Log().size(), 2u);
+  EXPECT_EQ(view.Log()[0].text, "eos::nope");
+  EXPECT_EQ(view.Log()[1].severity, "error");
+  EXPECT_EQ(view.Log()[1].text, view.EchoLog()[1]);
 }
 
 // The engine-log drain: RefreshLog moves the context's engine

@@ -37,9 +37,11 @@ enum class StepStatus {
 // the schematic model for a leaf level, and the right panels
 // model with the dispatch message log. Dispatching a command runs it on the shared
 // context (so widgets reading the context see the effect) and
-// records the echo line followed by its outcome in the console
-// transcript: the result payload lines on success, the
-// diagnostic line on failure. A rejected dispatch also records
+// records the echo line plus one outcome line in the console
+// transcript: "ok" on success, the diagnostic line on
+// failure. The command's output lines go to the log window
+// instead, shown and saved there, so a long report never
+// floods the console the command was typed in. A rejected dispatch also records
 // the diagnostic line in Messages, so the Messages panel shows
 // the failure and its diagnostic, and the transcript shows it
 // too: the console reports every outcome where the user typed
@@ -89,12 +91,12 @@ class SessionView {
   const std::string& CheckpointName() const { return checkpoint_; }
 
   // The console transcript: one echo line per dispatched
-  // command, each followed by its outcome lines (the result
-  // payload lines on success, the diagnostic line on failure),
-  // in dispatch order. A command with an empty payload shows
-  // only its echo line. RefreshConsole renders this verbatim,
-  // so the transcript is the record of what was attempted and
-  // what came of it.
+  // command, each followed by one outcome line ("ok" on
+  // success, the diagnostic line on failure), in dispatch
+  // order. A command's output lines never appear here: they
+  // go to the log window (see Log). RefreshConsole renders
+  // this verbatim, so the transcript is the record of what
+  // was attempted and what came of it, one line per outcome.
   const std::vector<std::string>& EchoLog() const { return echo_; }
   CommandContext& context() { return context_; }
   const CommandContext& context() const { return context_; }
@@ -280,7 +282,11 @@ class SessionView {
 
   // Log window entries, in drain order. The window appends
   // them as RefreshLog drains the context's engine lines; a
-  // refresh never re-reads lines already shown.
+  // refresh never re-reads lines already shown. A dispatched
+  // command's echo line and output lines land here too, as
+  // info entries, so the log is the saved record of what a
+  // command printed, while the transcript keeps only the echo
+  // plus one outcome line.
   const std::vector<LogEntry>& Log() const { return log_; }
 
   // Drains the context's engine log lines into log entries
