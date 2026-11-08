@@ -12,6 +12,8 @@
 #include "eos/ui/panels.h"
 #include "eos/ui/registry.h"
 #include "eos/ui/schematic.h"
+#include "eos/ui/timing.h"
+#include "eos/analysis/timing.h"
 #include "gtest/gtest.h"
 
 #ifdef EOS_UI_GUI_HAVE_QT6
@@ -71,6 +73,9 @@ using eos::ui::SchematicPoint;
 using eos::ui::SessionView;
 using eos::ui::StepStatus;
 using eos::ui::SymbolForType;
+using eos::ui::TimingClock;
+using eos::ui::TimingModel;
+using eos::ui::TimingScene;
 using eos::ui::kSchematicColumnGap;
 using eos::ui::kSchematicGateGap;
 using eos::ui::kSchematicGateHeight;
@@ -2523,6 +2528,240 @@ TEST(IssuesModel, ReloadReplacesPreviousIssues) {
   EXPECT_TRUE(model.Issues().empty());
 }
 
+// A full timing_summary payload for the optloop acceptance
+// chain: one scene at worst slack +0.05 ns, the vclk clock
+// row, five violator rows, three worst paths, the coverage
+// summary, and the QoR rows.
+const char kTimingPayload[] =
+    "source=verilog scenes=1 revision=3\n"
+    "clock name=vclk generated=0 period=1.25 rise=0 fall=0.625 "
+    "attrs= skew=none sources={-}\n"
+    "scene=func_tt mode=func corner=tt parasitics=estimate "
+    "worst_slack_ns=0.05 total_negative_slack_ns=0 "
+    "worst_hold_slack_ns=0.45 total_negative_hold_slack_ns=0 "
+    "max_transition_ns=0 max_transition_violations=0 "
+    "max_capacitance_pf=0 max_capacitance_violations=0 max_fanout=0 "
+    "max_fanout_violations=0\n"
+    "scene=func_tt class=max_delay violator=- slack=0.05 cost=0 "
+    "weight=1 violations=0\n"
+    "scene=func_tt class=min_delay violator=- slack=0.45 cost=0 "
+    "weight=1 violations=0\n"
+    "scene=func_tt class=max_transition violator=- limit=none "
+    "weight=1 violations=0\n"
+    "scene=func_tt class=max_capacitance violator=- limit=none "
+    "weight=1 violations=0\n"
+    "scene=func_tt class=max_fanout violator=- limit=none weight=1 "
+    "violations=0\n"
+    "path scene=func_tt check=setup endpoint=y1 startpoint=a "
+    "slack=0.05 arrival=1.2 required=1.25\n"
+    "path scene=func_tt check=setup endpoint=y2 startpoint=a "
+    "slack=0.05 arrival=1.2 required=1.25\n"
+    "path scene=func_tt check=hold endpoint=y1 startpoint=a "
+    "slack=0.45 arrival=0.8 required=0.35\n"
+    "coverage scene=func_tt checks=4 tested=4 untested=0\n"
+    "coverage scene=func_tt type=setup tested=2 untested=0 "
+    "percent=100.0\n"
+    "coverage scene=func_tt type=hold tested=2 untested=0 "
+    "percent=100.0\n"
+    "qor scene=func_tt setup_groups=1 hold_groups=1 union_tns=0 "
+    "union_endpoints=0 every_group_tns=0 every_group_endpoints=0 "
+    "hold_union_tns=0 hold_union_endpoints=0 hold_every_group_tns=0 "
+    "hold_every_group_endpoints=0 cells=4 area=8 compile_cpu_s=0.01\n"
+    "qor scene=func_tt group=vclk check=setup wns=0.05 tns=0 "
+    "violating_paths=0\n"
+    "qor scene=func_tt group=vclk check=hold wns=0.45 tns=0 "
+    "violating_paths=0\n"
+    "qor scene=func_tt cell=AND2 count=4 area=8\n"
+    "qor scene=func_tt drc=max_transition violations=0 "
+    "worst_slack=none\n"
+    "qor scene=func_tt drc=max_capacitance violations=0 "
+    "worst_slack=none\n"
+    "qor scene=func_tt drc=max_fanout violations=0 worst_slack=none\n";
+
+TEST(TimingModel, ParsesFullPayload) {
+  TimingModel model;
+  ASSERT_TRUE(model.LoadPayload(kTimingPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.Source(), "verilog");
+  ASSERT_EQ(model.Scenes().size(), 1u);
+  const TimingScene& scene = model.Scenes()[0];
+  EXPECT_EQ(scene.scene, "func_tt");
+  EXPECT_EQ(scene.mode, "func");
+  EXPECT_EQ(scene.corner, "tt");
+  EXPECT_EQ(scene.parasitics, "estimate");
+  EXPECT_EQ(scene.worst_slack_ns, "0.05");
+  EXPECT_EQ(scene.total_negative_slack_ns, "0");
+  EXPECT_EQ(scene.worst_hold_slack_ns, "0.45");
+  EXPECT_EQ(scene.max_transition_violations, 0u);
+  ASSERT_EQ(model.Clocks().size(), 1u);
+  const TimingClock& clock = model.Clocks()[0];
+  EXPECT_EQ(clock.name, "vclk");
+  EXPECT_FALSE(clock.generated);
+  EXPECT_EQ(clock.period, "1.25");
+  EXPECT_EQ(clock.rise, "0");
+  EXPECT_EQ(clock.fall, "0.625");
+  EXPECT_EQ(clock.skew, "none");
+  EXPECT_EQ(clock.sources, "{-}");
+  EXPECT_TRUE(model.GeneratedClocks().empty());
+  EXPECT_TRUE(model.BindClocks().empty());
+  ASSERT_EQ(model.Violators().size(), 5u);
+  EXPECT_EQ(model.Violators()[0].klass, "max_delay");
+  EXPECT_EQ(model.Violators()[0].violator, "-");
+  EXPECT_EQ(model.Violators()[0].slack, "0.05");
+  EXPECT_EQ(model.Violators()[0].cost, "0");
+  EXPECT_EQ(model.Violators()[0].violations, 0u);
+  EXPECT_TRUE(model.Violators()[0].has_limit);
+  EXPECT_EQ(model.Violators()[2].klass, "max_transition");
+  EXPECT_FALSE(model.Violators()[2].has_limit);
+  ASSERT_EQ(model.Paths().size(), 3u);
+  EXPECT_EQ(model.Paths()[0].check, "setup");
+  EXPECT_EQ(model.Paths()[0].endpoint, "y1");
+  EXPECT_EQ(model.Paths()[0].startpoint, "a");
+  EXPECT_EQ(model.Paths()[0].slack, "0.05");
+  EXPECT_EQ(model.Paths()[2].check, "hold");
+  ASSERT_EQ(model.CoverageTotals().size(), 1u);
+  EXPECT_EQ(model.CoverageTotals()[0].checks, 4u);
+  EXPECT_EQ(model.CoverageTotals()[0].tested, 4u);
+  EXPECT_EQ(model.CoverageTotals()[0].untested, 0u);
+  ASSERT_EQ(model.CoverageTypes().size(), 2u);
+  EXPECT_EQ(model.CoverageTypes()[0].type, "setup");
+  EXPECT_EQ(model.CoverageTypes()[0].percent, "100.0");
+  ASSERT_EQ(model.QorScenes().size(), 1u);
+  EXPECT_EQ(model.QorScenes()[0].cells, 4u);
+  EXPECT_EQ(model.QorScenes()[0].area, "8");
+  EXPECT_EQ(model.QorScenes()[0].compile_cpu_s, "0.01");
+  ASSERT_EQ(model.QorGroups().size(), 2u);
+  EXPECT_EQ(model.QorGroups()[0].group, "vclk");
+  EXPECT_EQ(model.QorGroups()[0].wns, "0.05");
+  ASSERT_EQ(model.QorCells().size(), 1u);
+  EXPECT_EQ(model.QorCells()[0].cell, "AND2");
+  EXPECT_EQ(model.QorCells()[0].count, 4u);
+  ASSERT_EQ(model.QorDrcs().size(), 3u);
+  EXPECT_EQ(model.QorDrcs()[0].drc, "max_transition");
+  EXPECT_EQ(model.QorDrcs()[0].worst_slack, "none");
+}
+
+TEST(TimingModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      // No header.
+      "scene=func_tt mode=func corner=tt parasitics=estimate "
+      "worst_slack_ns=0.05 total_negative_slack_ns=0 "
+      "worst_hold_slack_ns=0.45 total_negative_hold_slack_ns=0 "
+      "max_transition_ns=0 max_transition_violations=0 "
+      "max_capacitance_pf=0 max_capacitance_violations=0 max_fanout=0 "
+      "max_fanout_violations=0\n",
+      // Unknown source.
+      "source=odb2 scenes=1 revision=3\n",
+      // Scene count mismatch.
+      "source=verilog scenes=2 revision=3\n"
+      "scene=func_tt mode=func corner=tt parasitics=estimate "
+      "worst_slack_ns=0.05 total_negative_slack_ns=0 "
+      "worst_hold_slack_ns=0.45 total_negative_hold_slack_ns=0 "
+      "max_transition_ns=0 max_transition_violations=0 "
+      "max_capacitance_pf=0 max_capacitance_violations=0 max_fanout=0 "
+      "max_fanout_violations=0\n",
+      // A clock with a skew value: skew is always none.
+      "source=verilog scenes=1 revision=3\n"
+      "clock name=vclk generated=0 period=1.25 rise=0 fall=0.625 "
+      "attrs= skew=0.1 sources={-}\n",
+      // A path naming a scene the payload never summarized.
+      "source=verilog scenes=1 revision=3\n"
+      "scene=func_tt mode=func corner=tt parasitics=estimate "
+      "worst_slack_ns=0.05 total_negative_slack_ns=0 "
+      "worst_hold_slack_ns=0.45 total_negative_hold_slack_ns=0 "
+      "max_transition_ns=0 max_transition_violations=0 "
+      "max_capacitance_pf=0 max_capacitance_violations=0 max_fanout=0 "
+      "max_fanout_violations=0\n"
+      "path scene=func_xx check=setup endpoint=y1 startpoint=a "
+      "slack=0.05 arrival=1.2 required=1.25\n",
+      // An unknown key on a scene line.
+      "source=verilog scenes=1 revision=3\n"
+      "scene=func_tt mode=func corner=tt parasitics=estimate "
+      "worst_slack_ns=0.05 total_negative_slack_ns=0 "
+      "worst_hold_slack_ns=0.45 total_negative_hold_slack_ns=0 "
+      "max_transition_ns=0 max_transition_violations=0 "
+      "max_capacitance_pf=0 max_capacitance_violations=0 max_fanout=0 "
+      "max_fanout_violations=0 extra=1\n",
+      // A two-token worst_slack: the value must be one token.
+      "source=verilog scenes=1 revision=3\n"
+      "scene=func_tt mode=func corner=tt parasitics=estimate "
+      "worst_slack_ns=0.05 total_negative_slack_ns=0 "
+      "worst_hold_slack_ns=0.45 total_negative_hold_slack_ns=0 "
+      "max_transition_ns=0 max_transition_violations=0 "
+      "max_capacitance_pf=0 max_capacitance_violations=0 max_fanout=0 "
+      "max_fanout_violations=0\n"
+      "scene=func_tt class=max_delay violator=- slack=0.05 cost=0 "
+      "weight=1 violations=0\n"
+      "scene=func_tt class=min_delay violator=- slack=0.45 cost=0 "
+      "weight=1 violations=0\n"
+      "scene=func_tt class=max_transition violator=- limit=none "
+      "weight=1 violations=0\n"
+      "scene=func_tt class=max_capacitance violator=- limit=none "
+      "weight=1 violations=0\n"
+      "scene=func_tt class=max_fanout violator=- limit=none weight=1 "
+      "violations=0\n"
+      "coverage scene=func_tt checks=0 tested=0 untested=0\n"
+      "qor scene=func_tt setup_groups=0 hold_groups=0 union_tns=0 "
+      "union_endpoints=0 every_group_tns=0 every_group_endpoints=0 "
+      "hold_union_tns=0 hold_union_endpoints=0 hold_every_group_tns=0 "
+      "hold_every_group_endpoints=0 cells=0 area=0 compile_cpu_s=n/a\n"
+      "qor scene=func_tt drc=max_transition violations=0 "
+      "worst_slack=no limit\n",
+  };
+  for (const char* payload : bad) {
+    TimingModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+  // A malformed load keeps the previous timing, and a payload
+  // missing one violator class is malformed.
+  TimingModel model;
+  ASSERT_TRUE(model.LoadPayload(kTimingPayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.Scenes().size(), 1u);
+  EXPECT_EQ(model.Scenes()[0].worst_slack_ns, "0.05");
+  const std::string missing_class =
+      std::string(kTimingPayload).substr(
+          0, std::string(kTimingPayload).find(
+                 "scene=func_tt class=max_fanout"));
+  EXPECT_FALSE(model.LoadPayload(missing_class));
+  EXPECT_EQ(model.Scenes().size(), 1u);
+}
+
+TEST(TimingModel, ReloadReplacesPreviousTiming) {
+  TimingModel model;
+  ASSERT_TRUE(model.LoadPayload(kTimingPayload));
+  ASSERT_EQ(model.Scenes().size(), 1u);
+  ASSERT_TRUE(model.LoadPayload(
+      "source=verilog scenes=1 revision=4\n"
+      "scene=func_tt mode=func corner=tt parasitics=estimate "
+      "worst_slack_ns=0.1 total_negative_slack_ns=0 "
+      "worst_hold_slack_ns=0.5 total_negative_hold_slack_ns=0 "
+      "max_transition_ns=0 max_transition_violations=0 "
+      "max_capacitance_pf=0 max_capacitance_violations=0 max_fanout=0 "
+      "max_fanout_violations=0\n"
+      "scene=func_tt class=max_delay violator=- slack=0.1 cost=0 "
+      "weight=1 violations=0\n"
+      "scene=func_tt class=min_delay violator=- slack=0.5 cost=0 "
+      "weight=1 violations=0\n"
+      "scene=func_tt class=max_transition violator=- limit=none "
+      "weight=1 violations=0\n"
+      "scene=func_tt class=max_capacitance violator=- limit=none "
+      "weight=1 violations=0\n"
+      "scene=func_tt class=max_fanout violator=- limit=none weight=1 "
+      "violations=0\n"
+      "coverage scene=func_tt checks=0 tested=0 untested=0\n"
+      "qor scene=func_tt setup_groups=0 hold_groups=0 union_tns=0 "
+      "union_endpoints=0 every_group_tns=0 every_group_endpoints=0 "
+      "hold_union_tns=0 hold_union_endpoints=0 hold_every_group_tns=0 "
+      "hold_every_group_endpoints=0 cells=0 area=0 compile_cpu_s=n/a\n"));
+  EXPECT_EQ(model.Scenes()[0].worst_slack_ns, "0.1");
+  EXPECT_TRUE(model.Paths().empty());
+  model.Clear();
+  EXPECT_FALSE(model.Loaded());
+  EXPECT_TRUE(model.Scenes().empty());
+}
+
 void RegisterIssuesCommand(CommandRegistry& registry,
                            const std::string& payload, bool ok,
                            int* calls = nullptr) {
@@ -3260,18 +3499,19 @@ TEST(CenterView, HighlightGateForwardsToSchematicOnlyWhenLeaf) {
             "No schematic for this level.");
 }
 
-TEST(PanelsView, HasFiveTabsWithoutSchematic) {
+TEST(PanelsView, HasSixTabsWithTiming) {
   OutlineTestApp();
   CommandRegistry registry;
   CommandContext context;
   SessionView view(registry, context);
   PanelsView panels(view);
-  ASSERT_EQ(panels.count(), 5);
+  ASSERT_EQ(panels.count(), 6);
   EXPECT_EQ(panels.tabText(0).toStdString(), "Issues");
   EXPECT_EQ(panels.tabText(1).toStdString(), "Sources");
   EXPECT_EQ(panels.tabText(2).toStdString(), "Results");
-  EXPECT_EQ(panels.tabText(3).toStdString(), "Opt log");
-  EXPECT_EQ(panels.tabText(4).toStdString(), "Messages");
+  EXPECT_EQ(panels.tabText(3).toStdString(), "Timing");
+  EXPECT_EQ(panels.tabText(4).toStdString(), "Opt log");
+  EXPECT_EQ(panels.tabText(5).toStdString(), "Messages");
 }
 
 // An issue on the leaf adder module, so LocateIssue must
@@ -3426,6 +3666,107 @@ TEST(GuiSessionView, RefreshIssuesClearsOnMalformedPayload) {
   SessionView view(registry, context);
   view.RefreshIssues();
   EXPECT_FALSE(view.Issues().Loaded());
+}
+
+void RegisterTimingCommand(CommandRegistry& registry,
+                           const std::string& payload, bool ok,
+                           int* calls = nullptr) {
+  auto status = registry.Register(
+      "timing_summary", "timing_summary",
+      [payload, ok, calls](CommandContext&,
+                           const std::vector<std::string>&) {
+        if (calls != nullptr) ++(*calls);
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no timing results");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
+// One fabricated last run: the func_tt scene at worst slack
+// +0.05 ns, so RefreshTiming has timing inputs to key on.
+eos::analysis::SceneResult FakeTimingResult(double worst_slack_ns) {
+  eos::analysis::SceneResult result;
+  result.scenario.name = "func_tt";
+  result.scenario.mode = "func";
+  result.scenario.corner = "tt";
+  result.scenario.parasitics = eos::db::ParasiticsLevel::kEstimate;
+  result.metrics["worst_slack_ns"] =
+      eos::analysis::TimingMetric{worst_slack_ns, "ns"};
+  result.metrics["total_negative_slack_ns"] =
+      eos::analysis::TimingMetric{0.0, "ns"};
+  result.metrics["worst_hold_slack_ns"] =
+      eos::analysis::TimingMetric{0.45, "ns"};
+  result.metrics["total_negative_hold_slack_ns"] =
+      eos::analysis::TimingMetric{0.0, "ns"};
+  return result;
+}
+
+TEST(GuiSessionView, RefreshTimingPopulatesModelWithoutEcho) {
+  CommandRegistry registry;
+  RegisterTimingCommand(registry, kTimingPayload, true);
+  CommandContext context;
+  context.timing.last_results.push_back(FakeTimingResult(0.05));
+  SessionView view(registry, context);
+  view.RefreshTiming();
+  EXPECT_TRUE(view.Timing().Loaded());
+  ASSERT_EQ(view.Timing().Scenes().size(), 1u);
+  EXPECT_EQ(view.Timing().Scenes()[0].worst_slack_ns, "0.05");
+  EXPECT_TRUE(view.EchoLog().empty());
+}
+
+TEST(GuiSessionView, RefreshTimingRunsQueryOncePerInputs) {
+  CommandRegistry registry;
+  int calls = 0;
+  RegisterTimingCommand(registry, kTimingPayload, true, &calls);
+  CommandContext context;
+  context.timing.last_results.push_back(FakeTimingResult(0.05));
+  SessionView view(registry, context);
+  view.RefreshTiming();
+  EXPECT_EQ(calls, 1);
+  view.RefreshTiming();
+  EXPECT_EQ(calls, 1);
+  // A new run with a different worst slack changes the key, so
+  // the query runs again.
+  context.timing.last_results[0] = FakeTimingResult(0.1);
+  view.RefreshTiming();
+  EXPECT_EQ(calls, 2);
+}
+
+TEST(GuiSessionView, RefreshTimingClearsWhenNoResults) {
+  CommandRegistry registry;
+  RegisterTimingCommand(registry, kTimingPayload, true);
+  CommandContext context;
+  context.timing.last_results.push_back(FakeTimingResult(0.05));
+  SessionView view(registry, context);
+  view.RefreshTiming();
+  ASSERT_TRUE(view.Timing().Loaded());
+  context.timing.last_results.clear();
+  view.RefreshTiming();
+  EXPECT_FALSE(view.Timing().Loaded());
+  EXPECT_TRUE(view.Timing().Scenes().empty());
+}
+
+TEST(GuiSessionView, RefreshTimingClearsOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterTimingCommand(registry, "", false);
+  CommandContext context;
+  context.timing.last_results.push_back(FakeTimingResult(0.05));
+  SessionView view(registry, context);
+  view.RefreshTiming();
+  EXPECT_FALSE(view.Timing().Loaded());
+}
+
+TEST(GuiSessionView, RefreshTimingClearsOnMalformedPayload) {
+  CommandRegistry registry;
+  RegisterTimingCommand(registry, "garbage\n", true);
+  CommandContext context;
+  context.timing.last_results.push_back(FakeTimingResult(0.05));
+  SessionView view(registry, context);
+  view.RefreshTiming();
+  EXPECT_FALSE(view.Timing().Loaded());
 }
 
 // Panel rework: the log window's entries. A dispatch logs its

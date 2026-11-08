@@ -78,8 +78,9 @@ TEST(Registry, CoreSetIsComplete) {
   // F0 adds write_def, read_lef, and read_def. Immediate unit
   // 10 adds the five check-specific reports:
   // report_global_timing, report_global_slack, report_min_period,
-  // report_min_pulse_width and report_clock_gating_check.
-  EXPECT_EQ(shell.registry.Names().size(), 88u);
+  // report_min_pulse_width and report_clock_gating_check. F2 adds
+  // timing_summary.
+  EXPECT_EQ(shell.registry.Names().size(), 89u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -4268,6 +4269,183 @@ TEST(ReportClockGatingCheck, RejectsBadOptions) {
       shell.Run("report_clock_gating_check", {"-scene", "func_xx"}).ok);
 }
 
+// The timing_summary payload on the optloop acceptance chain:
+// mapped, loop winner classic at worst slack +0.05 ns, run_timing
+// on the optimized netlist. The payload carries the scene summary
+// from the last run, the worst-violator rows, worst paths across
+// endpoints, the coverage summary, and the QoR numbers, and
+// registers no report binding of its own. The clock table is
+// empty in the read_sdc-only flow (see below); the row rendering
+// itself is covered by ShowsSessionClockRow.
+TEST(TimingSummary, ReportsOptloopAcceptanceNumbers) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const CommandResult loop =
+      shell.Run("synth_opt", {"-strategies", "classic"});
+  ASSERT_TRUE(loop.ok) << loop.message;
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  const std::size_t bindings_before =
+      shell.ctx.reports.bindings(shell.ctx.project).size();
+  const CommandResult summary = shell.Run("timing_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  // A query, not a report: no binding is registered.
+  EXPECT_EQ(shell.ctx.reports.bindings(shell.ctx.project).size(),
+            bindings_before);
+  EXPECT_NE(summary.payload.find("source=verilog scenes=1"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("scene=func_tt mode=func corner=tt "
+                                 "parasitics=estimate"),
+            std::string::npos);
+  EXPECT_NEAR(SynthPayloadNumber(summary, "worst_slack_ns"), 0.05,
+              1e-4);
+  EXPECT_NEAR(SynthPayloadNumber(summary, "total_negative_slack_ns"),
+              0.0, 1e-4);
+  // No clock row in the read_sdc-only flow: read_sdc records
+  // the SDC path only, so the clock the file defines never lands
+  // in the session constraint set that report_clock (and this
+  // query) reads. That is the documented report_clock boundary,
+  // not a gap in this query. The row rendering itself is covered
+  // by ShowsSessionClockRow below.
+  EXPECT_EQ(summary.payload.find("clock name="), std::string::npos);
+  // No violations anywhere, so the timing classes name no
+  // violator and cost zero, and the DRC classes carry no limit.
+  EXPECT_NE(summary.payload.find("scene=func_tt class=max_delay "
+                                 "violator=- slack=0.05 cost=0 weight=1 "
+                                 "violations=0"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("scene=func_tt class=min_delay "
+                                 "violator=-"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("scene=func_tt class=max_transition "
+                                 "violator=- limit=none weight=1 "
+                                 "violations=0"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("scene=func_tt class=max_capacitance "
+                                 "violator=- limit=none weight=1 "
+                                 "violations=0"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("scene=func_tt class=max_fanout "
+                                 "violator=- limit=none weight=1 "
+                                 "violations=0"),
+            std::string::npos);
+  // Worst paths across endpoints, worst first: both outputs
+  // arrive at 1.2 ns against the 1.25 ns clock.
+  EXPECT_NE(summary.payload.find(
+                "path scene=func_tt check=setup endpoint=y1"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "path scene=func_tt check=setup endpoint=y2"),
+            std::string::npos);
+  // Coverage totals: every defined check is counted, tested
+  // plus untested.
+  const std::size_t coverage_at =
+      summary.payload.find("coverage scene=func_tt checks=");
+  ASSERT_NE(coverage_at, std::string::npos);
+  const std::size_t coverage_end =
+      summary.payload.find('\n', coverage_at);
+  const std::string coverage_line = summary.payload.substr(
+      coverage_at,
+      coverage_end == std::string::npos
+          ? std::string::npos
+          : coverage_end - coverage_at);
+  const auto coverage_number = [&coverage_line](const char* key) {
+    const std::size_t at = coverage_line.find(key);
+    EXPECT_NE(at, std::string::npos) << "missing " << key;
+    if (at == std::string::npos) return 0u;
+    return static_cast<unsigned>(
+        std::stoul(coverage_line.substr(at + std::strlen(key))));
+  };
+  const unsigned checks = coverage_number("checks=");
+  const unsigned tested = coverage_number("tested=");
+  const unsigned untested = coverage_number("untested=");
+  EXPECT_GT(checks, 0u);
+  EXPECT_EQ(tested + untested, checks);
+  // QoR: the classic winner's four AND2 cells, area 8, and the
+  // vclk setup group at WNS +0.05 ns with no violations.
+  EXPECT_NE(summary.payload.find("qor scene=func_tt"), std::string::npos);
+  EXPECT_NE(summary.payload.find("cells=4 area=8"), std::string::npos);
+  EXPECT_NE(summary.payload.find("compile_cpu_s="), std::string::npos);
+  EXPECT_EQ(summary.payload.find("compile_cpu_s=n/a"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("qor scene=func_tt group=vclk "
+                                 "check=setup wns=0.05 tns=0 "
+                                 "violating_paths=0"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("qor scene=func_tt cell=AND2 count=4 "
+                                 "area=8"),
+            std::string::npos);
+}
+
+// The clock row rendering, on a session that has both timing
+// results and a session-defined clock. The interactive
+// create_clock is a disjoint system from the SDC file
+// (docs/read-sdc-audit.md section 5): it needs an open design,
+// which the synth flow never opens, so the design is opened and
+// the clock defined on its port BEFORE the flow runs, because
+// create_design resets the timing session. Defining the clock
+// does not disturb the STA run, it only adds the row to the
+// session constraint set, and the query then renders it at
+// 1.25 ns with the default waveform {0 0.625} and no uncertainty.
+TEST(TimingSummary, ShowsSessionClockRow) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  const CommandResult clock = shell.Run(
+      "create_clock", {"-period", "1.25", "-name", "vclk", "clk"});
+  ASSERT_TRUE(clock.ok) << clock.message;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const CommandResult loop =
+      shell.Run("synth_opt", {"-strategies", "classic"});
+  ASSERT_TRUE(loop.ok) << loop.message;
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  const std::size_t bindings_before =
+      shell.ctx.reports.bindings(shell.ctx.project).size();
+  const CommandResult summary = shell.Run("timing_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_EQ(shell.ctx.reports.bindings(shell.ctx.project).size(),
+            bindings_before);
+  EXPECT_NE(summary.payload.find(
+                "clock name=vclk generated=0 period=1.25 rise=0 "
+                "fall=0.625 attrs= skew=none sources="),
+            std::string::npos);
+  // The timing rows are untouched by the session clock.
+  EXPECT_NEAR(SynthPayloadNumber(summary, "worst_slack_ns"), 0.05,
+              1e-4);
+}
+
+TEST(TimingSummary, RequiresTimingRun) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const CommandResult summary = shell.Run("timing_summary");
+  ASSERT_FALSE(summary.ok);
+  EXPECT_NE(summary.message.find("no timing results"),
+            std::string::npos);
+}
+
+TEST(TimingSummary, RejectsBadOptions) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  ASSERT_TRUE(
+      shell.Run("synth_opt", {"-strategies", "classic"}).ok);
+  ASSERT_TRUE(shell.Run("run_timing").ok);
+  EXPECT_FALSE(shell.Run("timing_summary", {"-max_paths", "0"}).ok);
+  EXPECT_FALSE(shell.Run("timing_summary", {"-max_paths", "x"}).ok);
+  EXPECT_FALSE(shell.Run("timing_summary", {"-scene", "func_xx"}).ok);
+  EXPECT_FALSE(shell.Run("timing_summary", {"top"}).ok);
+  const CommandResult one =
+      shell.Run("timing_summary", {"-scene", "func_tt"});
+  ASSERT_TRUE(one.ok) << one.message;
+  EXPECT_NE(one.payload.find("source=verilog scenes=1"),
+            std::string::npos);
+  EXPECT_EQ(one.payload.find("scene=func_xx"), std::string::npos);
+}
+
 TEST(CoreCommands, HelpListsAndDescribesCommands) {
   Shell shell;
   const CommandResult all = shell.Run("help", {});
@@ -4300,11 +4478,11 @@ TEST(CoreCommands, HelpWildcardPatterns) {
   // registry order, one "name usage" line each.
   const CommandResult tim = shell.Run("help", {"*tim*"});
   ASSERT_TRUE(tim.ok) << tim.message;
-  EXPECT_EQ(lines(tim.payload), 7u);
+  EXPECT_EQ(lines(tim.payload), 8u);
   for (const char* name :
        {"check_timing", "close_timing", "report_timing", "run_timing",
         "set_max_time_borrow", "repair_timing",
-        "report_global_timing"}) {
+        "report_global_timing", "timing_summary"}) {
     EXPECT_NE(tim.payload.find(name), std::string::npos) << name;
   }
   EXPECT_EQ(tim.payload.find("create_clock"), std::string::npos);
@@ -4340,9 +4518,14 @@ TEST(CoreCommands, HelpWildcardPatterns) {
   EXPECT_EQ(none.diag, Diag::kInvalidCommand);
   EXPECT_NE(none.message.find("no commands match: bogus*"),
             std::string::npos);
+  // A pattern without a leading star is a prefix glob: "tim*"
+  // matches only timing_summary, the one command starting with
+  // "tim".
   const CommandResult leading = shell.Run("help", {"tim*"});
-  EXPECT_FALSE(leading.ok);
-  EXPECT_EQ(leading.diag, Diag::kInvalidCommand);
+  ASSERT_TRUE(leading.ok) << leading.message;
+  EXPECT_EQ(lines(leading.payload), 1u);
+  EXPECT_NE(leading.payload.find("timing_summary"),
+            std::string::npos);
 }
 
 TEST(CoreCommands, ReportTimingHelpFlags) {

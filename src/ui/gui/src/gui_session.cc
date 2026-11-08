@@ -67,6 +67,99 @@ std::string ClassifyLogLine(const std::string& line) {
   return "info";
 }
 
+// The timing inputs as one string: everything the timing
+// model shows depends on. A refresh whose key matches the
+// last build skips the query, so a plain refresh never pays
+// for fresh STA sessions. The key covers the last run's
+// results (the summary and violators), the constraint set
+// (the clock table), the synthesis CPU record (the QoR
+// compile time), and the design source plus active scenarios
+// (the paths, coverage, and QoR rows the query re-derives).
+// A design source swapped without a new run keeps the last
+// run's model, self-consistently, until run_timing runs
+// again.
+std::string TimingKey(const CommandContext& context) {
+  std::string key;
+  const auto add = [&key](const std::string& part) {
+    key += part;
+    key += '|';
+  };
+  add(context.timing.verilog_path);
+  add(context.timing.top_cell);
+  add(context.timing.sdc_path);
+  add(context.timing.spef_path);
+  add(context.timing.odb.has_value() ? "odb" : "verilog");
+  for (const auto& entry : context.timing.liberty_by_corner) {
+    add(entry.first + "=" + entry.second);
+  }
+  for (const db::Scenario* scenario :
+       context.project.scenarios.ActiveScenarios()) {
+    add(scenario->name + "/" + scenario->mode + "/" +
+        scenario->corner + "/" +
+        (scenario->parasitics == db::ParasiticsLevel::kExtracted
+             ? "extracted"
+             : "estimate"));
+  }
+  for (const db::Constraint& constraint :
+       context.project.constraints.all()) {
+    std::string row = std::to_string(
+                          static_cast<int>(constraint.kind)) +
+                      "," + constraint.name + "," +
+                      constraint.target_spec + "," +
+                      std::to_string(
+                          static_cast<int>(constraint.status));
+    for (const auto& param : constraint.params) {
+      row += "," + param.first + "=" + param.second;
+    }
+    add(row);
+  }
+  add(context.timing.bottleneck_capture ? "capture" : "nocapture");
+  add(context.timing.last_capture_enabled ? "captured" : "notcaptured");
+  add(std::to_string(context.synth.mapped_cpu_s));
+  add(std::to_string(context.synth.opt_cpu_s));
+  const auto add_check = [&add](const analysis::ElectricalCheck& check) {
+    add(check.worst_pin + "," + std::to_string(check.worst_value) +
+        "," + std::to_string(check.worst_limit) + "," +
+        std::to_string(check.worst_slack) + "," +
+        std::to_string(check.violation_count) + "," +
+        (check.has_limit ? "limit" : "nolimit"));
+  };
+  const auto add_violators = [&add](
+      const std::vector<analysis::ElectricalViolation>& violators) {
+    for (const analysis::ElectricalViolation& violation : violators) {
+      add(violation.pin + "," + std::to_string(violation.value) + "," +
+          std::to_string(violation.limit) + "," +
+          std::to_string(violation.slack));
+    }
+  };
+  const auto add_endpoints = [&add](
+      const std::vector<analysis::EndpointSlack>& endpoints) {
+    for (const analysis::EndpointSlack& endpoint : endpoints) {
+      add(endpoint.pin + "," + std::to_string(endpoint.slack_ns));
+    }
+  };
+  for (const analysis::SceneResult& result :
+       context.timing.last_results) {
+    add(result.scenario.name + "/" + result.scenario.mode + "/" +
+        result.scenario.corner + "/" +
+        (result.scenario.parasitics == db::ParasiticsLevel::kExtracted
+             ? "extracted"
+             : "estimate"));
+    for (const auto& metric : result.metrics) {
+      add(metric.first + "=" + std::to_string(metric.second.value));
+    }
+    add_endpoints(result.setup_violating_endpoints);
+    add_endpoints(result.hold_violating_endpoints);
+    add_check(result.max_transition_check);
+    add_check(result.max_capacitance_check);
+    add_check(result.max_fanout_check);
+    add_violators(result.max_transition_violators);
+    add_violators(result.max_capacitance_violators);
+    add_violators(result.max_fanout_violators);
+  }
+  return key;
+}
+
 }  // namespace
 
 std::string SessionView::EchoLine(const std::string& name,
@@ -253,6 +346,22 @@ void SessionView::RefreshIssues() {
     issues_.Clear();
   }
   issues_key_ = key;
+}
+
+void SessionView::RefreshTiming() {
+  if (context_.timing.last_results.empty()) {
+    timing_.Clear();
+    timing_key_.clear();
+    return;
+  }
+  const std::string key = TimingKey(context_);
+  if (key == timing_key_) return;
+  const CommandResult result =
+      registry_.Dispatch(context_, "timing_summary", {});
+  if (!result.ok || !timing_.LoadPayload(result.payload)) {
+    timing_.Clear();
+  }
+  timing_key_ = key;
 }
 
 void SessionView::RefreshLog() {

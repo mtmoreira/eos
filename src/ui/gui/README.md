@@ -41,7 +41,7 @@ for non-leaf levels, and the gate-level schematic for the
 leaf level, so the center shows the schematic exactly when
 the user descends to a leaf and the block diagram otherwise
 (the top level keeps its block view). The panels are five
-tabs (Issues, Sources, Results, Opt log, Messages), and the
+tabs at that point (Issues, Sources, Results, Opt log, Messages), and the
 stepper mapping changes to Read shows Sources, Elaborate
 shows Issues, Generic synth shows Opt log. The Issues tab shows the elaboration issues from the
 synth_issues registry query (the check pass plus a design
@@ -59,6 +59,13 @@ it. (Earlier this rework put the schematic in the right
 panels as its own tab; the owner's 2026-11-06 demo feedback
 moved it back to the center, so the center holds both views
 and the panels stay at five tabs.)
+F2 adds the Timing tab to the right panels: the timing_summary
+registry query over the last run_timing, the TimingModel, and
+the Timing tab rendering the per-scene slack summary, the
+clock table, the worst-violator table, the worst paths, the
+coverage summary, and the QoR numbers. The tab refreshes only
+when the timing inputs change, so a plain refresh never pays
+for fresh STA sessions.
 U6 delivers console command entry plus session persistence: the
 console gains an entry line that takes one registry command per
 Return and dispatches it through the session, so the stepper,
