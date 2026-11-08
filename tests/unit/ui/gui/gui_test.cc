@@ -30,6 +30,7 @@
 #include <QGraphicsPathItem>
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
+#include <QGraphicsSceneMouseEvent>
 #include <QGraphicsSimpleTextItem>
 #include <QGraphicsView>
 #include <QMouseEvent>
@@ -50,6 +51,7 @@ using eos::ui::CommandResult;
 using eos::ui::BreadcrumbPaths;
 using eos::ui::ComputeSchematicLayout;
 using eos::ui::ConeNetPaths;
+using eos::ui::ConeNetSpokes;
 using eos::ui::DiagramBlock;
 using eos::ui::DiagramModel;
 using eos::ui::DiagramNet;
@@ -396,6 +398,31 @@ const char kDiagramMidPayload[] =
     "net name=b blocks=u_add:b terminals=b\n"
     "net name=y blocks=u_add:y terminals=y\n";
 
+// A cone fixture: u_ctrl drives u_mid through op, u_mid drives
+// u_out through y, op also feeds the sibling u_side, and sel
+// also feeds u_other, so the cone of u_mid has sibling branches
+// that must stay out.
+const char kDiagramConePayload[] =
+    "module=top\n"
+    "parent port=a direction=in\n"
+    "parent port=b direction=in\n"
+    "parent port=sel direction=in\n"
+    "parent port=y direction=out\n"
+    "parent port=q direction=out\n"
+    "block instance=u_ctrl module=ctrl ports=sel:in,op:out\n"
+    "block instance=u_mid module=mid ports=op:in,a:in,y:out\n"
+    "block instance=u_out module=out ports=y:in,done:out\n"
+    "block instance=u_side module=side ports=op:in,q:out\n"
+    "block instance=u_other module=other ports=sel:in,r:out\n"
+    "net name=a blocks=u_mid:a terminals=a\n"
+    "net name=b blocks= terminals=b\n"
+    "net name=sel blocks=u_ctrl:sel,u_other:sel terminals=sel\n"
+    "net name=op blocks=u_ctrl:op,u_mid:op,u_side:op terminals=\n"
+    "net name=y blocks=u_mid:y,u_out:y terminals=\n"
+    "net name=done blocks=u_out:done terminals=y\n"
+    "net name=q blocks=u_side:q terminals=q\n"
+    "net name=r blocks=u_other:r terminals=\n";
+
 const char kDiagramLeafPayload[] =
     "module=adder\n"
     "parent port=a direction=in\n"
@@ -523,6 +550,38 @@ TEST(DiagramModel, ReloadReplacesPreviousDiagram) {
   ASSERT_TRUE(model.LoadPayload(kDiagramLeafPayload));
   EXPECT_EQ(model.Module(), "adder");
   EXPECT_TRUE(model.Blocks().empty());
+}
+
+TEST(DiagramModel, FaninFanoutCones) {
+  DiagramModel model;
+  ASSERT_TRUE(model.LoadPayload(kDiagramConePayload));
+  EXPECT_EQ(FaninCone(model, "u_mid"), std::set<std::string>({"u_ctrl"}));
+  EXPECT_EQ(FanoutCone(model, "u_mid"), std::set<std::string>({"u_out"}));
+  EXPECT_TRUE(FaninCone(model, "u_ctrl").empty());
+  EXPECT_EQ(FanoutCone(model, "u_ctrl"),
+            (std::set<std::string>{"u_mid", "u_out", "u_side"}));
+  EXPECT_TRUE(FaninCone(model, "nope").empty());
+  EXPECT_TRUE(FanoutCone(model, "nope").empty());
+}
+
+TEST(DiagramModel, ConeNetSpokesHighlightsOnlyConeSpokes) {
+  DiagramModel model;
+  ASSERT_TRUE(model.LoadPayload(kDiagramConePayload));
+  // The op spoke to u_mid is in the cone, the sibling spoke to
+  // u_side is not; the sel spoke to the sel terminal is in the
+  // cone, the sibling spoke to u_other is not.
+  EXPECT_EQ(ConeNetSpokes(model, "u_mid"),
+            (std::set<std::pair<std::string, std::size_t>>{
+                {"a", 1}, {"sel", 2}, {"op", 1}, {"y", 1}, {"done", 1}}));
+  EXPECT_EQ(ConeNetSpokes(model, "u_ctrl"),
+            (std::set<std::pair<std::string, std::size_t>>{
+                {"sel", 2},
+                {"op", 1},
+                {"op", 2},
+                {"y", 1},
+                {"done", 1},
+                {"q", 1}}));
+  EXPECT_TRUE(ConeNetSpokes(model, "nope").empty());
 }
 
 TEST(BreadcrumbPaths, BuildsPrefixes) {
@@ -3873,11 +3932,13 @@ TEST(BlockOutline, HighlightedBlockOutlinesBlueWithoutFill) {
   for (const QGraphicsRectItem* rect : rects) {
     EXPECT_EQ(rect->brush().style(), Qt::NoBrush);
     // u_ctrl is the first block row (y 40), u_mid the second.
+    // u_mid sits outside u_ctrl's cone (the two blocks share
+    // no net), so it outlines grey while u_ctrl is traced.
     if (std::abs(rect->rect().top() - 40) < 0.01) {
       EXPECT_EQ(rect->pen().color(), Qt::blue);
       EXPECT_EQ(rect->pen().widthF(), 3);
     } else {
-      EXPECT_EQ(rect->pen().color(), Qt::white);
+      EXPECT_EQ(rect->pen().color(), Qt::gray);
     }
   }
 }
@@ -3980,6 +4041,99 @@ TEST(BlockOutline, EmptyPlaceholderIsWhite) {
   ASSERT_EQ(texts.size(), 1u);
   EXPECT_EQ(texts[0]->text().toStdString(), "No design loaded.");
   EXPECT_EQ(texts[0]->brush().color(), Qt::white);
+}
+
+TEST(BlockOutline, SingleClickSelectsBlockWithoutDescending) {
+  OutlineBlockView fixture;
+  ASSERT_FALSE(fixture.view.Diagram().Empty());
+  ASSERT_EQ(fixture.view.DiagramLevel(), "top");
+  BlockDiagram diagram(fixture.view);
+  diagram.Refresh();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  // u_ctrl is the first block row (y 40): click its center.
+  // The press is dispatched to the scene directly: a synthetic
+  // viewport mouse event never reaches the scene on the
+  // offscreen platform (the view swallows it unaccepted), while
+  // the scene event is exactly what the block item handles.
+  const QGraphicsRectItem* target = nullptr;
+  for (const QGraphicsRectItem* rect :
+       OutlineSceneItems<QGraphicsRectItem>(scene)) {
+    if (std::abs(rect->rect().top() - 40) < 0.01) target = rect;
+  }
+  ASSERT_NE(target, nullptr);
+  QGraphicsSceneMouseEvent press(QEvent::GraphicsSceneMousePress);
+  press.setScenePos(target->rect().center());
+  press.setButton(Qt::LeftButton);
+  press.setButtons(Qt::LeftButton);
+  QApplication::sendEvent(const_cast<QGraphicsScene*>(scene), &press);
+  // The click updates the model only; the refresh rebuilds the
+  // scene, as the main window does through the action callback.
+  diagram.Refresh();
+  EXPECT_EQ(fixture.view.SelectedHierarchyPath(), "top/u_ctrl");
+  EXPECT_EQ(fixture.view.DiagramLevel(), "top");
+  // The trace lights only u_ctrl's cone: its sel input spoke
+  // and its op output stub. The four other lines stay grey,
+  // and no blue line touches the sibling u_mid.
+  const std::vector<QGraphicsLineItem*> lines =
+      OutlineSceneItems<QGraphicsLineItem>(scene);
+  ASSERT_EQ(lines.size(), 6u);
+  std::size_t blue = 0;
+  std::size_t grey = 0;
+  for (const QGraphicsLineItem* line : lines) {
+    if (line->pen().color() == Qt::blue) {
+      ++blue;
+      EXPECT_EQ(line->pen().widthF(), 2);
+    } else if (line->pen().color() == Qt::lightGray) {
+      ++grey;
+    }
+  }
+  EXPECT_EQ(blue, 2u);
+  EXPECT_EQ(grey, 4u);
+  const QGraphicsRectItem* umid = nullptr;
+  for (const QGraphicsRectItem* rect :
+       OutlineSceneItems<QGraphicsRectItem>(scene)) {
+    if (std::abs(rect->rect().top() - 152) < 0.01) umid = rect;
+  }
+  ASSERT_NE(umid, nullptr);
+  for (const QGraphicsLineItem* line : lines) {
+    if (line->pen().color() != Qt::blue) continue;
+    EXPECT_FALSE(umid->rect().contains(line->line().p1()));
+    EXPECT_FALSE(umid->rect().contains(line->line().p2()));
+  }
+}
+
+TEST(BlockOutline, DoubleClickDescendsIntoBlock) {
+  OutlineBlockView fixture;
+  ASSERT_FALSE(fixture.view.Diagram().Empty());
+  ASSERT_EQ(fixture.view.DiagramLevel(), "top");
+  BlockDiagram diagram(fixture.view);
+  diagram.Refresh();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  const QGraphicsRectItem* target = nullptr;
+  for (const QGraphicsRectItem* rect :
+       OutlineSceneItems<QGraphicsRectItem>(scene)) {
+    if (std::abs(rect->rect().top() - 40) < 0.01) target = rect;
+  }
+  ASSERT_NE(target, nullptr);
+  const QPointF center = target->rect().center();
+  // A real double-click is a press followed by a double-click
+  // event: the press selects, the double-click descends.
+  QGraphicsSceneMouseEvent press(QEvent::GraphicsSceneMousePress);
+  press.setScenePos(center);
+  press.setButton(Qt::LeftButton);
+  press.setButtons(Qt::LeftButton);
+  QApplication::sendEvent(const_cast<QGraphicsScene*>(scene), &press);
+  QGraphicsSceneMouseEvent double_click(
+      QEvent::GraphicsSceneMouseDoubleClick);
+  double_click.setScenePos(center);
+  double_click.setButton(Qt::LeftButton);
+  double_click.setButtons(Qt::LeftButton);
+  QApplication::sendEvent(const_cast<QGraphicsScene*>(scene),
+                          &double_click);
+  EXPECT_EQ(fixture.view.SelectedHierarchyPath(), "top/u_ctrl");
+  EXPECT_EQ(fixture.view.DiagramLevel(), "top/u_ctrl");
 }
 
 // A SessionView with the nested hierarchy, so the center can
