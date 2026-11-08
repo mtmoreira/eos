@@ -79,8 +79,8 @@ TEST(Registry, CoreSetIsComplete) {
   // 10 adds the five check-specific reports:
   // report_global_timing, report_global_slack, report_min_period,
   // report_min_pulse_width and report_clock_gating_check. F2 adds
-  // timing_summary.
-  EXPECT_EQ(shell.registry.Names().size(), 89u);
+  // timing_summary. F1 adds synth_summary.
+  EXPECT_EQ(shell.registry.Names().size(), 90u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -103,6 +103,7 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("report_clock_gating_check"), nullptr);
   EXPECT_NE(shell.registry.Find("floorplan"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_stats"), nullptr);
+  EXPECT_NE(shell.registry.Find("synth_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("read_filelist"), nullptr);
   EXPECT_NE(shell.registry.Find("write_verilog"), nullptr);
   EXPECT_NE(shell.registry.Find("check_equivalence"), nullptr);
@@ -5630,6 +5631,149 @@ TEST(CoreCommands, SynthStatsAfterGenericReportsGenericNetlist) {
   EXPECT_NE(stats.payload.find("cells=3"), std::string::npos);
   EXPECT_NE(stats.payload.find("depth=2"), std::string::npos);
   EXPECT_NE(stats.payload.find("type $and 3"), std::string::npos);
+}
+
+// F1: synth_summary fails fast until synth_map ran, even on an
+// elaborated and generically optimized design.
+TEST(CoreCommands, SynthSummaryFailsFastWhenNotMapped) {
+  TimingTempDir dir;
+  Shell shell;
+  const CommandResult fresh = shell.Run("synth_summary");
+  EXPECT_FALSE(fresh.ok);
+  EXPECT_EQ(fresh.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(fresh.message.find("no mapped design: eos::synth_map first"),
+            std::string::npos);
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  ASSERT_TRUE(shell.Run("synth_summary").ok);
+  // A fresh shell that stops at elaborate has no mapped record
+  // either.
+  TimingTempDir dir2;
+  Shell elaborated;
+  ASSERT_TRUE(elaborated
+                  .Run("read_verilog",
+                       {dir2.Write("optloop.v", kSynthOptLoopDemo),
+                        "optloop"})
+                  .ok);
+  ASSERT_TRUE(elaborated.Run("elaborate").ok);
+  EXPECT_FALSE(elaborated.Run("synth_summary").ok);
+}
+
+TEST(CoreCommands, SynthSummaryRejectsBadArguments) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const CommandResult extra = shell.Run("synth_summary", {"optloop"});
+  EXPECT_FALSE(extra.ok);
+  EXPECT_EQ(extra.diag, Diag::kInvalidConfiguration);
+}
+
+// F1: a mapped-only design reports the mapped record with the
+// opt and equiv lines at their placeholders: the loop never ran
+// and no proof ran. Slack is asserted numerically, like the
+// loop tests: the STA values are float-derived, so the payload
+// carries full-precision digits (-0.350000029), not the rounded
+// README number.
+TEST(CoreCommands, SynthSummaryMappedOnlyReportsPlaceholders) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const CommandResult summary = shell.Run("synth_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  const std::string mapped = shell.ctx.synth.mapped_verilog;
+  const std::string liberty = shell.ctx.synth.mapped_liberty;
+  EXPECT_NE(summary.payload.find("mapped target=area liberty=" +
+                                 liberty + " verilog=" + mapped +
+                                 " cells=4 types=AND2:3,BUF:1 "
+                                 "judged=true"),
+            std::string::npos);
+  EXPECT_NEAR(SynthPayloadNumber(summary, "worst_slack_ns"), -0.35,
+              1e-4);
+  EXPECT_NEAR(SynthPayloadNumber(summary, "tns_ns"), -0.35, 1e-4);
+  EXPECT_NE(summary.payload.find(
+                "opt run=false winner=none iterations=0 verilog=none "
+                "cells=0 types=none worst_slack_ns=none tns_ns=none"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "equiv run=false verdict=none first=none second=none"),
+            std::string::npos);
+}
+
+// F1: the full demo chain, the numbers demo/synth/README.md
+// asserts: mapped 4 cells (AND2:3, BUF:1) at worst slack -0.35
+// ns, then loop winner classic at worst slack +0.05 ns with
+// equivalence equivalent. Slack is asserted numerically (see
+// the mapped-only test); the opt slack is parsed after the opt
+// line, since the payload carries two worst_slack_ns keys.
+TEST(CoreCommands, SynthSummaryFullChainReportsExactPayload) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const CommandResult loop =
+      shell.Run("synth_opt", {"-strategies", "classic"});
+  ASSERT_TRUE(loop.ok) << loop.message;
+  const std::string mapped = shell.ctx.synth.mapped_verilog;
+  const std::string winner = shell.ctx.synth.opt_verilog;
+  const CommandResult proof =
+      shell.Run("check_equivalence", {mapped, winner});
+  ASSERT_TRUE(proof.ok) << proof.message;
+  const std::string liberty = shell.ctx.synth.mapped_liberty;
+  const CommandResult summary = shell.Run("synth_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("mapped target=area liberty=" +
+                                 liberty + " verilog=" + mapped +
+                                 " cells=4 types=AND2:3,BUF:1 "
+                                 "judged=true"),
+            std::string::npos);
+  EXPECT_NEAR(SynthPayloadNumber(summary, "worst_slack_ns"), -0.35,
+              1e-4);
+  EXPECT_NEAR(SynthPayloadNumber(summary, "tns_ns"), -0.35, 1e-4);
+  EXPECT_NE(summary.payload.find("opt run=true winner=classic "
+                                 "iterations=1 verilog=" +
+                                 winner +
+                                 " cells=4 types=AND2:4"),
+            std::string::npos);
+  const auto payload_number_after =
+      [&summary](const std::string& key, const std::string& after) {
+        const std::size_t start = summary.payload.find(after);
+        EXPECT_NE(start, std::string::npos) << "missing " << after;
+        if (start == std::string::npos) return 0.0;
+        const std::size_t at =
+            summary.payload.find(key + "=", start);
+        EXPECT_NE(at, std::string::npos) << "missing " << key;
+        if (at == std::string::npos) return 0.0;
+        return std::stod(summary.payload.substr(at + key.size() + 1));
+      };
+  EXPECT_NEAR(payload_number_after("worst_slack_ns", "opt run=true"),
+              0.05, 1e-4);
+  EXPECT_NEAR(payload_number_after("tns_ns", "opt run=true"), 0.0,
+              1e-4);
+  EXPECT_NE(summary.payload.find("equiv run=true verdict=equivalent "
+                                 "first=" +
+                                 mapped + " second=" + winner),
+            std::string::npos);
+}
+
+// F1: a mapping without timing setup reports the mapped record
+// unjudged: the slack fields are none, never an invented zero.
+TEST(CoreCommands, SynthSummaryUnjudgedReportsNoSlack) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kSynthMapLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("optdemo.v", kSynthOptDemo), "optdemo"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_map", {"-target", "area"}).ok);
+  EXPECT_FALSE(shell.ctx.synth.mapped_timing_judged);
+  const CommandResult summary = shell.Run("synth_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("judged=false"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("worst_slack_ns=none"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("tns_ns=none"), std::string::npos);
 }
 
 // Panel rework: synth_issues fails fast like the other synth

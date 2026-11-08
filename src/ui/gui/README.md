@@ -66,6 +66,13 @@ clock table, the worst-violator table, the worst paths, the
 coverage summary, and the QoR numbers. The tab refreshes only
 when the timing inputs change, so a plain refresh never pays
 for fresh STA sessions.
+Full-flow GUI unit F1 adds the Synthesis view: the Results tab
+gains the mapped synthesis section from the synth_summary
+registry query (mapped cells by type, worst slack and TNS
+before and after the loop, the winning strategy, and the
+equivalence verdict), and SessionView gains SynthesisStep(),
+Done once a mapped design exists, as the stepper state contract
+unit F11 wires.
 U6 delivers console command entry plus session persistence: the
 console gains an entry line that takes one registry command per
 Return and dispatches it through the session, so the stepper,

@@ -328,6 +328,16 @@ void SessionView::RefreshPanels() {
   if (!result.ok || !panels_.live_stats.LoadPayload(result.payload)) {
     panels_.live_stats.Clear();
   }
+  // The mapped synthesis record (full-flow GUI unit F1): the
+  // query fails fast until synth_map ran, which is the normal
+  // "not run yet" state, so a failed query or a malformed
+  // payload clears the model exactly like live_stats.
+  const CommandResult summary =
+      registry_.Dispatch(context_, "synth_summary", {});
+  if (!summary.ok ||
+      !panels_.mapped_synth.LoadPayload(summary.payload)) {
+    panels_.mapped_synth.Clear();
+  }
 }
 
 void SessionView::RefreshIssues() {

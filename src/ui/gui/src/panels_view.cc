@@ -9,6 +9,8 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -20,6 +22,14 @@
 namespace eos::ui {
 
 namespace {
+
+// Formats a slack the way the registry payloads do, so the panel
+// shows exactly the number the query reported.
+std::string FormatSlack(double value) {
+  std::ostringstream out;
+  out << std::setprecision(10) << value;
+  return out.str();
+}
 
 std::string RenderSources(const PanelsModel& panels) {
   if (!panels.parsed) return "(no design read yet)";
@@ -73,6 +83,47 @@ std::string RenderResults(const PanelsModel& panels) {
     }
   } else if (panels.elaborated) {
     out += "Live cell types: unavailable\n";
+  }
+  // Mapped synthesis (full-flow GUI unit F1): the synth_map
+  // record, the loop record, and the equivalence verdict, from
+  // the synth_summary query. Each section names its own "not
+  // run yet" state instead of hiding, so the panel never looks
+  // like a mapped design when the stage has not run.
+  const MappedSynthModel& mapped = panels.mapped_synth;
+  if (!mapped.Empty()) {
+    out += "Mapped: target=" + mapped.Target() +
+           " cells=" + std::to_string(mapped.Cells());
+    if (mapped.Judged()) {
+      out += " worst slack=" + FormatSlack(mapped.WorstSlackNs()) +
+             " ns, TNS=" + FormatSlack(mapped.TnsNs()) + " ns";
+    } else {
+      out += " worst slack=n/a, TNS=n/a";
+    }
+    out += "\n";
+    for (const PanelCellType& type : mapped.Types()) {
+      out += "  " + type.type + ": " + std::to_string(type.count) + "\n";
+    }
+    if (mapped.OptRun()) {
+      out += "Loop: winner=" + mapped.OptWinner() +
+             " iterations=" +
+             std::to_string(mapped.OptIterations()) +
+             " cells=" + std::to_string(mapped.OptCells()) +
+             " worst slack=" + FormatSlack(mapped.OptWorstSlackNs()) +
+             " ns, TNS=" + FormatSlack(mapped.OptTnsNs()) + " ns\n";
+      for (const PanelCellType& type : mapped.OptTypes()) {
+        out += "  " + type.type + ": " + std::to_string(type.count) +
+               "\n";
+      }
+    } else {
+      out += "Loop: not run yet\n";
+    }
+    if (mapped.EquivRun()) {
+      out += "Equivalence: " + mapped.EquivVerdict() + "\n";
+    } else {
+      out += "Equivalence: not run yet\n";
+    }
+  } else if (panels.elaborated) {
+    out += "Mapped: not run yet\n";
   }
   return out;
 }
