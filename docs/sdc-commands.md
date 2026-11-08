@@ -253,3 +253,5 @@ need temp-file SDC materialization or engine text-input support.
   `report_min_period`, `report_min_pulse_width`,
   `report_clock_gating_check`), 83 to 88.
   F2 adds `timing_summary`, 88 to 89.
+  F1 adds `synth_summary`, 89 to 90.
+  F3 adds `floorplan_summary`, 90 to 91.

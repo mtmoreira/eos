@@ -90,6 +90,7 @@ eos::read_lef ../../src/pd/rsz/tests/mock/eos_mock.tlef
 eos::read_lef ../../src/pd/rsz/tests/mock/eos_mock.lef
 eos::read_def optloop.def
 eos::floorplan
+eos::floorplan_summary
 ```
 
 What you should see: `write_def` reports the design, the cell
@@ -100,7 +101,12 @@ instead of the `no technology data loaded: eos::import_odb
 first` failure that floorplan used to give without an imported
 database. The die area is a square at 60 percent utilization
 over the summed LEF macro areas, unless `-die_area` gives one
-explicitly.
+explicitly. `floorplan_summary` reports the same floorplan as a
+structured payload: the die and core rectangles, one row
+rectangle, and one pin line per IO pin (six pins: the four
+inputs on the left edge, the two outputs on the right), with the
+counts in the header. It is the query the GUI floorplan canvas
+reads; see `docs/floorplan-view.md`.
 
 This folder is reference data and documentation. It is outside the
 seven-layer code structure: it adds no CMake target and no test.
@@ -147,6 +153,21 @@ instead (3 ANDs at 2 levels after synth_generic). The
 checkpoint indicator at the right of the stepper row reads
 "Checkpoint: none" throughout, since this walkthrough sets no
 checkpoint.
+
+To see the floorplan canvas, continue in the same GUI session
+with the physical-flow chain above (the mock Liberty maps, so
+run the chain from the GUI console entry, one command per
+Return): `read_liberty`, `synth_map -target area`,
+`write_def`, the two `read_lef` commands, `read_def`, then
+`floorplan`. A successful `floorplan` takes the center to the
+floorplan canvas: the die rectangle with the single row inside
+it and the six IO pins on the boundary (four inputs on the left
+edge, two outputs on the right), with the counts beside it (die
+0,0,5000,5000, core 0,0,5000,5000, rows 1, IO placed 6 / 6).
+The Floorplan stage button in the stepper row lights up once
+the floorplan is loaded; clicking it shows the canvas again,
+and clicking a node in the hierarchy tree takes the center back
+to the hierarchy views.
 
 To drive the same session from the terminal instead, type the
 commands at the terminal eos> prompt while the window is open;

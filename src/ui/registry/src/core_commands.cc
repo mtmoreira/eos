@@ -7419,6 +7419,70 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             " io_total=" + std::to_string(report.io_total_count));
       });
 
+  // ---- floorplan_summary (full-flow GUI unit F3) -------------------
+  // The structured floorplan query the GUI floorplan canvas
+  // reads: the die and core rectangles, one rectangle per row,
+  // and one entry per IO pin, plus the counts the floorplan
+  // payload reports. It is a query, not a report: it runs no
+  // engine, writes no file, and changes no session state. The
+  // geometry comes from the live database through the L4 query
+  // (QueryFloorplanGeometry), never from the floorplan payload
+  // text: the payload carries counts only, never rectangles.
+  // It fails fast with the floorplan command's own
+  // preconditions, and with "no floorplan" when the database
+  // holds no rows, which means floorplan never ran.
+  add("floorplan_summary", "floorplan_summary",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "floorplan_summary")) {
+          return *bad;
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (!ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no mapped design: the imported database holds no top "
+              "block");
+        }
+        pd::FloorplanGeometry geometry;
+        const foundation::Status status =
+            pd::QueryFloorplanGeometry(ctx.timing.odb->RawDatabase(),
+                                       &geometry);
+        if (!status.ok()) return FromStatus(status);
+        auto area_text = [](const std::array<int, 4>& area) {
+          return std::to_string(area[0]) + "," + std::to_string(area[1]) +
+                 "," + std::to_string(area[2]) + "," +
+                 std::to_string(area[3]);
+        };
+        std::size_t io_placed = 0;
+        for (const pd::FloorplanIoPin& pin : geometry.io_pins) {
+          if (pin.placed) ++io_placed;
+        }
+        std::string payload =
+            "floorplan die=" + area_text(geometry.die_area) +
+            " core=" + area_text(geometry.core_area) +
+            " rows=" + std::to_string(geometry.rows.size()) +
+            " track_grids=" +
+            std::to_string(geometry.track_grid_count) +
+            " io_placed=" + std::to_string(io_placed) +
+            " io_total=" + std::to_string(geometry.io_pins.size());
+        for (const std::array<int, 4>& row : geometry.rows) {
+          payload += "\nrow rect=" + area_text(row);
+        }
+        for (const pd::FloorplanIoPin& pin : geometry.io_pins) {
+          payload += "\npin name=" + pin.name + " dir=" + pin.direction +
+                     " placed=" + (pin.placed ? "1" : "0") +
+                     " rect=" + area_text(pin.rect);
+        }
+        return CommandResult::Ok(payload);
+      });
+
   add("place", "place [-timing_driven]",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {

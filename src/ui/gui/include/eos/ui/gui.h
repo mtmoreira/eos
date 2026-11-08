@@ -16,6 +16,7 @@
 
 #include "eos/ui/diagram.h"
 #include "eos/ui/console_entry.h"
+#include "eos/ui/floorplan.h"
 #include "eos/ui/hierarchy.h"
 #include "eos/ui/issues.h"
 #include "eos/ui/panels.h"
@@ -237,6 +238,35 @@ class SessionView {
   // issues check-pass guard.
   void RefreshTiming();
 
+  // Floorplan model, refreshed from the live session (see
+  // RefreshFloorplan). The floorplan canvas reads this: the
+  // die and core rectangles, one rectangle per row, and one
+  // entry per IO pin, plus the counts the floorplan payload
+  // reports.
+  const FloorplanModel& Floorplan() const { return floorplan_; }
+
+  // Re-reads the floorplan model from the live session:
+  // dispatches floorplan_summary WITHOUT an echo line (a model
+  // refresh is not a user action) and rebuilds the model when
+  // the database holds a floorplan; clears it otherwise, or
+  // when the query or its payload fails, so a stale floorplan
+  // never lingers. The query fails fast with no technology, no
+  // mapped design, or no floorplan, so the refresh needs no
+  // gate of its own; and the query itself is a cheap database
+  // walk (rows, track grids, block terminals), so it runs on
+  // every refresh, like the hierarchy refresh.
+  void RefreshFloorplan();
+
+  // Whether the center shows the floorplan canvas instead of
+  // the hierarchy views. A successful floorplan dispatch takes
+  // the user there; a hierarchy navigation or a successful
+  // close_design takes them back to the hierarchy views. The
+  // center shows the canvas only while the floorplan model is
+  // loaded, so a stale flag never shows a floorplan that no
+  // longer exists.
+  bool ShowingFloorplan() const { return center_floorplan_; }
+  void ShowFloorplan(bool show) { center_floorplan_ = show; }
+
   // One engine log line for the log window: the local time the
   // line was drained, its severity ("error" for a line
   // carrying "ERROR:", "warning" for one carrying "Warning:",
@@ -311,6 +341,12 @@ class SessionView {
   // The timing inputs the timing model was last built from
   // (see RefreshTiming). Empty when no timing is loaded.
   std::string timing_key_;
+  FloorplanModel floorplan_;
+  // The center view the user last chose: true for the
+  // floorplan canvas, false for the hierarchy views. Set by a
+  // successful floorplan dispatch and by explicit stage
+  // navigation; cleared by a successful close_design.
+  bool center_floorplan_ = false;
   std::string diagram_level_;
 };
 

@@ -160,4 +160,61 @@ Status RunFloorplan(odb::dbDatabase* db, const FloorplanOptions& options,
   return Status::Ok();
 }
 
+Status QueryFloorplanGeometry(odb::dbDatabase* db,
+                              FloorplanGeometry* geometry) {
+  if (db == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "no technology data loaded: no database");
+  }
+  if (db->getTech() == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "no technology data loaded: the database "
+                         "holds no technology");
+  }
+  if (db->getChip() == nullptr || db->getChip()->getBlock() == nullptr) {
+    return Status::Error(ErrorCode::kInvalidState,
+                         "no mapped design: the database holds no top "
+                         "block (eos::import_odb first)");
+  }
+  odb::dbBlock* block = db->getChip()->getBlock();
+  if (geometry == nullptr) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "no geometry output");
+  }
+  if (block->getRows().empty()) {
+    return Status::Error(
+        ErrorCode::kInvalidState,
+        "no floorplan: the design holds no rows "
+        "(eos::floorplan first)");
+  }
+  geometry->die_area = FromRect(block->getDieArea());
+  geometry->core_area = FromRect(block->getCoreArea());
+  int grids = 0;
+  for (odb::dbTrackGrid* grid : block->getTrackGrids()) {
+    (void)grid;
+    ++grids;
+  }
+  geometry->track_grid_count = grids;
+  geometry->rows.clear();
+  for (odb::dbRow* row : block->getRows()) {
+    geometry->rows.push_back(FromRect(row->getBBox()));
+  }
+  geometry->io_pins.clear();
+  for (odb::dbBTerm* bterm : block->getBTerms()) {
+    FloorplanIoPin pin;
+    pin.name = bterm->getName();
+    const odb::dbIoType io = bterm->getIoType();
+    pin.direction = io == odb::dbIoType::INPUT    ? "in"
+                    : io == odb::dbIoType::OUTPUT ? "out"
+                    : io == odb::dbIoType::INOUT  ? "inout"
+                                                  : "feedthru";
+    pin.placed = bterm->getFirstPinPlacementStatus().isPlaced();
+    if (pin.placed) {
+      pin.rect = FromRect(bterm->getBBox());
+    }
+    geometry->io_pins.push_back(std::move(pin));
+  }
+  return Status::Ok();
+}
+
 }  // namespace eos::pd
