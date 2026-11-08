@@ -24,6 +24,7 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 #include "eos/foundation/errors.h"
 
@@ -68,6 +69,44 @@ struct FloorplanReport {
 // failure, which the caller reports rather than hides.
 Status RunFloorplan(odb::dbDatabase* db, const FloorplanOptions& options,
                     FloorplanReport* report);
+
+// One IO pin of the top block, as the floorplan view sees it:
+// its name, its direction ("in", "out", "inout", or
+// "feedthru"), whether its pin is placed, and its pin
+// rectangle in database units (the bbox of its placed pin, or
+// 0,0,0,0 when unplaced: an unplaced pin has no geometry to
+// draw, and the view counts it instead).
+struct FloorplanIoPin {
+  std::string name;
+  std::string direction;
+  bool placed = false;
+  std::array<int, 4> rect = {0, 0, 0, 0};
+};
+
+// The live floorplan geometry of the top block, in database
+// units: the die and core rectangles, one rectangle per row,
+// and one entry per IO pin. The core rectangle is the rows'
+// bounding box, as dbBlock reports it: it is the extent the
+// rows actually cover, which is the core the floorplan run
+// built. Empty when no floorplan has run (no rows).
+struct FloorplanGeometry {
+  std::array<int, 4> die_area = {0, 0, 0, 0};
+  std::array<int, 4> core_area = {0, 0, 0, 0};
+  int track_grid_count = 0;
+  std::vector<std::array<int, 4>> rows;
+  std::vector<FloorplanIoPin> io_pins;
+};
+
+// Reads the live floorplan geometry from the block of db, for
+// the floorplan_summary query (full-flow GUI unit F3). It runs
+// no engine and mutates nothing: it walks the rows, track
+// grids, and block terminals the floorplan run left behind.
+// Fails with kInvalidState when the database holds no
+// technology data or no mapped design (no top block), and with
+// kInvalidState when the block holds no rows, which means no
+// floorplan has run yet.
+Status QueryFloorplanGeometry(odb::dbDatabase* db,
+                              FloorplanGeometry* geometry);
 
 }  // namespace eos::pd
 

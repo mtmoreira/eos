@@ -7,6 +7,7 @@
 #include "eos/ui/gui.h"
 #include "eos/ui/console_entry.h"
 #include "eos/ui/diagram.h"
+#include "eos/ui/floorplan.h"
 #include "eos/ui/hierarchy.h"
 #include "eos/ui/issues.h"
 #include "eos/ui/panels.h"
@@ -36,6 +37,7 @@
 
 #include "block_diagram.h"
 #include "center_view.h"
+#include "floorplan_diagram.h"
 #include "panels_view.h"
 #include "schematic_diagram.h"
 #endif
@@ -55,6 +57,8 @@ using eos::ui::DisplayInstance;
 using eos::ui::DisplayType;
 using eos::ui::FaninCone;
 using eos::ui::FanoutCone;
+using eos::ui::FloorplanModel;
+using eos::ui::FloorplanRect;
 using eos::ui::GateSymbol;
 using eos::ui::GuiIssue;
 using eos::ui::HierarchyModel;
@@ -90,6 +94,40 @@ void RegisterPing(CommandRegistry& registry) {
       "ping", "ping",
       [](CommandContext&, const std::vector<std::string>&) {
         return CommandResult::Ok("pong=1");
+      });
+  EXPECT_TRUE(status.ok());
+}
+
+// A floorplan_summary payload for the bridged optloop floorplan:
+// one row, six IO pins (four inputs on the left edge, two
+// outputs on the right), ten track grids (one per mock routing
+// layer). The pin rectangles
+// are the small PORT rectangles around the placed points, which
+// straddle the die edge.
+const char kFloorplanPayload[] =
+    "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+    "io_placed=6 io_total=6\n"
+    "row rect=0,0,5000,3200\n"
+    "pin name=a dir=in placed=1 rect=-50,950,50,1050\n"
+    "pin name=b dir=in placed=1 rect=-50,1950,50,2050\n"
+    "pin name=c dir=in placed=1 rect=-50,2950,50,3050\n"
+    "pin name=d dir=in placed=1 rect=-50,3950,50,4050\n"
+    "pin name=y1 dir=out placed=1 rect=4950,1950,5050,2050\n"
+    "pin name=y2 dir=out placed=1 rect=4950,2950,5050,3050\n";
+
+void RegisterFloorplanCommand(CommandRegistry& registry,
+                              const std::string& payload, bool ok,
+                              int* calls = nullptr) {
+  auto status = registry.Register(
+      "floorplan_summary", "floorplan_summary",
+      [payload, ok, calls](CommandContext&,
+                           const std::vector<std::string>&) {
+        if (calls != nullptr) ++(*calls);
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no floorplan");
+        }
+        return CommandResult::Ok(payload);
       });
   EXPECT_TRUE(status.ok());
 }
@@ -2510,6 +2548,7 @@ TEST(ConsoleEntry, SplitSegmentsDropsBlanks) {
 using eos::ui::BlockDiagram;
 using eos::ui::CenterView;
 using eos::ui::PanelsView;
+using eos::ui::FloorplanDiagram;
 using eos::ui::SchematicDiagram;
 
 // Widget rendering tests: both diagrams sit on a dark
@@ -3079,6 +3118,138 @@ TEST(TimingModel, ReloadReplacesPreviousTiming) {
   EXPECT_TRUE(model.Scenes().empty());
 }
 
+TEST(FloorplanModel, ParsesFullPayload) {
+  FloorplanModel model;
+  ASSERT_TRUE(model.LoadPayload(kFloorplanPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.DieArea(), (FloorplanRect{0, 0, 5000, 5000}));
+  EXPECT_EQ(model.CoreArea(), (FloorplanRect{0, 0, 5000, 5000}));
+  EXPECT_EQ(model.TrackGridCount(), 10u);
+  EXPECT_EQ(model.IoPlaced(), 6u);
+  EXPECT_EQ(model.IoTotal(), 6u);
+  ASSERT_EQ(model.Rows().size(), 1u);
+  EXPECT_EQ(model.Rows()[0], (FloorplanRect{0, 0, 5000, 3200}));
+  ASSERT_EQ(model.Pins().size(), 6u);
+  EXPECT_EQ(model.Pins()[0].name, "a");
+  EXPECT_EQ(model.Pins()[0].direction, "in");
+  EXPECT_TRUE(model.Pins()[0].placed);
+  EXPECT_EQ(model.Pins()[0].rect, (FloorplanRect{-50, 950, 50, 1050}));
+  EXPECT_EQ(model.Pins()[4].name, "y1");
+  EXPECT_EQ(model.Pins()[4].direction, "out");
+  EXPECT_TRUE(model.Pins()[4].placed);
+  EXPECT_EQ(model.Pins()[4].rect, (FloorplanRect{4950, 1950, 5050, 2050}));
+}
+
+TEST(FloorplanModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      // No header.
+      "row rect=0,0,5000,3200\n",
+      // Wrong tag.
+      "timing die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=6 io_total=6\n",
+      // Unknown header key.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=6 io_total=6 extra=1\n",
+      // Missing header key.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=6\n",
+      // Row count mismatch.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=2 track_grids=10 "
+      "io_placed=6 io_total=6\n"
+      "row rect=0,0,5000,3200\n"
+      "pin name=a dir=in placed=1 rect=-50,950,50,1050\n"
+      "pin name=b dir=in placed=1 rect=-50,1950,50,2050\n"
+      "pin name=c dir=in placed=1 rect=-50,2950,50,3050\n"
+      "pin name=d dir=in placed=1 rect=-50,3950,50,4050\n"
+      "pin name=y1 dir=out placed=1 rect=4950,1950,5050,2050\n"
+      "pin name=y2 dir=out placed=1 rect=4950,2950,5050,3050\n",
+      // IO total mismatch.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=6 io_total=5\n"
+      "row rect=0,0,5000,3200\n"
+      "pin name=a dir=in placed=1 rect=-50,950,50,1050\n"
+      "pin name=b dir=in placed=1 rect=-50,1950,50,2050\n"
+      "pin name=c dir=in placed=1 rect=-50,2950,50,3050\n"
+      "pin name=d dir=in placed=1 rect=-50,3950,50,4050\n"
+      "pin name=y1 dir=out placed=1 rect=4950,1950,5050,2050\n"
+      "pin name=y2 dir=out placed=1 rect=4950,2950,5050,3050\n",
+      // IO placed mismatch.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=5 io_total=6\n"
+      "row rect=0,0,5000,3200\n"
+      "pin name=a dir=in placed=1 rect=-50,950,50,1050\n"
+      "pin name=b dir=in placed=1 rect=-50,1950,50,2050\n"
+      "pin name=c dir=in placed=1 rect=-50,2950,50,3050\n"
+      "pin name=d dir=in placed=1 rect=-50,3950,50,4050\n"
+      "pin name=y1 dir=out placed=1 rect=4950,1950,5050,2050\n"
+      "pin name=y2 dir=out placed=1 rect=4950,2950,5050,3050\n",
+      // Unknown direction.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=6 io_total=6\n"
+      "row rect=0,0,5000,3200\n"
+      "pin name=a dir=sideways placed=1 rect=-50,950,50,1050\n",
+      // Duplicate pin name.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=2 io_total=2\n"
+      "row rect=0,0,5000,3200\n"
+      "pin name=a dir=in placed=1 rect=-50,950,50,1050\n"
+      "pin name=a dir=in placed=1 rect=-50,1950,50,2050\n",
+      // Empty die rectangle.
+      "floorplan die=0,0,0,0 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=6 io_total=6\n",
+      // Empty row rectangle.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=6 io_total=6\n"
+      "row rect=0,0,5000,0\n",
+      // Non-integer count.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=one "
+      "track_grids=10 io_placed=6 io_total=6\n",
+      // Short rectangle.
+      "floorplan die=0,0,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=6 io_total=6\n",
+      // Unknown line tag.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=6 io_total=6\n"
+      "net name=n1\n",
+      // Empty line in the middle.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=1 track_grids=10 "
+      "io_placed=6 io_total=6\n"
+      "\n"
+      "row rect=0,0,5000,3200\n",
+  };
+  for (const char* payload : bad) {
+    FloorplanModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+}
+
+TEST(FloorplanModel, ReloadReplacesPreviousFloorplan) {
+  FloorplanModel model;
+  ASSERT_TRUE(model.LoadPayload(kFloorplanPayload));
+  ASSERT_EQ(model.Rows().size(), 1u);
+  ASSERT_TRUE(model.LoadPayload(
+      "floorplan die=0,0,10000,10000 core=0,0,10000,10000 rows=3 "
+      "track_grids=2 io_placed=2 io_total=2\n"
+      "row rect=0,0,10000,2720\n"
+      "row rect=0,2720,10000,5440\n"
+      "row rect=0,5440,10000,8160\n"
+      "pin name=in1 dir=in placed=1 rect=-50,4950,50,5050\n"
+      "pin name=out1 dir=out placed=1 rect=9950,4950,10050,5050\n"));
+  EXPECT_EQ(model.DieArea(), (FloorplanRect{0, 0, 10000, 10000}));
+  EXPECT_EQ(model.Rows().size(), 3u);
+  EXPECT_EQ(model.Pins().size(), 2u);
+  EXPECT_EQ(model.Pins()[1].name, "out1");
+  // A malformed reload leaves the previous floorplan untouched.
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.Rows().size(), 3u);
+  model.Clear();
+  EXPECT_FALSE(model.Loaded());
+  EXPECT_TRUE(model.Rows().empty());
+  EXPECT_TRUE(model.Pins().empty());
+}
+
 void RegisterIssuesCommand(CommandRegistry& registry,
                            const std::string& payload, bool ok,
                            int* calls = nullptr) {
@@ -3415,6 +3586,104 @@ TEST(SchematicOutline, ClickHighlightsOnlyConeWiresAndPins) {
   EXPECT_EQ(terminal_color(kSchematicGateTop + 2 * row_pitch, false),
             Qt::blue);
   EXPECT_EQ(terminal_color(0, true), Qt::blue);
+}
+
+// A SessionView whose floorplan holds the bridged optloop
+// payload: one row, six IO pins.
+struct OutlineFloorplanView {
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view;
+  OutlineFloorplanView() : view(registry, context) {
+    OutlineTestApp();
+    RegisterFloorplanCommand(registry, kFloorplanPayload, true);
+    view.RefreshFloorplan();
+  }
+};
+
+TEST(FloorplanOutline, DrawsDieCoreRowsAndPins) {
+  OutlineFloorplanView fixture;
+  ASSERT_TRUE(fixture.view.Floorplan().Loaded());
+  FloorplanDiagram diagram(fixture.view);
+  diagram.show();
+  QApplication::processEvents();
+  diagram.Refresh();
+  QApplication::processEvents();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  EXPECT_EQ(diagram.CountsText(),
+            "Die: 0,0,5000,5000\nCore: 0,0,5000,5000\nRows: 1\n"
+            "Track grids: 10\nIO placed: 6 / 6");
+  const std::vector<QGraphicsRectItem*> rects =
+      OutlineSceneItems<QGraphicsRectItem>(scene);
+  // Die, core, one row, six pin outlines, six pin hover rects.
+  EXPECT_EQ(rects.size(), 15u);
+  std::size_t die = 0;
+  std::size_t core = 0;
+  std::size_t rows = 0;
+  std::size_t pins = 0;
+  std::size_t hover = 0;
+  for (const QGraphicsRectItem* rect : rects) {
+    EXPECT_EQ(rect->brush().style(), Qt::NoBrush);
+    if (rect->pen().style() == Qt::NoPen) {
+      ++hover;
+      continue;
+    }
+    // Rows are grey by design; die, core, and pins are white.
+    if (rect->pen().color() == Qt::gray &&
+        OutlineRectNear(rect->rect(), QRectF(0, -3200, 5000, 3200))) {
+      ++rows;
+      continue;
+    }
+    EXPECT_EQ(rect->pen().color(), Qt::white);
+    if (rect->pen().widthF() == 2 &&
+        OutlineRectNear(rect->rect(), QRectF(0, -5000, 5000, 5000))) {
+      ++die;
+    } else if (rect->pen().widthF() == 1 &&
+               OutlineRectNear(rect->rect(),
+                               QRectF(0, -5000, 5000, 5000))) {
+      ++core;
+    } else if (rect->pen().widthF() == 1 &&
+               std::abs(rect->rect().width() - 100) < 0.01 &&
+               std::abs(rect->rect().height() - 100) < 0.01) {
+      ++pins;
+    }
+  }
+  EXPECT_EQ(die, 1u);
+  EXPECT_EQ(core, 1u);
+  EXPECT_EQ(rows, 1u);
+  EXPECT_EQ(pins, 6u);
+  EXPECT_EQ(hover, 6u);
+  // Every pin is labelled by name, in white text.
+  const std::vector<QGraphicsSimpleTextItem*> texts =
+      OutlineSceneItems<QGraphicsSimpleTextItem>(scene);
+  ASSERT_EQ(texts.size(), 6u);
+  for (const QGraphicsSimpleTextItem* text : texts) {
+    EXPECT_EQ(text->brush().color(), Qt::white) << text->text().toStdString();
+  }
+  std::vector<std::string> names;
+  for (const QGraphicsSimpleTextItem* text : texts) {
+    names.push_back(text->text().toStdString());
+  }
+  std::sort(names.begin(), names.end());
+  EXPECT_EQ(names, (std::vector<std::string>{"a", "b", "c", "d", "y1", "y2"}));
+}
+
+TEST(FloorplanOutline, EmptyPlaceholderIsWhite) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  FloorplanDiagram diagram(view);
+  diagram.Refresh();
+  const std::vector<QGraphicsSimpleTextItem*> texts =
+      OutlineSceneItems<QGraphicsSimpleTextItem>(diagram.Scene());
+  ASSERT_EQ(texts.size(), 1u);
+  EXPECT_EQ(texts[0]->text().toStdString(),
+            "(no floorplan yet: run eos::floorplan first)");
+  EXPECT_EQ(texts[0]->brush().color(), Qt::white);
+  EXPECT_EQ(diagram.CountsText(),
+            "(no floorplan yet: run eos::floorplan first)");
 }
 
 TEST(SchematicOutline, MuxDrawsTrapezoid) {
@@ -3785,6 +4054,40 @@ TEST(CenterView, SwitchingBackToNonLeafRestoresBlockDiagram) {
                    .empty());
 }
 
+TEST(CenterView, ShowsFloorplanWhenFloorplanStageChosen) {
+  CenterViewFixture fixture;
+  RegisterFloorplanCommand(fixture.registry, kFloorplanPayload, true);
+  fixture.view.RefreshFloorplan();
+  ASSERT_TRUE(fixture.view.Floorplan().Loaded());
+  CenterView center(fixture.view);
+  center.Refresh();
+  EXPECT_FALSE(center.ShowingFloorplan());
+  EXPECT_FALSE(center.ShowingSchematic());
+  // A successful floorplan dispatch chooses the floorplan
+  // stage: the center shows the canvas, not the schematic.
+  fixture.view.ShowFloorplan(true);
+  center.Refresh();
+  EXPECT_TRUE(center.ShowingFloorplan());
+  EXPECT_FALSE(center.ShowingSchematic());
+  // The floorplan page renders the die outline: a white 2px
+  // rect over the die rectangle.
+  bool die_found = false;
+  for (const QGraphicsRectItem* rect :
+       OutlineSceneItems<QGraphicsRectItem>(center.Floorplan()->Scene())) {
+    if (rect->pen().color() == Qt::white &&
+        rect->pen().widthF() == 2 &&
+        OutlineRectNear(rect->rect(), QRectF(0, -5000, 5000, 5000))) {
+      die_found = true;
+    }
+  }
+  EXPECT_TRUE(die_found);
+  // Hierarchy navigation clears the stage: the center shows
+  // the hierarchy views again.
+  fixture.view.ShowFloorplan(false);
+  center.Refresh();
+  EXPECT_FALSE(center.ShowingFloorplan());
+}
+
 TEST(CenterView, HighlightGateForwardsToSchematicOnlyWhenLeaf) {
   CenterViewFixture fixture;
   fixture.RefreshToLevel("top/u_mid/u_add");
@@ -4111,6 +4414,100 @@ TEST(GuiSessionView, RefreshTimingClearsOnMalformedPayload) {
   SessionView view(registry, context);
   view.RefreshTiming();
   EXPECT_FALSE(view.Timing().Loaded());
+}
+
+TEST(GuiSessionView, RefreshFloorplanPopulatesModelWithoutEcho) {
+  CommandRegistry registry;
+  RegisterFloorplanCommand(registry, kFloorplanPayload, true);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshFloorplan();
+  EXPECT_TRUE(view.Floorplan().Loaded());
+  ASSERT_EQ(view.Floorplan().Rows().size(), 1u);
+  EXPECT_EQ(view.Floorplan().Rows()[0], (FloorplanRect{0, 0, 5000, 3200}));
+  ASSERT_EQ(view.Floorplan().Pins().size(), 6u);
+  EXPECT_EQ(view.Floorplan().Pins()[0].name, "a");
+  EXPECT_TRUE(view.EchoLog().empty());
+}
+
+TEST(GuiSessionView, RefreshFloorplanRunsQueryOnEveryRefresh) {
+  CommandRegistry registry;
+  int calls = 0;
+  RegisterFloorplanCommand(registry, kFloorplanPayload, true, &calls);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshFloorplan();
+  EXPECT_EQ(calls, 1);
+  // No timing-key guard here: the query is a cheap database
+  // walk, so it runs on every refresh, like the hierarchy
+  // refresh.
+  view.RefreshFloorplan();
+  EXPECT_EQ(calls, 2);
+}
+
+TEST(GuiSessionView, RefreshFloorplanClearsOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterFloorplanCommand(registry, "", false);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshFloorplan();
+  EXPECT_FALSE(view.Floorplan().Loaded());
+}
+
+TEST(GuiSessionView, RefreshFloorplanClearsOnMalformedPayload) {
+  CommandRegistry registry;
+  RegisterFloorplanCommand(registry, "garbage\n", true);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshFloorplan();
+  EXPECT_FALSE(view.Floorplan().Loaded());
+}
+
+TEST(GuiSessionView, RefreshFloorplanClearsWhenQueryStartsFailing) {
+  CommandRegistry registry;
+  std::string payload = kFloorplanPayload;
+  bool ok = true;
+  auto status = registry.Register(
+      "floorplan_summary", "floorplan_summary",
+      [&payload, &ok](CommandContext&,
+                      const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no floorplan");
+        }
+        return CommandResult::Ok(payload);
+      });
+  ASSERT_TRUE(status.ok());
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshFloorplan();
+  ASSERT_TRUE(view.Floorplan().Loaded());
+  ok = false;
+  view.RefreshFloorplan();
+  EXPECT_FALSE(view.Floorplan().Loaded());
+}
+
+TEST(GuiSessionView, DispatchFloorplanShowsFloorplanCenter) {
+  CommandRegistry registry;
+  auto floorplan_status = registry.Register(
+      "floorplan", "floorplan",
+      [](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Ok("die_area=0,0,5000,5000");
+      });
+  ASSERT_TRUE(floorplan_status.ok());
+  auto close_status = registry.Register(
+      "close_design", "close_design",
+      [](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Ok("");
+      });
+  ASSERT_TRUE(close_status.ok());
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_FALSE(view.ShowingFloorplan());
+  ASSERT_TRUE(view.Dispatch("floorplan", {}).ok);
+  EXPECT_TRUE(view.ShowingFloorplan());
+  ASSERT_TRUE(view.Dispatch("close_design", {}).ok);
+  EXPECT_FALSE(view.ShowingFloorplan());
 }
 
 // Panel rework: the log window's entries. A dispatch logs its

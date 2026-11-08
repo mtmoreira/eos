@@ -73,6 +73,19 @@ before and after the loop, the winning strategy, and the
 equivalence verdict), and SessionView gains SynthesisStep(),
 Done once a mapped design exists, as the stepper state contract
 unit F11 wires.
+F3 adds the floorplan canvas to the center, as the third page
+of the center stack beside the block diagram and the
+schematic: the floorplan_summary registry query over the live
+database (die and core rectangles, row rectangles, IO pin
+positions, and the counts), the FloorplanModel, and the
+FloorplanDiagram rendering the die outline, the core outline,
+the rows, and the placed IO pins with their names, with the
+payload counts beside the canvas. A successful floorplan
+dispatch takes the user there, and the Floorplan stage button
+takes them there too once a floorplan is loaded; hierarchy
+navigation takes them back to the hierarchy views. The model
+refreshes on every window refresh: the query is a cheap
+database walk, so no timing-key guard is needed.
 U6 delivers console command entry plus session persistence: the
 console gains an entry line that takes one registry command per
 Return and dispatches it through the session, so the stepper,

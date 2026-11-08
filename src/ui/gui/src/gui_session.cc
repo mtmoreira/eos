@@ -190,6 +190,12 @@ CommandResult SessionView::Dispatch(const std::string& name,
       if (args.size() == 1) checkpoint_ = args[0];
     } else if (name == "close_design") {
       checkpoint_.clear();
+      center_floorplan_ = false;
+    } else if (name == "floorplan") {
+      // A successful floorplan takes the user to the
+      // floorplan canvas: the center shows it on the next
+      // refresh, once the model loads.
+      center_floorplan_ = true;
     }
   }
   if (result.ok && (name == "read_verilog" || name == "read_filelist" ||
@@ -372,6 +378,14 @@ void SessionView::RefreshTiming() {
     timing_.Clear();
   }
   timing_key_ = key;
+}
+
+void SessionView::RefreshFloorplan() {
+  const CommandResult result =
+      registry_.Dispatch(context_, "floorplan_summary", {});
+  if (!result.ok || !floorplan_.LoadPayload(result.payload)) {
+    floorplan_.Clear();
+  }
 }
 
 void SessionView::RefreshLog() {

@@ -56,18 +56,37 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   auto* layout = new QVBoxLayout(root);
 
   // Stage bar: Elaboration active, later stages greyed placeholders.
-  // Floorplan stays disabled while any elaboration error exists,
-  // and its label carries the error count then (backend finding
-  // 1): the stage is not runnable on a design with errors.
+  // Floorplan is a button, not a label: it stays disabled until a
+  // floorplan is loaded, and its text carries the error count
+  // while any elaboration error exists (backend finding 1).
+  // Elaboration and Floorplan are flat buttons, not labels: the
+  // user switches the center between the hierarchy views and
+  // the floorplan canvas there. The other later stages stay
+  // greyed labels until their units land.
   auto* stages = new QWidget(root);
   auto* stages_layout = new QHBoxLayout(stages);
-  auto* active = new QLabel("Elaboration", stages);
-  active->setStyleSheet("font-weight: bold;");
-  stages_layout->addWidget(active);
+  elaboration_button_ = new QPushButton("Elaboration", stages);
+  elaboration_button_->setFlat(true);
+  elaboration_button_->setStyleSheet("font-weight: bold;");
+  stages_layout->addWidget(elaboration_button_);
+  connect(elaboration_button_, &QPushButton::clicked, [this]() {
+    view_.ShowFloorplan(false);
+    Refresh();
+  });
   for (const char* stage : kLaterStages) {
+    if (std::string(stage) == "Floorplan") {
+      floorplan_button_ = new QPushButton(stage, stages);
+      floorplan_button_->setFlat(true);
+      floorplan_button_->setEnabled(false);
+      stages_layout->addWidget(floorplan_button_);
+      connect(floorplan_button_, &QPushButton::clicked, [this]() {
+        view_.ShowFloorplan(true);
+        Refresh();
+      });
+      continue;
+    }
     auto* label = new QLabel(stage, stages);
     label->setEnabled(false);
-    if (std::string(stage) == "Floorplan") floorplan_label_ = label;
     stages_layout->addWidget(label);
   }
   stages_layout->addStretch();
@@ -108,6 +127,11 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   auto* middle = new QSplitter(root);
   browser_ = new HierarchyBrowser(view_, middle);
   browser_->SetSelectionCallback([this]() {
+    // Hierarchy navigation shows the hierarchy views: it
+    // clears the floorplan stage, so a click in the tree never
+    // leaves the user on a floorplan canvas for a different
+    // level.
+    view_.ShowFloorplan(false);
     view_.SetDiagramLevel(view_.SelectedHierarchyPath());
     Refresh();
   });
@@ -283,6 +307,7 @@ void MainWindow::Refresh() {
   view_.RefreshPanels();
   view_.RefreshIssues();
   view_.RefreshTiming();
+  view_.RefreshFloorplan();
   view_.RefreshLog();
   browser_->Refresh();
   center_->Refresh();
@@ -303,11 +328,22 @@ void MainWindow::RefreshSteps() {
   checkpoint_label_->setText(QString::fromStdString(
       checkpoint.empty() ? "Checkpoint: none"
                          : "Checkpoint: " + checkpoint));
-  if (floorplan_label_ != nullptr) {
+  // The stage buttons show which center view is active: bold
+  // for the one showing, normal for the other. Floorplan stays
+  // disabled until a floorplan is loaded, and its label carries
+  // the error count while any elaboration error exists.
+  if (elaboration_button_ != nullptr) {
+    elaboration_button_->setStyleSheet(
+        view_.ShowingFloorplan() ? "" : "font-weight: bold;");
+  }
+  if (floorplan_button_ != nullptr) {
     const int errors = view_.Issues().ErrorCount();
-    floorplan_label_->setText(QString::fromStdString(
+    floorplan_button_->setText(QString::fromStdString(
         errors > 0 ? "Floorplan (" + std::to_string(errors) + " errors)"
                    : "Floorplan"));
+    floorplan_button_->setEnabled(view_.Floorplan().Loaded());
+    floorplan_button_->setStyleSheet(
+        view_.ShowingFloorplan() ? "font-weight: bold;" : "");
   }
 }
 

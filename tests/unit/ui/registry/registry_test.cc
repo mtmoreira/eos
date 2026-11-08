@@ -89,8 +89,8 @@ TEST(Registry, CoreSetIsComplete) {
   // append_to_collection, remove_from_collection,
   // compare_collections, index_collection, query_objects,
   // foreach_in_collection). get_objects is the generic alias and
-  // exists already, so it adds no pin.
-  EXPECT_EQ(shell.registry.Names().size(), 110u);
+  // exists already, so it adds no pin. F3 adds floorplan_summary.
+  EXPECT_EQ(shell.registry.Names().size(), 111u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -4557,6 +4557,15 @@ TEST(CoreCommands, HelpWildcardPatterns) {
   EXPECT_EQ(lines(leading.payload), 1u);
   EXPECT_NE(leading.payload.find("timing_summary"),
             std::string::npos);
+  // "floorplan*" matches the floorplan command and its query,
+  // floorplan_summary, and nothing else.
+  const CommandResult floorplan = shell.Run("help", {"floorplan*"});
+  ASSERT_TRUE(floorplan.ok) << floorplan.message;
+  EXPECT_EQ(lines(floorplan.payload), 2u);
+  EXPECT_NE(floorplan.payload.find("floorplan [-die_area"),
+            std::string::npos);
+  EXPECT_NE(floorplan.payload.find("floorplan_summary"),
+            std::string::npos);
 }
 
 TEST(CoreCommands, ReportTimingHelpFlags) {
@@ -4714,6 +4723,122 @@ TEST(CoreCommands, FloorplanFailsFastWithoutMappedDesign) {
   ASSERT_FALSE(result.ok);
   EXPECT_EQ(result.diag, Diag::kUnclosedDesign);
   EXPECT_NE(result.message.find("no mapped design"), std::string::npos);
+}
+
+// F3: the floorplan_summary query over the imported-design
+// floorplan: the header carries the die and core rectangles
+// and the counts, one "row" line per row, one "pin" line per
+// IO pin, and the counts match the lines. The track-grid count
+// matches the floorplan payload's own count, so the query and
+// the engine agree on the source.
+TEST(CoreCommands, FloorplanSummaryReadsImportedFloorplan) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  const CommandResult floorplan = shell.Run(
+      "floorplan",
+      {"-die_area", "0", "0", "10000", "10000", "-core_area", "0", "0",
+       "10000", "10000", "-site", "core"});
+  ASSERT_TRUE(floorplan.ok) << floorplan.message;
+  const CommandResult summary = shell.Run("floorplan_summary", {});
+  ASSERT_TRUE(summary.ok) << summary.message;
+  // The die is the requested die. The core is the extent the rows
+  // cover, not the requested core: 21 sites of 460 DBU wide and
+  // 3 rows of 2720 DBU tall, so 9660 by 8160. The floorplan
+  // payload's core_area is the requested core instead.
+  EXPECT_NE(summary.payload.find(
+                "floorplan die=0,0,10000,10000 core=0,0,9660,8160"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("io_placed=2"), std::string::npos);
+  EXPECT_NE(summary.payload.find("io_total=2"), std::string::npos);
+  // Rows: the site is 2.72 microns tall in a 10000 DBU core,
+  // so three rows fit.
+  EXPECT_NE(summary.payload.find("rows=3"), std::string::npos);
+  const auto count_lines = [](const std::string& payload,
+                              const std::string& prefix) {
+    std::size_t count = 0;
+    std::size_t at = 0;
+    while ((at = payload.find(prefix, at)) != std::string::npos) {
+      ++count;
+      at += prefix.size();
+    }
+    return count;
+  };
+  EXPECT_EQ(count_lines(summary.payload, "\nrow rect="), 3u);
+  EXPECT_EQ(count_lines(summary.payload, "\npin name="), 2u);
+  // The two pins are the DEF's IO, each with its placed pin
+  // rectangle (the 100 by 100 PORT rect around its PLACED
+  // point, which straddles the die edge).
+  EXPECT_NE(summary.payload.find(
+                "pin name=in1 dir=in placed=1 rect=-50,4950,50,5050"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "pin name=out1 dir=out placed=1 rect=9950,4950,10050,5050"),
+            std::string::npos);
+  const auto track_grids = [](const std::string& payload) {
+    const std::size_t at = payload.find("track_grids=");
+    if (at == std::string::npos) return std::string();
+    const std::size_t start = at + std::string("track_grids=").size();
+    const std::size_t end = payload.find(' ', start);
+    return payload.substr(start, end - start);
+  };
+  ASSERT_FALSE(track_grids(floorplan.payload).empty());
+  EXPECT_NE(summary.payload.find("track_grids=" +
+                                 track_grids(floorplan.payload)),
+            std::string::npos);
+}
+
+// F3: floorplan_summary fails fast before any floorplan runs,
+// with the same preconditions as floorplan itself.
+TEST(CoreCommands, FloorplanSummaryFailsFastWithoutFloorplan) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  const CommandResult result = shell.Run("floorplan_summary", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no floorplan"), std::string::npos);
+}
+
+TEST(CoreCommands, FloorplanSummaryFailsFastWithoutTechnology) {
+  Shell shell;
+  const CommandResult result = shell.Run("floorplan_summary", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no technology data"), std::string::npos);
+}
+
+TEST(CoreCommands, FloorplanSummaryFailsFastWithoutMappedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  Shell shell;
+  shell.ctx.timing.odb = std::move(database);
+  const CommandResult result = shell.Run("floorplan_summary", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kUnclosedDesign);
+  EXPECT_NE(result.message.find("no mapped design"), std::string::npos);
+}
+
+TEST(CoreCommands, FloorplanSummaryRejectsBadOptions) {
+  Shell shell;
+  const CommandResult result =
+      shell.Run("floorplan_summary", {"-bogus"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("floorplan_summary"), std::string::npos);
 }
 
 // F0: LEF and tech LEF for the synth-to-PD bridge tests. The cell

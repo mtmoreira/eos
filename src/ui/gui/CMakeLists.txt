@@ -10,6 +10,7 @@ add_library(eda_ui_gui STATIC
   src/gui_session.cc
   src/console_entry.cc
   src/diagram.cc
+  src/floorplan.cc
   src/hierarchy.cc
   src/issues.cc
   src/panels.cc
@@ -25,6 +26,7 @@ if(Qt6_FOUND)
     src/hierarchy_browser.cc
     src/block_diagram.cc
     src/center_view.cc
+    src/floorplan_diagram.cc
     src/schematic_diagram.cc
     src/panels_view.cc
     src/splash_screen.cc
