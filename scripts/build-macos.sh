@@ -255,7 +255,11 @@ do_configure() {
     return $rc
   fi
   echo "Verifying eos-gui-bundle is a known target of the configured build..."
-  if ! cmake --build "$BUILD_DIR" --target help 2>/dev/null | grep -q "eos-gui-bundle"; then
+  # NOTE: do NOT use grep -q here. This script runs under set -o pipefail,
+  # and grep -q exits as soon as it matches, which kills the producer
+  # (make help) with SIGPIPE and fails the pipeline even when the target
+  # exists. grep must consume the whole stream; its stdout goes to /dev/null.
+  if ! cmake --build "$BUILD_DIR" --target help 2>/dev/null | grep "eos-gui-bundle" >/dev/null; then
     echo "eos-gui-bundle is not a known target of the configured build." >&2
     echo "The build directory configuration is stale. Re-run this script to re-configure; if the target is still unknown, remove $BUILD_DIR by hand and re-run." >&2
     return 1
