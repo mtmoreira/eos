@@ -90,7 +90,7 @@ TEST(Registry, CoreSetIsComplete) {
   // compare_collections, index_collection, query_objects,
   // foreach_in_collection). get_objects is the generic alias and
   // exists already, so it adds no pin. F3 adds floorplan_summary.
-  EXPECT_EQ(shell.registry.Names().size(), 111u);
+  EXPECT_EQ(shell.registry.Names().size(), 112u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -516,6 +516,63 @@ endmodule
 
 const char kTimingSdc[] =
     "create_clock -name clk -period 10 [get_ports clk]\n";
+
+// The placement-query Liberty (full-flow GUI unit F4): the
+// single cell the floorplan fixture uses, BUFX2, with a scalar
+// 0.3 ns arc, so a timed place run on that fixture measures a
+// real post-place slack. The area matches the LEF macro size
+// (0.46 by 2.72 microns) used for the rectangle assertions.
+const char kPlaceLiberty[] = R"LIB(library (eos_place) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+  cell (BUFX2) {
+    area : 2.72;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+// The placement-query SDC (full-flow GUI unit F4): a virtual
+// clock plus input and output delays on the fixture's ports,
+// so STA on the combinational two-buffer fixture has a
+// constrained path to measure. The fixture has no clock port,
+// so a create_clock on a port would fail at analysis time.
+const char kPlaceSdc[] =
+    "create_clock -name vclk -period 10\n"
+    "set_input_delay 1.0 -clock vclk [get_ports in1]\n"
+    "set_output_delay 1.0 -clock vclk [get_ports out1]\n";
 
 // The electrical variant of the timing fixture (unit F5):
 // the buffer output u1/Y violates all three electrical
@@ -5383,6 +5440,164 @@ TEST(CoreCommands, PlaceTimingDrivenWithoutLibertyFailsFast) {
   const CommandResult result = shell.Run("place", {"-timing_driven"});
   ASSERT_FALSE(result.ok);
   EXPECT_NE(result.message.find("Liberty"), std::string::npos);
+}
+
+// F4: the place_summary query over the placed imported
+// design: the header carries the die and core rectangles and
+// the counts from the place record, one "inst" line per placed
+// instance with its master size, and no slack line when no
+// timing was configured. The HPWL matches the place payload's
+// own number, so the query and the engine agree on the source.
+TEST(CoreCommands, PlaceSummaryReadsPlacedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run(
+                  "floorplan",
+                  {"-die_area", "0", "0", "10000", "10000", "-core_area",
+                   "0", "0", "10000", "10000", "-site", "core"})
+                  .ok);
+  const CommandResult placed = shell.Run("place", {});
+  ASSERT_TRUE(placed.ok) << placed.message;
+  const CommandResult summary = shell.Run("place_summary", {});
+  ASSERT_TRUE(summary.ok) << summary.message;
+  // The die is the requested die. The core is the extent the
+  // rows cover, not the requested core: 21 sites of 460 DBU
+  // wide and 3 rows of 2720 DBU tall, so 9660 by 8160.
+  EXPECT_NE(summary.payload.find(
+                "placement die=0,0,10000,10000 core=0,0,9660,8160 "
+                "placed=2 total=2"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("overlaps=0"), std::string::npos);
+  const auto hpwl = [](const std::string& payload) {
+    const std::size_t at = payload.find("hpwl=");
+    if (at == std::string::npos) return std::string();
+    const std::size_t start = at + std::string("hpwl=").size();
+    const std::size_t end = payload.find(' ', start);
+    return payload.substr(start, end - start);
+  };
+  ASSERT_FALSE(hpwl(placed.payload).empty());
+  EXPECT_NE(summary.payload.find("hpwl=" + hpwl(placed.payload)),
+            std::string::npos);
+  // One inst line per placed instance, with the master size
+  // from the LEF macro (BUFX2 is 0.46 by 2.72 microns, so 460
+  // by 2720 database units).
+  EXPECT_NE(summary.payload.find("inst name=u1 master=BUFX2"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("inst name=u2 master=BUFX2"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("w=460 h=2720"), std::string::npos);
+  // No timing was configured, so the summary carries no slack
+  // line instead of inventing one.
+  EXPECT_EQ(summary.payload.find("slack "), std::string::npos);
+}
+
+// F4: place_summary carries one slack line per scene the place
+// run measured post-place slack for, with the same number the
+// place payload reported. The fixture path is in1 through two
+// 0.3 ns buffers to out1 against a 10 ns virtual clock with
+// 1 ns of input and output delay each, so the slack is
+// positive; the test asserts the line and its sign, not the
+// exact value, so estimated wire delay never makes it brittle.
+TEST(CoreCommands, PlaceSummaryReportsPostPlaceSlack) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run(
+                  "read_liberty",
+                  {"tt", dir.Write("cells.lib", kPlaceLiberty)})
+                  .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kPlaceSdc)}).ok);
+  ASSERT_TRUE(shell.Run("create_scenario",
+                        {"func_tt", "func", "tt", "estimate"})
+                  .ok);
+  ASSERT_TRUE(shell.Run(
+                  "floorplan",
+                  {"-die_area", "0", "0", "10000", "10000", "-core_area",
+                   "0", "0", "10000", "10000", "-site", "core"})
+                  .ok);
+  const CommandResult placed = shell.Run("place", {});
+  ASSERT_TRUE(placed.ok) << placed.message;
+  EXPECT_EQ(placed.payload.find("sta_slack_ns=unavailable"),
+            std::string::npos);
+  const CommandResult summary = shell.Run("place_summary", {});
+  ASSERT_TRUE(summary.ok) << summary.message;
+  const std::size_t at =
+      summary.payload.find("slack scene=func_tt worst_slack_ns=");
+  ASSERT_NE(at, std::string::npos);
+  const std::size_t start =
+      at + std::string("slack scene=func_tt worst_slack_ns=").size();
+  const double slack =
+      std::stod(summary.payload.substr(start));
+  EXPECT_GT(slack, 0.0);
+}
+
+// F4: place_summary fails fast before any place runs, with the
+// same preconditions as place itself.
+TEST(CoreCommands, PlaceSummaryFailsFastWithoutPlacement) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  const CommandResult result = shell.Run("place_summary", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no placement"), std::string::npos);
+}
+
+TEST(CoreCommands, PlaceSummaryFailsFastWithoutTechnology) {
+  Shell shell;
+  const CommandResult result = shell.Run("place_summary", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no technology data"), std::string::npos);
+}
+
+TEST(CoreCommands, PlaceSummaryFailsFastWithoutMappedDesign) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  Shell shell;
+  shell.ctx.timing.odb = std::move(database);
+  const CommandResult result = shell.Run("place_summary", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kUnclosedDesign);
+  EXPECT_NE(result.message.find("no mapped design"), std::string::npos);
+}
+
+TEST(CoreCommands, PlaceSummaryRejectsBadOptions) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+
+  const CommandResult result = shell.Run("place_summary", {"-bogus"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
 }
 
 // P3: eos::cts option parsing and session preconditions. The

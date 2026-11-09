@@ -557,6 +557,8 @@ bool OdbDatabase::FindInstance(const std::string& name,
     out->name = inst->getName();
     out->master = inst->getMaster()->getName();
     inst->getLocation(out->x, out->y);
+    out->width = static_cast<int>(inst->getMaster()->getWidth());
+    out->height = static_cast<int>(inst->getMaster()->getHeight());
   }
   return true;
 }
@@ -572,6 +574,8 @@ std::vector<OdbInstanceInfo> OdbDatabase::Instances() const {
     info.name = inst->getName();
     info.master = inst->getMaster()->getName();
     inst->getLocation(info.x, info.y);
+    info.width = static_cast<int>(inst->getMaster()->getWidth());
+    info.height = static_cast<int>(inst->getMaster()->getHeight());
     instances.push_back(info);
   }
   return instances;
