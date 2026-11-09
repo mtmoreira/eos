@@ -47,6 +47,7 @@
 #include <utility>
 #include <vector>
 
+#include "kernel/ff.h"
 #include "kernel/log.h"
 #include "kernel/rtlil.h"
 #include "kernel/yosys.h"
@@ -1069,6 +1070,25 @@ Result<YosysNetlistStats> YosysEngine::Stats(const std::string& top) {
   return ComputeStats(module);
 }
 
+Result<YosysEngine::YosysDesignTotals> YosysEngine::DesignTotals() {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  if (Yosys::yosys_design == nullptr) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  YosysDesignTotals totals;
+  for (const auto& entry : Yosys::yosys_design->modules_) {
+    const YosysNetlistStats stats = ComputeStats(entry.second);
+    totals.cell_count += stats.cell_count;
+    totals.sequential_cells += stats.sequential_cells;
+    if (stats.logic_depth > totals.logic_depth) {
+      totals.logic_depth = stats.logic_depth;
+    }
+  }
+  return totals;
+}
+
 Result<YosysEngine::HierarchyNode> YosysEngine::Hierarchy(
     const std::string& top) {
   if (!owns_) {
@@ -1249,6 +1269,142 @@ Status YosysEngine::AigMap() {
   const Status techmap = RunPass("techmap");
   if (!techmap.ok()) return techmap;
   return RunPass("aigmap");
+}
+
+// Maps an EOS synth_generic script name onto the inline ABC
+// script the upstream `abc -dff` pass runs: the pass takes
+// -script with a `+`-prefixed command string (commas become
+// blanks), and with no -script it runs its own heavy default
+// script, so every EOS name maps explicitly. The steps mirror
+// the combinational bridge (AbcEngine::OptimizeGeneric), which
+// always runs strash before the named steps; none runs strash
+// only. Returns empty for an unknown name.
+std::string DffScriptSteps(const std::string& script) {
+  if (script == "default") {
+    return "strash,balance,rewrite,refactor,resub,balance";
+  }
+  if (script == "balance") return "strash,balance";
+  if (script == "rewrite") return "strash,rewrite";
+  if (script == "none") return "strash";
+  return "";
+}
+
+// One clock domain of the upstream `abc -dff` pass: the clock
+// signal with its polarity, plus the enable and reset signals
+// with their polarities. The pass keys its per-module domain
+// partition on exactly these eight fields, so two flops share
+// a domain only when every field matches. The reset value is
+// not part of the key: the pass carries it as the flop's
+// FF0/FF1 type instead.
+struct DffDomain {
+  bool pol_clk = false;
+  Yosys::RTLIL::SigSpec sig_clk;
+  bool pol_ce = false;
+  Yosys::RTLIL::SigSpec sig_ce;
+  bool pol_arst = false;
+  Yosys::RTLIL::SigSpec sig_arst;
+  bool pol_srst = false;
+  Yosys::RTLIL::SigSpec sig_srst;
+  bool operator==(const DffDomain& other) const {
+    return pol_clk == other.pol_clk && sig_clk == other.sig_clk &&
+           pol_ce == other.pol_ce && sig_ce == other.sig_ce &&
+           pol_arst == other.pol_arst && sig_arst == other.sig_arst &&
+           pol_srst == other.pol_srst && sig_srst == other.sig_srst;
+  }
+};
+
+// Validates the live design for the `abc -dff` pass, per
+// module: every module's extractable flip-flops must share one
+// clock domain, and the design must hold at least one
+// extractable flop. Extractable mirrors the pass's own
+// prepare_cell: a fine clocked flop without a gated clock,
+// async load, or per-lane set/reset. Anything else the pass
+// leaves in place as a network boundary (a latch, a coarse
+// flop, a gated-clock flop), so it takes no part in the domain
+// check. The pass partitions domains itself and silently
+// no-ops on a design with no flop (it logs "No clock domain
+// found" and never calls ABC), so both checks fail fast here
+// instead of letting synth_generic report a success it did
+// not earn.
+Status ValidateDffDomains() {
+  if (Yosys::yosys_design == nullptr) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  int extractable_flops = 0;
+  for (const auto& entry : Yosys::yosys_design->modules_) {
+    Yosys::RTLIL::Module* module = entry.second;
+    // FfInitVals must be initialized with the module's SigMap:
+    // a default-constructed FfInitVals holds a null sigmap
+    // pointer, and FfData dereferences it while manufacturing
+    // the flop's init value. The upstream pass initializes it
+    // the same way (abc.cc: initvals.set(&assign_map, mod)).
+    Yosys::SigMap sigmap(module);
+    Yosys::FfInitVals initvals(&sigmap, module);
+    std::vector<DffDomain> domains;
+    for (const auto& cell_entry : module->cells_) {
+      Yosys::RTLIL::Cell* cell = cell_entry.second;
+      if (!cell->is_builtin_ff()) continue;
+      Yosys::FfData ff(&initvals, cell);
+      if (!ff.is_fine || !ff.has_clk || ff.has_gclk || ff.has_aload ||
+          ff.has_sr) {
+        continue;
+      }
+      ++extractable_flops;
+      DffDomain domain;
+      domain.pol_clk = ff.pol_clk;
+      domain.sig_clk = ff.sig_clk;
+      domain.pol_ce = ff.pol_ce;
+      domain.sig_ce = ff.sig_ce;
+      domain.pol_arst = ff.pol_arst;
+      domain.sig_arst = ff.sig_arst;
+      domain.pol_srst = ff.pol_srst;
+      domain.sig_srst = ff.sig_srst;
+      bool seen = false;
+      for (const DffDomain& known : domains) {
+        if (known == domain) {
+          seen = true;
+          break;
+        }
+      }
+      if (!seen) domains.push_back(domain);
+    }
+    if (domains.size() > 1) {
+      return InvalidArgument(
+          "module " + module->name.unescape() +
+          " has more than one clock domain: abc -dff supports one "
+          "clock domain per module");
+    }
+  }
+  if (extractable_flops == 0) {
+    return InvalidArgument(
+        "design has no flip-flop for abc -dff to extract");
+  }
+  return Status::Ok();
+}
+
+Status YosysEngine::AbcDff(const std::string& script) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  const std::string steps = DffScriptSteps(script);
+  if (steps.empty()) {
+    return InvalidArgument("unknown generic script: " + script);
+  }
+  const Status domains = ValidateDffDomains();
+  if (!domains.ok()) return domains;
+  // Running ABC in process writes an abc.history file into the
+  // working directory. Remove the one this call creates, and
+  // never touch one that was already there.
+  const std::filesystem::path history =
+      std::filesystem::current_path() / "abc.history";
+  std::error_code ec;
+  const bool history_existed = std::filesystem::exists(history, ec);
+  const Status ran = RunPass("abc -dff -script +" + steps);
+  if (!history_existed) {
+    std::error_code remove_ec;
+    std::filesystem::remove(history, remove_ec);
+  }
+  return ran;
 }
 
 Status YosysEngine::WriteBlif(const std::string& path,

@@ -1799,10 +1799,137 @@ TEST(CoreCommands, SynthGenericOnTheRegisteredAdder) {
   const CommandResult generic = shell.Run("synth_generic");
   ASSERT_TRUE(generic.ok) << generic.message;
   EXPECT_TRUE(shell.ctx.synth.generic_optimized);
+  // The adder is sequential (a 4-bit register), so it takes
+  // the `abc -dff` path, and its before/after numbers are the
+  // live design's cell counts and logic depths, not ABC
+  // print_stats. The depth is reported, not asserted to
+  // shrink: ABC's area-oriented default script may deepen the
+  // network while shrinking it.
   EXPECT_LE(shell.ctx.synth.generic_after_and,
             shell.ctx.synth.generic_before_and);
-  EXPECT_LE(shell.ctx.synth.generic_after_levels,
-            shell.ctx.synth.generic_before_levels);
+}
+
+// The sequential synth_generic fixtures (unit F12): the same
+// 4-bit $adff counter the Yosys facade tests use, plus a
+// sequential design with an unresolved reference for the
+// pre-gate. Each test binary carries its own copies, as the S1
+// fixtures do.
+const char kSeqCounter[] = R"V(module cnt (clk, rst_n, en, q);
+  input clk, rst_n, en;
+  output reg [3:0] q;
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) q <= 4'd0;
+    else if (en) q <= q + 4'd1;
+  end
+endmodule
+)V";
+
+const char kSeqUnresolved[] = R"V(module badseq (clk, rst_n, en, q);
+  input clk, rst_n, en;
+  output reg [3:0] q;
+  missing_cell u_missing (.clk(clk));
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) q <= 4'd0;
+    else if (en) q <= q + 4'd1;
+  end
+endmodule
+)V";
+
+// Repo root, derived from this file's own path, so the test
+// finds demo/hier no matter which directory it runs from.
+std::filesystem::path RepoRoot() {
+  std::filesystem::path dir =
+      std::filesystem::absolute(__FILE__).parent_path();
+  // tests/unit/ui/registry -> repo root is four levels up.
+  for (int i = 0; i < 4; ++i) dir = dir.parent_path();
+  return dir;
+}
+
+TEST(CoreCommands, SynthGenericOnSequentialCounter) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("cnt.v", kSeqCounter), "cnt"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult generic = shell.Run("synth_generic");
+  ASSERT_TRUE(generic.ok) << generic.message;
+  EXPECT_NE(generic.payload.find("script=default"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.generic_optimized);
+  // The -dff path reads its before/after numbers from the live
+  // design's cell counts, not ABC print_stats: the incrementer
+  // logic shrinks while the four flops stay. The depth is
+  // reported, not asserted to shrink: ABC's area-oriented
+  // default script may deepen the network while shrinking it
+  // (here 5 levels before, 6 after).
+  EXPECT_LT(shell.ctx.synth.generic_after_and,
+            shell.ctx.synth.generic_before_and);
+  std::ifstream in(shell.ctx.synth.generic_verilog);
+  ASSERT_TRUE(in.good());
+  std::stringstream verilog;
+  verilog << in.rdbuf();
+  EXPECT_NE(verilog.str().find("rst_n"), std::string::npos);
+  EXPECT_NE(verilog.str().find("clk"), std::string::npos);
+  EXPECT_NE(verilog.str().find("negedge rst_n"), std::string::npos);
+}
+
+TEST(CoreCommands, SynthGenericOnHierTop) {
+  Shell shell;
+  const std::filesystem::path list =
+      RepoRoot() / "demo" / "hier" / "design.f";
+  ASSERT_TRUE(
+      shell.Run("read_filelist", {list.string(), "hier_top"}).ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult generic = shell.Run("synth_generic");
+  ASSERT_TRUE(generic.ok) << generic.message;
+  EXPECT_TRUE(shell.ctx.synth.generic_optimized);
+  std::ifstream in(shell.ctx.synth.generic_verilog);
+  ASSERT_TRUE(in.good());
+  std::stringstream verilog;
+  verilog << in.rdbuf();
+  EXPECT_NE(verilog.str().find("rst_n"), std::string::npos);
+  EXPECT_NE(verilog.str().find("clk"), std::string::npos);
+}
+
+TEST(CoreCommands, SynthGenericBrokenVariantStillFails) {
+  Shell shell;
+  const std::filesystem::path broken =
+      RepoRoot() / "demo" / "hier" / "broken" / "unresolved_top.v";
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {broken.string(), "unresolved_top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult generic = shell.Run("synth_generic");
+  EXPECT_FALSE(generic.ok);
+  // The message names the failing step: ABC reads the BLIF
+  // bridge with its unresolved .subckt reference, and the
+  // structural-hashing step is where the missing model fails.
+  // AbcEngine reports the step and the command, not ABC's own
+  // error text. ABC's exact error ("Cannot find the model for
+  // subcircuit does_not_exist_anywhere") is printed to the
+  // console output during the run, as the demo/hier README
+  // documents.
+  EXPECT_NE(generic.message.find("structural hashing"),
+            std::string::npos);
+  // The failure happens after aigmap mutates the design, so the
+  // synth state is cleared and the recovery is read_verilog
+  // followed by elaborate.
+  EXPECT_FALSE(shell.ctx.synth.elaborated);
+}
+
+TEST(CoreCommands, SynthGenericSequentialWithUnresolvedReferenceFailsAtPreGate) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("badseq.v", kSeqUnresolved), "badseq"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult generic = shell.Run("synth_generic");
+  EXPECT_FALSE(generic.ok);
+  EXPECT_NE(generic.message.find("missing_cell"), std::string::npos);
+  // The pre-gate runs before any mutation, so the elaborated
+  // state is untouched: the design is still the elaborated one.
+  EXPECT_TRUE(shell.ctx.synth.elaborated);
 }
 
 // The S4 file-list fixtures: the same leaf and top modules as

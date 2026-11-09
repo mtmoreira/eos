@@ -8865,23 +8865,102 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               ctx.synth = CommandContext::SynthSession();
               return FromStatus(status);
             };
-        synth::AbcGenericResult generic;
+        // Dispatch on the design-wide sequential count of the
+        // elaborated design: sequential cells live in leaf
+        // modules, so the top module's own count would miss
+        // them. A sequential design takes the in-process
+        // `abc -dff` path; a combinational design keeps the
+        // existing BLIF bridge untouched. The pre-gate runs
+        // before any mutation: the -dff pass no-ops silently
+        // on a design with no builtin flop, so an unresolved
+        // reference must fail here, naming the missing module,
+        // rather than report a success it did not earn. A
+        // combinational design with an unresolved reference
+        // keeps the bridge's own failure: ABC has no model for
+        // the opaque cell, so synth_generic still fails with
+        // "Cannot find the model for subcircuit ...".
+        int sequential_cells = 0;
+        {
+          synth::YosysEngine yosys;
+          const foundation::Result<synth::YosysEngine::YosysDesignTotals> totals =
+              yosys.DesignTotals();
+          if (!totals.ok()) return FromStatus(totals.status());
+          sequential_cells = totals.value().sequential_cells;
+          if (sequential_cells > 0) {
+            const foundation::Result<
+                std::vector<synth::YosysEngine::YosysIssue>>
+                issues = yosys.Issues(ctx.synth.top_cell);
+            if (!issues.ok()) return FromStatus(issues.status());
+            for (const synth::YosysEngine::YosysIssue& issue :
+                 issues.value()) {
+              if (issue.code == "unresolved_reference") {
+                return CommandResult::Fail(
+                    Diag::kInvalidConfiguration,
+                    "elaboration issue: " + issue.message);
+              }
+            }
+          }
+        }
+        int generic_before_and = 0;
+        int generic_before_levels = 0;
+        int generic_after_and = 0;
+        int generic_after_levels = 0;
         {
           synth::YosysEngine yosys;
           const foundation::Status mapped = yosys.AigMap();
           if (!mapped.ok()) return fail_after_mutation(mapped);
-          const foundation::Status written =
-              yosys.WriteBlif(bridge, ctx.synth.top_cell);
-          if (!written.ok()) return fail_after_mutation(written);
+          if (sequential_cells == 0) {
+            const foundation::Status written =
+                yosys.WriteBlif(bridge, ctx.synth.top_cell);
+            if (!written.ok()) return fail_after_mutation(written);
+          } else {
+            // The before/after numbers come from the live
+            // design's cell counts, not ABC print_stats: the
+            // -dff pass leaves the optimized design in the
+            // session, so the counts are read before and after
+            // it runs.
+            const foundation::Result<synth::YosysEngine::YosysDesignTotals> before =
+                yosys.DesignTotals();
+            if (!before.ok()) return fail_after_mutation(before.status());
+            generic_before_and = before.value().cell_count;
+            generic_before_levels = before.value().logic_depth;
+          }
         }
-        {
-          synth::AbcEngine abc;
-          const foundation::Result<synth::AbcGenericResult> result =
-              abc.OptimizeGeneric(bridge, script, optimized);
-          std::error_code ec;
-          std::filesystem::remove(bridge, ec);
-          if (!result.ok()) return fail_after_mutation(result.status());
-          generic = result.value();
+        if (sequential_cells == 0) {
+          synth::AbcGenericResult generic;
+          {
+            synth::AbcEngine abc;
+            const foundation::Result<synth::AbcGenericResult> result =
+                abc.OptimizeGeneric(bridge, script, optimized);
+            std::error_code ec;
+            std::filesystem::remove(bridge, ec);
+            if (!result.ok()) return fail_after_mutation(result.status());
+            generic = result.value();
+          }
+          generic_before_and = generic.before.and_count;
+          generic_before_levels = generic.before.levels;
+          generic_after_and = generic.after.and_count;
+          generic_after_levels = generic.after.levels;
+        } else {
+          // The sequential path drives ABC in process through
+          // the upstream `abc -dff` pass (YosysEngine::AbcDff):
+          // the pass extracts the flip-flops, runs ABC on the
+          // combinational remainder, and re-attaches clock and
+          // reset, so the optimized design stays sequential and
+          // WriteVerilog writes it out directly. No AbcEngine
+          // is alive while the pass runs: Abc_RealMain stops
+          // the global ABC frame at the end.
+          synth::YosysEngine yosys;
+          const foundation::Status dff = yosys.AbcDff(script);
+          if (!dff.ok()) return fail_after_mutation(dff);
+          const foundation::Result<synth::YosysEngine::YosysDesignTotals> after =
+              yosys.DesignTotals();
+          if (!after.ok()) return fail_after_mutation(after.status());
+          generic_after_and = after.value().cell_count;
+          generic_after_levels = after.value().logic_depth;
+          const foundation::Status written =
+              yosys.WriteVerilog(optimized);
+          if (!written.ok()) return fail_after_mutation(written);
         }
         synth::YosysNetlistStats post;
         {
@@ -8911,10 +8990,10 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.synth.elaborated_depth = post.logic_depth;
         ctx.synth.generic_optimized = true;
         ctx.synth.generic_script = script;
-        ctx.synth.generic_before_and = generic.before.and_count;
-        ctx.synth.generic_before_levels = generic.before.levels;
-        ctx.synth.generic_after_and = generic.after.and_count;
-        ctx.synth.generic_after_levels = generic.after.levels;
+        ctx.synth.generic_before_and = generic_before_and;
+        ctx.synth.generic_before_levels = generic_before_levels;
+        ctx.synth.generic_after_and = generic_after_and;
+        ctx.synth.generic_after_levels = generic_after_levels;
         ctx.synth.generic_verilog = optimized;
         AppendEngineLog(ctx);
         return CommandResult::Ok(
@@ -8922,10 +9001,10 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             " elaborated_cells=" + std::to_string(elaborated_cells) +
             " elaborated_wires=" + std::to_string(elaborated_wires) +
             " elaborated_depth=" + std::to_string(elaborated_depth) +
-            " before_and=" + std::to_string(generic.before.and_count) +
-            " before_levels=" + std::to_string(generic.before.levels) +
-            " after_and=" + std::to_string(generic.after.and_count) +
-            " after_levels=" + std::to_string(generic.after.levels) +
+            " before_and=" + std::to_string(generic_before_and) +
+            " before_levels=" + std::to_string(generic_before_levels) +
+            " after_and=" + std::to_string(generic_after_and) +
+            " after_levels=" + std::to_string(generic_after_levels) +
             " cells=" + std::to_string(post.cell_count) +
             " wires=" + std::to_string(post.wire_count) +
             " depth=" + std::to_string(post.logic_depth) +

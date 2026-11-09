@@ -69,8 +69,24 @@ add_test(NAME synth.abc COMMAND eda_synth_abc_unit_test)
 add_executable(eda_synth_yosys_unit_test synth/yosys/yosys_test.cc)
 target_link_libraries(eda_synth_yosys_unit_test
   PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,eda_synth_yosys>"
+          # The ABC library comes in through eda_synth_yosys
+          # itself, which links eda_synth_abc for its
+          # abc::Abc_RealMain shim.
           GTest::gtest GTest::gtest_main)
 add_test(NAME synth.yosys COMMAND eda_synth_yosys_unit_test)
+
+# The `abc -dff` in-process integration test: sequential
+# synth_generic through the upstream pass. This test includes
+# eos/synth/abc.h and drives AbcEngine directly, so it links
+# eda_synth_abc itself; the yosys target's own ABC link only
+# covers the shim, not this test's includes.
+add_executable(eda_synth_yosys_abc_dff_unit_test
+  synth/yosys/abc_dff_test.cc)
+target_link_libraries(eda_synth_yosys_abc_dff_unit_test
+  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,eda_synth_yosys>"
+          eda_synth_abc GTest::gtest GTest::gtest_main)
+add_test(NAME synth.yosys.abc_dff
+  COMMAND eda_synth_yosys_abc_dff_unit_test)
 
 add_executable(eda_db_odb_unit_test db/odb/odb_test.cc)
 target_link_libraries(eda_db_odb_unit_test

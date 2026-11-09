@@ -247,6 +247,25 @@ class YosysEngine {
   // own the Yosys session.
   Result<YosysNetlistStats> Stats(const std::string& top);
 
+  // The design-wide totals of the live design: the cell and
+  // sequential-cell counts summed over every module, and the
+  // deepest per-module logic depth. The per-module counts are
+  // the same numbers Stats reports; the sum is the flattened
+  // view the synthesis commands need, because a hierarchical
+  // design's sequential cells live in its leaf modules, not in
+  // the top module (hier_top itself holds only submodule
+  // instances). A submodule instance cell counts once in its
+  // parent's total, and the cells of the module it instantiates
+  // count once in that module's total. Read-only like Stats:
+  // it runs no pass. Fails with kInvalidState when the engine
+  // does not own the Yosys session.
+  struct YosysDesignTotals {
+    int cell_count = 0;
+    int sequential_cells = 0;
+    int logic_depth = 0;
+  };
+  Result<YosysDesignTotals> DesignTotals();
+
   // One node of a design's hierarchy: an instance path, the
   // module it instantiates, its ports in declaration order, and
   // its submodule instances. The root's path is the top module
@@ -405,6 +424,35 @@ class YosysEngine {
   // kInvalidArgument when a pass rejects the design, and with
   // kInvalidState when the engine does not own the session.
   Status AigMap();
+
+  // Optimizes the live design's combinational logic with ABC
+  // in process, through the upstream `abc -dff` pass: the pass
+  // extracts the design's flip-flops, runs ABC on the
+  // combinational remainder, and re-attaches clock and reset,
+  // so the optimized design stays sequential. The caller runs
+  // AigMap first: the pass only handles the fine flop cells
+  // techmap produces ($_DFF_*), and coarse $adff cells are
+  // skipped by its domain seeding, so calling it on the
+  // elaborated design directly extracts nothing. The EOS
+  // script name maps onto the pass's -script input: default
+  // runs strash plus balance, rewrite, refactor, resub,
+  // balance; balance and rewrite run strash plus their one
+  // step; none runs strash only. The pass is driven in
+  // process (YOSYS_LINK_ABC), never by spawning an external
+  // yosys-abc executable, so no AbcEngine may be alive while
+  // it runs: Abc_RealMain stops the global ABC frame at the
+  // end, and a live AbcEngine would hold a dangling cached
+  // frame pointer. Fails with kInvalidArgument when the script
+  // name is unknown, when the design has no flip-flop for the
+  // pass to extract, or when any module holds more than one
+  // clock domain (the pass's own domain: one clock signal
+  // with its enable and reset signals and their polarities,
+  // per module; multi-clock fails fast), and with
+  // kInvalidState when the engine does not own the session.
+  // Running ABC in process writes an abc.history file into
+  // the working directory; this method removes the file it
+  // creates, and never touches one that was already there.
+  Status AbcDff(const std::string& script);
 
   // Writes the live design as Verilog to the given path, in the
   // form the Verilog backend produces (simple gates as continuous

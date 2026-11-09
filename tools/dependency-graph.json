@@ -1141,11 +1141,15 @@
     },
     "yosys": {
       "depends_on": [
+        "abc",
         "errors"
       ],
       "layer": "L4",
       "path": "src/synth/yosys",
       "via": {
+        "abc": [
+          "cmake-link"
+        ],
         "errors": [
           "cmake-link",
           "include"
@@ -1634,10 +1638,20 @@
     },
     "synth.yosys": {
       "modules": [
+        "abc",
         "yosys"
       ],
       "sources": [
         "tests/unit/synth/yosys/yosys_test.cc"
+      ]
+    },
+    "synth.yosys.abc_dff": {
+      "modules": [
+        "abc",
+        "yosys"
+      ],
+      "sources": [
+        "tests/unit/synth/yosys/abc_dff_test.cc"
       ]
     },
     "tech.package": {
