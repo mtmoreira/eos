@@ -4531,6 +4531,51 @@ TEST(MainWindowAutoNav, SynthesisButtonShowsResultsTab) {
   EXPECT_EQ(window.CurrentTab(), 2);
 }
 
+// The owner's exact console sequence from the Mac demo
+// 2026-11-08: after elaborate the Synthesis button must be
+// enabled, the window must end on the Results tab, and
+// clicking Synthesis from the Opt log tab must take the user
+// back to Results. Drives the console-entry path
+// (DispatchEntry), not Dispatch, since that is what the GUI
+// console submits.
+TEST(MainWindowAutoNav, ConsoleEntrySequenceEndsOnResults) {
+  AutoNavView fixture;
+  RegisterOkCommand(fixture.registry, "create_scenario");
+  RegisterOkCommand(fixture.registry, "read_filelist");
+  RegisterOkCommand(fixture.registry, "synth_hierarchy");
+  RegisterOkCommand(fixture.registry, "synth_blocks");
+  RegisterOkCommand(fixture.registry, "synth_schematic");
+  RegisterOkCommand(fixture.registry, "synth_stats");
+  MainWindow window(fixture.view);
+  const char* entries[] = {
+      "eos::create_scenario func_tt func tt estimate",
+      "eos::read_filelist design.f hier_top",
+      "eos::elaborate",
+      "eos::synth_hierarchy",
+      "eos::synth_blocks hier_datapath",
+      "eos::synth_schematic hier_datapath",
+      "eos::synth_stats",
+  };
+  for (const char* entry : entries) {
+    ASSERT_TRUE(fixture.view.DispatchEntry(entry).ok) << entry;
+    window.Refresh();
+  }
+  EXPECT_TRUE(window.SynthesisEnabled());
+  EXPECT_EQ(window.CurrentTab(), 2);
+  // Move away through the stepper's Generic synth step (Opt
+  // log tab), then take the Synthesis stage button back.
+  QPushButton* generic = AutoNavButtonWithPrefix(window, "Generic synth");
+  ASSERT_NE(generic, nullptr);
+  generic->click();
+  EXPECT_EQ(window.CurrentTab(), 4);
+  QPushButton* synthesis =
+      AutoNavButtonWithPrefix(window, "Synthesis");
+  ASSERT_NE(synthesis, nullptr);
+  EXPECT_TRUE(synthesis->isEnabled());
+  synthesis->click();
+  EXPECT_EQ(window.CurrentTab(), 2);
+}
+
 // A SessionView with the nested hierarchy, so the center can
 // switch between the block diagram (non-leaf levels) and the
 // schematic (the leaf adder module).
