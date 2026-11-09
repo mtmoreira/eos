@@ -69,8 +69,22 @@ add_test(NAME synth.abc COMMAND eda_synth_abc_unit_test)
 add_executable(eda_synth_yosys_unit_test synth/yosys/yosys_test.cc)
 target_link_libraries(eda_synth_yosys_unit_test
   PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,eda_synth_yosys>"
-          GTest::gtest GTest::gtest_main)
+          # YOSYS_LINK_ABC makes the yosys target reference
+          # abc::Abc_RealMain, so this binary needs the ABC
+          # library at link time too.
+          eda_synth_abc GTest::gtest GTest::gtest_main)
 add_test(NAME synth.yosys COMMAND eda_synth_yosys_unit_test)
+
+# The `abc -dff` in-process integration test: sequential
+# synth_generic through the upstream pass. Links the ABC
+# library alongside Yosys so the pass can call Abc_RealMain.
+add_executable(eda_synth_yosys_abc_dff_unit_test
+  synth/yosys/abc_dff_test.cc)
+target_link_libraries(eda_synth_yosys_abc_dff_unit_test
+  PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,eda_synth_yosys>"
+          eda_synth_abc GTest::gtest GTest::gtest_main)
+add_test(NAME synth.yosys.abc_dff
+  COMMAND eda_synth_yosys_abc_dff_unit_test)
 
 add_executable(eda_db_odb_unit_test db/odb/odb_test.cc)
 target_link_libraries(eda_db_odb_unit_test

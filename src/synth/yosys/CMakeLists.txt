@@ -549,6 +549,10 @@ set(EOS_YOSYS_SOURCE
 
 add_library(eda_synth_yosys STATIC
   src/yosys_facade.cc
+  # EOS-owned glue (see the file header): forwards
+  # abc::Abc_RealMain to EOS's global-namespace ABC build, so the
+  # upstream `abc` pass can call Abc_RealMain in process.
+  src/abc_link_shim.cc
   ${_eos_yosys_gen_dir}/kernel/version.cc
   ${_eos_yosys_gen_dir}/kernel/simlib_help.inc
   ${_eos_yosys_gen_dir}/kernel/simcells_help.inc
@@ -575,7 +579,12 @@ target_compile_definitions(eda_synth_yosys PRIVATE
   _YOSYS_ _XOPEN_SOURCE=600
   $<$<NOT:$<PLATFORM_ID:Darwin>>:_DEFAULT_SOURCE>
   $<$<PLATFORM_ID:Darwin>:_DARWIN_C_SOURCE>
-  EOS_YOSYS_SHARE_DIR=\"${CMAKE_CURRENT_BINARY_DIR}/share/\")
+  EOS_YOSYS_SHARE_DIR=\"${CMAKE_CURRENT_BINARY_DIR}/share/\"
+  # Drive ABC in process from the upstream `abc` pass, so the
+  # pass calls Abc_RealMain instead of spawning a yosys-abc
+  # executable. EOS-owned build glue, not an upstream patch;
+  # the namespace shim above supplies the symbol.
+  YOSYS_LINK_ABC)
 if(ZLIB_FOUND)
   target_link_libraries(eda_synth_yosys PRIVATE ZLIB::ZLIB)
 endif()

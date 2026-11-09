@@ -1634,10 +1634,20 @@
     },
     "synth.yosys": {
       "modules": [
+        "abc",
         "yosys"
       ],
       "sources": [
         "tests/unit/synth/yosys/yosys_test.cc"
+      ]
+    },
+    "synth.yosys.abc_dff": {
+      "modules": [
+        "abc",
+        "yosys"
+      ],
+      "sources": [
+        "tests/unit/synth/yosys/abc_dff_test.cc"
       ]
     },
     "tech.package": {
