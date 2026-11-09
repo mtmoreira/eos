@@ -605,7 +605,14 @@ if(TCL_FOUND AND NOT APPLE)
 endif()
 target_link_libraries(eda_synth_yosys
   PUBLIC eda_foundation_errors
-  PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+  # YOSYS_LINK_ABC makes this target reference abc::Abc_RealMain
+  # through the shim in src/abc_link_shim.cc, so every consumer of
+  # eda_synth_yosys needs the ABC library at link time, listed
+  # after this archive: a plain left-to-right link never resolves
+  # a symbol from an archive that appears before the archive
+  # referencing it, and CI's newer linker does not rescan one.
+  # Declared here, once, instead of per consumer.
+  PRIVATE eda_synth_abc Threads::Threads ${CMAKE_DL_LIBS})
 set_target_properties(eda_synth_yosys PROPERTIES
   POSITION_INDEPENDENT_CODE ON
   CXX_STANDARD 20
