@@ -213,9 +213,157 @@ const char kVerilog[] = R"V(module top (clk, d, q);
 endmodule
 )V";
 
+// The two-path fixture library: the base fixture cells plus a
+// MUX whose A input is the slow arc (0.4 ns) and whose B input
+// is the fast one (0.1 ns). A scene loads one Liberty file, so
+// the MUX lives in the same library here, unlike the facade
+// tests, which load it as a second library.
+const char kLibertyTwoPath[] = R"LIB(library (eos_fixture) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) {
+      direction : input;
+      capacitance : 0.001;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (scalar) { values ("0.05"); }
+        fall_constraint (scalar) { values ("0.05"); }
+      }
+    }
+    pin (CK) {
+      direction : input;
+      capacitance : 0.001;
+      clock : true;
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+
+  cell (BUF) {
+    area : 2.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+
+  cell (MUX) {
+    area : 3.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (B) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (S) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "(A*S)+(B*!S)";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.4"); }
+        cell_fall (scalar) { values ("0.4"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.1"); }
+        cell_fall (scalar) { values ("0.1"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+// The two-path fixture netlist: two flops drive r2/D through a
+// mux, so two distinct paths reach one endpoint. The slow path
+// (via r1, u1, m1/A) arrives at 0.2 + 0.3 + 0.4 = 0.9 ns and
+// slacks 9.0 ns; the fast path (via r3, u2, m1/B) arrives at
+// 0.2 + 0.3 + 0.1 = 0.6 ns and slacks 9.3 ns.
+const char kVerilogTwoPath[] = R"V(module top (clk, d, d2, sel, q);
+  input clk, d, d2, sel;
+  output q;
+  wire n1, n2, n3, n4, n5;
+
+  DFF r1 (.D(d), .CK(clk), .Q(n1));
+  BUF u1 (.A(n1), .Y(n2));
+  DFF r3 (.D(d2), .CK(clk), .Q(n3));
+  BUF u2 (.A(n3), .Y(n4));
+  MUX m1 (.A(n2), .B(n4), .S(sel), .Y(n5));
+  DFF r2 (.D(n5), .CK(clk), .Q(q));
+endmodule
+)V";
+
 const char kSdc[] = "create_clock -name clk -period 10 [get_ports clk]\n";
 const char kSdcTight[] =
     "create_clock -name clk -period 0.5 [get_ports clk]\n";
+// The clock named differently from its port: "clk" resolves to
+// the top-level port pin first, so a from-clock test must use a
+// name no pin carries (see the facade tests).
+const char kSdcSys[] = "create_clock -name sys -period 10 [get_ports clk]\n";
 
 const char kLef[] = R"LEF(VERSION 5.8 ;
 BUSBITCHARS "[]" ;
@@ -820,6 +968,246 @@ TEST(TimingService, ReportPathsRespectsMaxPathsAndSlackFilter) {
       design, {EstimateScene(1, "func_tt", "tt", liberty)}, zero);
   ASSERT_FALSE(rejected.ok());
   EXPECT_EQ(rejected.status().code(), ErrorCode::kInvalidArgument);
+}
+
+// get_timing_paths (Immediate unit 12): nworst, -from,
+// -through, -group, -max_paths and -slack_less_than at the
+// service level. The two-path fixture gives two distinct paths
+// to one endpoint, so nworst and the filters discriminate.
+TEST(TimingService, ReportPathsNworstTwoReturnsBothPathsWorstFirst) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLibertyTwoPath);
+  const VerilogDesign design{dir.Write("top.v", kVerilogTwoPath), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  PathReportRequest request;
+  request.endpoint = "r2/D";
+  request.nworst = 2;
+  const auto reports = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, request);
+  ASSERT_TRUE(reports.ok()) << reports.status().message();
+  ASSERT_EQ(reports.value().size(), 1u);
+  ASSERT_EQ(reports.value()[0].paths.size(), 2u);
+  const PathReport& slow = reports.value()[0].paths[0];
+  EXPECT_EQ(slow.endpoint, "r2/D");
+  EXPECT_EQ(slow.startpoint, "r1/Q");
+  EXPECT_NEAR(slow.slack_ns, 9.0, 1e-6);
+  EXPECT_NEAR(slow.arrival_ns, 0.9, 1e-6);
+  EXPECT_EQ(slow.group, "clk");
+  const PathReport& fast = reports.value()[0].paths[1];
+  EXPECT_EQ(fast.endpoint, "r2/D");
+  EXPECT_EQ(fast.startpoint, "r3/Q");
+  EXPECT_NEAR(fast.slack_ns, 9.3, 1e-6);
+  EXPECT_NEAR(fast.arrival_ns, 0.6, 1e-6);
+  EXPECT_EQ(fast.group, "clk");
+  // The two paths have distinct point sequences.
+  std::vector<std::string> slow_pins;
+  for (const PathPoint& point : slow.points) {
+    slow_pins.push_back(point.pin);
+  }
+  std::vector<std::string> fast_pins;
+  for (const PathPoint& point : fast.points) {
+    fast_pins.push_back(point.pin);
+  }
+  EXPECT_NE(slow_pins, fast_pins);
+  // nworst = 1 returns the worst path only, equal to the
+  // existing single-path result.
+  PathReportRequest one;
+  one.endpoint = "r2/D";
+  one.nworst = 1;
+  const auto single = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, one);
+  ASSERT_TRUE(single.ok()) << single.status().message();
+  ASSERT_EQ(single.value()[0].paths.size(), 1u);
+  EXPECT_EQ(single.value()[0].paths[0].startpoint, "r1/Q");
+  EXPECT_NEAR(single.value()[0].paths[0].slack_ns, 9.0, 1e-6);
+}
+
+TEST(TimingService, ReportPathsFromFilterSelectsStartpoint) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLibertyTwoPath);
+  const VerilogDesign design{dir.Write("top.v", kVerilogTwoPath), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  PathReportRequest slow;
+  slow.from = {"r1/Q"};
+  const auto slow_paths = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, slow);
+  ASSERT_TRUE(slow_paths.ok()) << slow_paths.status().message();
+  ASSERT_EQ(slow_paths.value()[0].paths.size(), 1u);
+  EXPECT_EQ(slow_paths.value()[0].paths[0].startpoint, "r1/Q");
+  EXPECT_NEAR(slow_paths.value()[0].paths[0].slack_ns, 9.0, 1e-6);
+
+  PathReportRequest fast;
+  fast.from = {"r3/Q"};
+  const auto fast_paths = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, fast);
+  ASSERT_TRUE(fast_paths.ok()) << fast_paths.status().message();
+  ASSERT_EQ(fast_paths.value()[0].paths.size(), 1u);
+  EXPECT_EQ(fast_paths.value()[0].paths[0].startpoint, "r3/Q");
+
+  // A from-clock selects paths launched by that clock: both
+  // paths start at flops clocked by sys. The clock must be
+  // named differently from its port (see kSdcSys): "clk" would
+  // resolve to the top-level port pin first. nworst and
+  // max_paths both need raising here: without -to, -max_paths
+  // caps the total across endpoints, so the default 1 would
+  // keep only the worst path.
+  const VerilogDesign sys_design{
+      dir.Write("top_sys.v", kVerilogTwoPath), "top",
+      dir.Write("top_sys.sdc", kSdcSys)};
+  PathReportRequest clocked;
+  clocked.from = {"sys"};
+  clocked.nworst = 2;
+  clocked.max_paths = 2;
+  const auto clocked_paths = service.ReportPaths(
+      sys_design, {EstimateScene(1, "func_tt", "tt", liberty)}, clocked);
+  ASSERT_TRUE(clocked_paths.ok()) << clocked_paths.status().message();
+  ASSERT_EQ(clocked_paths.value()[0].paths.size(), 2u);
+
+  // A from name that matches no object fails fast.
+  PathReportRequest unknown;
+  unknown.from = {"nope"};
+  const auto failed = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, unknown);
+  EXPECT_FALSE(failed.ok());
+  EXPECT_EQ(failed.status().code(), ErrorCode::kInvalidArgument);
+
+  // A from name matching an object with no path to the
+  // endpoints yields an empty result, never an error: the
+  // primary input d launches no clocked path to r2/D.
+  PathReportRequest input;
+  input.from = {"d"};
+  const auto empty = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, input);
+  ASSERT_TRUE(empty.ok()) << empty.status().message();
+  EXPECT_TRUE(empty.value()[0].paths.empty());
+}
+
+TEST(TimingService, ReportPathsThroughFilterSelectsIntermediate) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLibertyTwoPath);
+  const VerilogDesign design{dir.Write("top.v", kVerilogTwoPath), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  PathReportRequest slow;
+  slow.through = {"u1"};
+  const auto slow_paths = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, slow);
+  ASSERT_TRUE(slow_paths.ok()) << slow_paths.status().message();
+  ASSERT_EQ(slow_paths.value()[0].paths.size(), 1u);
+  EXPECT_EQ(slow_paths.value()[0].paths[0].startpoint, "r1/Q");
+
+  PathReportRequest net;
+  net.through = {"n2"};
+  const auto net_paths = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, net);
+  ASSERT_TRUE(net_paths.ok()) << net_paths.status().message();
+  ASSERT_EQ(net_paths.value()[0].paths.size(), 1u);
+  EXPECT_EQ(net_paths.value()[0].paths[0].startpoint, "r1/Q");
+
+  PathReportRequest both;
+  both.through = {"m1/Y"};
+  both.nworst = 2;
+  both.max_paths = 2;
+  const auto both_paths = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, both);
+  ASSERT_TRUE(both_paths.ok()) << both_paths.status().message();
+  ASSERT_EQ(both_paths.value()[0].paths.size(), 2u);
+
+  PathReportRequest unknown;
+  unknown.through = {"nope"};
+  const auto failed = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, unknown);
+  EXPECT_FALSE(failed.ok());
+  EXPECT_EQ(failed.status().code(), ErrorCode::kInvalidArgument);
+}
+
+TEST(TimingService, ReportPathsGroupSelection) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  PathReportRequest grouped;
+  grouped.group = "clk";
+  const auto paths = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, grouped);
+  ASSERT_TRUE(paths.ok()) << paths.status().message();
+  ASSERT_EQ(paths.value()[0].paths.size(), 1u);
+  EXPECT_EQ(paths.value()[0].paths[0].endpoint, "r2/D");
+  EXPECT_EQ(paths.value()[0].paths[0].group, "clk");
+
+  PathReportRequest unknown;
+  unknown.group = "nope";
+  const auto failed = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, unknown);
+  EXPECT_FALSE(failed.ok());
+  EXPECT_EQ(failed.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_NE(failed.status().message().find("clk"), std::string::npos);
+}
+
+TEST(TimingService, ReportPathsUnconstrainedEndpointFails) {
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  const VerilogDesign design{dir.Write("top.v", kVerilog), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  PathReportRequest request;
+  request.endpoint = "q";
+  const auto failed = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, request);
+  EXPECT_FALSE(failed.ok());
+  EXPECT_EQ(failed.status().code(), ErrorCode::kInvalidArgument);
+}
+
+TEST(TimingService, ReportPathsMaxPathsTruncatesNworst) {
+  // Without -to, -max_paths caps the total across endpoints:
+  // nworst = 2 collects two paths from the fixture's one
+  // endpoint, then the cap keeps the worst only. (With -to the
+  // endpoint branch returns the nworst paths directly, so this
+  // test omits -to.)
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLibertyTwoPath);
+  const VerilogDesign design{dir.Write("top.v", kVerilogTwoPath), "top",
+                             dir.Write("top.sdc", kSdc)};
+  TimingService service;
+  PathReportRequest request;
+  request.nworst = 2;
+  request.max_paths = 1;
+  const auto reports = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, request);
+  ASSERT_TRUE(reports.ok()) << reports.status().message();
+  ASSERT_EQ(reports.value()[0].paths.size(), 1u);
+  EXPECT_EQ(reports.value()[0].paths[0].startpoint, "r1/Q");
+  EXPECT_NEAR(reports.value()[0].paths[0].slack_ns, 9.0, 1e-6);
+}
+
+TEST(TimingService, ReportPathsSlackCeilingOnTightClock) {
+  // On the 0.5 ns clock the slow path slacks -0.5 ns and the
+  // fast path 0.2 ns, so the ceiling discriminates between them.
+  TempDir dir;
+  const std::string liberty = dir.Write("cells.lib", kLibertyTwoPath);
+  const VerilogDesign design{dir.Write("top.v", kVerilogTwoPath), "top",
+                             dir.Write("top.sdc", kSdcTight)};
+  TimingService service;
+  PathReportRequest violating;
+  violating.nworst = 2;
+  violating.slack_lesser_than = 0.0;
+  const auto one = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, violating);
+  ASSERT_TRUE(one.ok()) << one.status().message();
+  ASSERT_EQ(one.value()[0].paths.size(), 1u);
+  EXPECT_NEAR(one.value()[0].paths[0].slack_ns, -0.5, 1e-6);
+
+  PathReportRequest both;
+  both.nworst = 2;
+  both.max_paths = 2;
+  both.slack_lesser_than = 0.25;
+  const auto two = service.ReportPaths(
+      design, {EstimateScene(1, "func_tt", "tt", liberty)}, both);
+  ASSERT_TRUE(two.ok()) << two.status().message();
+  ASSERT_EQ(two.value()[0].paths.size(), 2u);
 }
 
 // Check-specific report data (Immediate unit 10, review item

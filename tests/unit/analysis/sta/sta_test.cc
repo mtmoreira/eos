@@ -237,6 +237,11 @@ endmodule
 const char kSdc[] = "create_clock -name clk -period 10 [get_ports clk]\n";
 const char kSdcTight[] =
     "create_clock -name clk -period 0.5 [get_ports clk]\n";
+// The clock named differently from its port, so -from/-through
+// names resolve to the clock itself: "clk" names the top-level
+// port pin first (pin, net, instance, then clock), so a
+// from-clock test must use a name no pin carries.
+const char kSdcSys[] = "create_clock -name sys -period 10 [get_ports clk]\n";
 
 // Expected values, as reported by the pinned upstream executable
 // (see the provenance note at the top of this file).
@@ -272,11 +277,105 @@ class TempDir {
   std::filesystem::path path_;
 };
 
+// The two-path fixture library: a MUX cell in its own library,
+// loaded alongside the base fixture library. The A input is the
+// slow arc (0.4 ns) and the B input the fast one (0.1 ns), so the
+// two paths to one endpoint have distinct, computable slacks.
+const char kLibertyMux[] = R"LIB(library (eos_fixture_mux) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+
+  cell (MUX) {
+    area : 3.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (B) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (S) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "(A*S)+(B*!S)";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.4"); }
+        cell_fall (scalar) { values ("0.4"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.1"); }
+        cell_fall (scalar) { values ("0.1"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+// The two-path fixture netlist: two flops drive r2/D through a
+// mux, so two distinct paths reach one endpoint. The slow path
+// (via r1, u1, m1/A) arrives at 0.2 + 0.3 + 0.4 = 0.9 ns and
+// slacks 9.0 ns; the fast path (via r3, u2, m1/B) arrives at
+// 0.2 + 0.3 + 0.1 = 0.6 ns and slacks 9.3 ns.
+const char kVerilogTwoPath[] = R"V(module top (clk, d, d2, sel, q);
+  input clk, d, d2, sel;
+  output q;
+  wire n1, n2, n3, n4, n5;
+
+  DFF r1 (.D(d), .CK(clk), .Q(n1));
+  BUF u1 (.A(n1), .Y(n2));
+  DFF r3 (.D(d2), .CK(clk), .Q(n3));
+  BUF u2 (.A(n3), .Y(n4));
+  MUX m1 (.A(n2), .B(n4), .S(sel), .Y(n5));
+  DFF r2 (.D(n5), .CK(clk), .Q(q));
+endmodule
+)V";
+
 // Loads the fixture into engine with the given SDC text.
 void LoadFixture(StaEngine& engine, const TempDir& dir,
                  const std::string& sdc) {
   ASSERT_TRUE(engine.ReadLiberty(dir.Write("cells.lib", kLiberty)).ok());
   ASSERT_TRUE(engine.ReadVerilog(dir.Write("top.v", kVerilog)).ok());
+  ASSERT_TRUE(engine.LinkDesign("top").ok());
+  ASSERT_TRUE(engine.ReadSdc(dir.Write("top.sdc", sdc)).ok());
+}
+
+// Loads the two-path fixture: the base library plus the MUX
+// library, then the two-path netlist.
+void LoadTwoPathFixture(StaEngine& engine, const TempDir& dir,
+                        const std::string& sdc) {
+  ASSERT_TRUE(engine.ReadLiberty(dir.Write("cells.lib", kLiberty)).ok());
+  ASSERT_TRUE(engine.ReadLiberty(dir.Write("mux.lib", kLibertyMux)).ok());
+  ASSERT_TRUE(
+      engine.ReadVerilog(dir.Write("top.v", kVerilogTwoPath)).ok());
   ASSERT_TRUE(engine.LinkDesign("top").ok());
   ASSERT_TRUE(engine.ReadSdc(dir.Write("top.sdc", sdc)).ok());
 }
@@ -714,6 +813,201 @@ TEST(StaFacade, WorstPathReportHeaderOnTightClock) {
   EXPECT_NEAR(report.value().slack_ns, -0.1, 1e-6);
   EXPECT_NEAR(report.value().arrival_ns, 0.5, 1e-6);
   EXPECT_NEAR(report.value().required_ns, 0.4, 1e-6);
+}
+
+// WorstPaths (Immediate unit 12, review item I8): the
+// per-endpoint enumeration. nworst = 1 is exactly
+// WorstPathReport; nworst = 2 on the two-path fixture returns
+// the two distinct paths worst first; a larger nworst returns
+// what exists; an unknown endpoint fails with the existing
+// messages; two consecutive calls return independent data.
+TEST(StaFacade, WorstPathsNworstOneEqualsWorstPathReport) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto paths = engine.WorstPaths(CheckKind::kSetup, "r2/D", 1);
+  ASSERT_TRUE(paths.ok()) << paths.status().message();
+  ASSERT_EQ(paths.value().size(), 1u);
+  const auto report = engine.WorstPathReport(CheckKind::kSetup, "r2/D");
+  ASSERT_TRUE(report.ok()) << report.status().message();
+  const PathReport& one = paths.value()[0];
+  EXPECT_EQ(one.endpoint, report.value().endpoint);
+  EXPECT_EQ(one.startpoint, report.value().startpoint);
+  EXPECT_DOUBLE_EQ(one.slack_ns, report.value().slack_ns);
+  EXPECT_DOUBLE_EQ(one.arrival_ns, report.value().arrival_ns);
+  EXPECT_DOUBLE_EQ(one.required_ns, report.value().required_ns);
+  ASSERT_EQ(one.points.size(), report.value().points.size());
+  for (std::size_t i = 0; i < one.points.size(); ++i) {
+    EXPECT_EQ(one.points[i].pin, report.value().points[i].pin);
+  }
+  EXPECT_EQ(one.group, "clk");
+}
+
+TEST(StaFacade, WorstPathsTwoPathsWorstFirst) {
+  TempDir dir;
+  StaEngine engine;
+  LoadTwoPathFixture(engine, dir, kSdc);
+  const auto paths = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2);
+  ASSERT_TRUE(paths.ok()) << paths.status().message();
+  ASSERT_EQ(paths.value().size(), 2u);
+  EXPECT_EQ(paths.value()[0].endpoint, "r2/D");
+  EXPECT_EQ(paths.value()[0].startpoint, "r1/Q");
+  EXPECT_NEAR(paths.value()[0].slack_ns, 9.0, 1e-6);
+  EXPECT_NEAR(paths.value()[0].arrival_ns, 0.9, 1e-6);
+  EXPECT_EQ(paths.value()[0].group, "clk");
+  EXPECT_EQ(paths.value()[1].endpoint, "r2/D");
+  EXPECT_EQ(paths.value()[1].startpoint, "r3/Q");
+  EXPECT_NEAR(paths.value()[1].slack_ns, 9.3, 1e-6);
+  EXPECT_NEAR(paths.value()[1].arrival_ns, 0.6, 1e-6);
+  EXPECT_EQ(paths.value()[1].group, "clk");
+  // Distinct point sequences: the slow path runs through m1/A,
+  // the fast one through m1/B.
+  std::vector<std::string> slow;
+  for (const PathPoint& point : paths.value()[0].points) {
+    slow.push_back(point.pin);
+  }
+  std::vector<std::string> fast;
+  for (const PathPoint& point : paths.value()[1].points) {
+    fast.push_back(point.pin);
+  }
+  EXPECT_NE(slow, fast);
+  EXPECT_EQ(slow.back(), "r2/D");
+  EXPECT_EQ(fast.back(), "r2/D");
+  // A larger nworst returns what exists: no padding, no error.
+  const auto more = engine.WorstPaths(CheckKind::kSetup, "r2/D", 5);
+  ASSERT_TRUE(more.ok()) << more.status().message();
+  EXPECT_EQ(more.value().size(), 2u);
+}
+
+TEST(StaFacade, WorstPathsUnknownEndpointFails) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdc);
+  const auto paths = engine.WorstPaths(CheckKind::kSetup, "r9/D", 2);
+  EXPECT_FALSE(paths.ok());
+  EXPECT_EQ(paths.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_NE(paths.status().message().find("no endpoint pin named r9/D"),
+            std::string::npos);
+}
+
+TEST(StaFacade, WorstPathsUnconstrainedEndpointFails) {
+  TempDir dir;
+  StaEngine engine;
+  LoadFixture(engine, dir, kSdcTight);
+  const auto paths = engine.WorstPaths(CheckKind::kSetup, "q", 2);
+  EXPECT_FALSE(paths.ok());
+  EXPECT_EQ(paths.status().code(), ErrorCode::kInvalidArgument);
+}
+
+TEST(StaFacade, WorstPathsConsecutiveCallsAreIndependent) {
+  TempDir dir;
+  StaEngine engine;
+  LoadTwoPathFixture(engine, dir, kSdc);
+  const auto first = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2);
+  ASSERT_TRUE(first.ok()) << first.status().message();
+  ASSERT_EQ(first.value().size(), 2u);
+  const double first_slack = first.value()[0].slack_ns;
+  const std::string first_start = first.value()[0].startpoint;
+  // A second enumeration (which frees the first call's upstream
+  // ends) and an unrelated worst-path query in between must not
+  // disturb the copied-out data.
+  const auto second = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2);
+  ASSERT_TRUE(second.ok()) << second.status().message();
+  ASSERT_EQ(second.value().size(), 2u);
+  const auto report = engine.WorstPathReport(CheckKind::kSetup, "r2/D");
+  ASSERT_TRUE(report.ok()) << report.status().message();
+  EXPECT_DOUBLE_EQ(first.value()[0].slack_ns, first_slack);
+  EXPECT_EQ(first.value()[0].startpoint, first_start);
+  EXPECT_DOUBLE_EQ(second.value()[0].slack_ns, first_slack);
+  EXPECT_EQ(second.value()[0].startpoint, first_start);
+}
+
+TEST(StaFacade, WorstPathsFromFilterSelectsStartpoint) {
+  TempDir dir;
+  StaEngine engine;
+  LoadTwoPathFixture(engine, dir, kSdc);
+  const auto slow = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
+                                      PathFilter{{"r1/Q"}, {}});
+  ASSERT_TRUE(slow.ok()) << slow.status().message();
+  ASSERT_EQ(slow.value().size(), 1u);
+  EXPECT_EQ(slow.value()[0].startpoint, "r1/Q");
+  EXPECT_NEAR(slow.value()[0].slack_ns, 9.0, 1e-6);
+  const auto fast = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
+                                      PathFilter{{"r3/Q"}, {}});
+  ASSERT_TRUE(fast.ok()) << fast.status().message();
+  ASSERT_EQ(fast.value().size(), 1u);
+  EXPECT_EQ(fast.value()[0].startpoint, "r3/Q");
+  EXPECT_NEAR(fast.value()[0].slack_ns, 9.3, 1e-6);
+  // An unknown from name fails fast naming it.
+  const auto unknown = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
+                                         PathFilter{{"nope"}, {}});
+  EXPECT_FALSE(unknown.ok());
+  EXPECT_EQ(unknown.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_NE(unknown.status().message().find("no such object: nope"),
+            std::string::npos);
+}
+
+TEST(StaFacade, WorstPathsFromClockSelectsLaunchedPaths) {
+  // A from-clock selects paths launched by that clock: both
+  // paths start at flops clocked by sys. The clock must be
+  // named differently from its port: "clk" resolves to the
+  // top-level port pin first (pin, net, instance, then clock),
+  // so from={"clk"} is the port pin, which launches no path to
+  // r2/D, and only the distinctly named clock reaches the
+  // from-clock path.
+  TempDir dir;
+  StaEngine engine;
+  LoadTwoPathFixture(engine, dir, kSdcSys);
+  const auto clocked = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
+                                         PathFilter{{"sys"}, {}});
+  ASSERT_TRUE(clocked.ok()) << clocked.status().message();
+  ASSERT_EQ(clocked.value().size(), 2u);
+  EXPECT_EQ(clocked.value()[0].group, "sys");
+  const auto port_pin = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
+                                          PathFilter{{"clk"}, {}});
+  ASSERT_TRUE(port_pin.ok()) << port_pin.status().message();
+  EXPECT_TRUE(port_pin.value().empty());
+}
+
+TEST(StaFacade, WorstPathsThroughClockFails) {
+  TempDir dir;
+  StaEngine engine;
+  LoadTwoPathFixture(engine, dir, kSdcSys);
+  const auto failed = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
+                                        PathFilter{{}, {"sys"}});
+  EXPECT_FALSE(failed.ok());
+  EXPECT_EQ(failed.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_NE(failed.status().message().find("cannot be a -through object"),
+            std::string::npos);
+}
+
+TEST(StaFacade, WorstPathsThroughFilterSelectsIntermediate) {
+  TempDir dir;
+  StaEngine engine;
+  LoadTwoPathFixture(engine, dir, kSdc);
+  // Through the slow buffer's output net: only the slow path.
+  const auto slow = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
+                                      PathFilter{{}, {"n2"}});
+  ASSERT_TRUE(slow.ok()) << slow.status().message();
+  ASSERT_EQ(slow.value().size(), 1u);
+  EXPECT_EQ(slow.value()[0].startpoint, "r1/Q");
+  // Through the slow instance: only the slow path.
+  const auto inst = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
+                                      PathFilter{{}, {"u1"}});
+  ASSERT_TRUE(inst.ok()) << inst.status().message();
+  ASSERT_EQ(inst.value().size(), 1u);
+  EXPECT_EQ(inst.value()[0].startpoint, "r1/Q");
+  // Through the mux output: both paths.
+  const auto both = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
+                                      PathFilter{{}, {"m1/Y"}});
+  ASSERT_TRUE(both.ok()) << both.status().message();
+  EXPECT_EQ(both.value().size(), 2u);
+  // Through a pin on no path to this endpoint: empty, not an
+  // error.
+  const auto none = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
+                                      PathFilter{{}, {"r1/D"}});
+  ASSERT_TRUE(none.ok()) << none.status().message();
+  EXPECT_TRUE(none.value().empty());
 }
 
 TEST(StaFacade, EndpointsBySlackIncludesMetEndpoints) {

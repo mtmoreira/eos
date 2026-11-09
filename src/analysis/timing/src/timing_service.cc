@@ -214,31 +214,107 @@ Result<ScenePathReports> ReportScene(const VerilogDesign& design,
   if (!prepared.ok()) return prepared;
   ScenePathReports out;
   out.scenario = scene.scenario;
+  const PathFilter filter{request.from, request.through};
+  const auto passes_ceiling = [&request](double slack) {
+    return !request.slack_lesser_than.has_value() ||
+           slack < request.slack_lesser_than.value();
+  };
+  // A named group restricts the endpoints: resolve it against
+  // the scene's groups first, so an unknown group fails naming
+  // what exists, and a known group yields its endpoints worst
+  // first (the T8 pattern).
+  std::vector<EndpointSlack> group_endpoints;
+  if (!request.group.empty()) {
+    Result<std::vector<PathGroupSlack>> groups =
+        engine.PathGroupSlacks(request.kind);
+    if (!groups.ok()) return SceneError(scene, groups.status());
+    std::vector<PathGroupSlack> listed = std::move(groups).value();
+    std::string available;
+    bool found = false;
+    for (const PathGroupSlack& group : listed) {
+      if (!available.empty()) available += ", ";
+      available += group.name;
+      if (group.name == request.group) {
+        group_endpoints = group.endpoints;
+        found = true;
+      }
+    }
+    if (!found) {
+      return SceneError(
+          scene,
+          Invalid("unknown path group: " + request.group +
+                  " (available: " +
+                  (available.empty() ? std::string("(none)") : available) +
+                  ")"));
+    }
+  }
   if (!request.endpoint.empty()) {
-    Result<PathReport> report =
-        engine.WorstPathReport(request.kind, request.endpoint);
-    if (!report.ok()) return SceneError(scene, report.status());
-    if (!request.slack_lesser_than.has_value() ||
-        report.value().slack_ns < request.slack_lesser_than.value()) {
-      out.paths.push_back(std::move(report).value());
+    if (!request.group.empty()) {
+      // -to and -group combine as AND: an endpoint outside the
+      // group yields no paths, not an error.
+      const bool in_group =
+          std::any_of(group_endpoints.begin(), group_endpoints.end(),
+                      [&request](const EndpointSlack& endpoint) {
+                        return endpoint.pin == request.endpoint;
+                      });
+      if (!in_group) return out;
+    }
+    Result<std::vector<PathReport>> reports = engine.WorstPaths(
+        request.kind, request.endpoint, request.nworst, filter);
+    if (!reports.ok()) return SceneError(scene, reports.status());
+    for (PathReport& report : reports.value()) {
+      // The stored group is the group the path was selected
+      // through; the facade fills it from the end's group
+      // otherwise.
+      if (!request.group.empty()) report.group = request.group;
+      if (passes_ceiling(report.slack_ns)) {
+        out.paths.push_back(std::move(report));
+      }
     }
     return out;
   }
-  Result<std::vector<EndpointSlack>> endpoints =
-      engine.EndpointsBySlack(request.kind);
-  if (!endpoints.ok()) return SceneError(scene, endpoints.status());
-  for (const EndpointSlack& endpoint : endpoints.value()) {
-    if (out.paths.size() >= request.max_paths) break;
+  std::vector<EndpointSlack> endpoints;
+  if (!request.group.empty()) {
+    endpoints = group_endpoints;
+  } else {
+    Result<std::vector<EndpointSlack>> all =
+        engine.EndpointsBySlack(request.kind);
+    if (!all.ok()) return SceneError(scene, all.status());
+    endpoints = std::move(all).value();
+  }
+  for (const EndpointSlack& endpoint : endpoints) {
+    if (request.nworst == 1 &&
+        out.paths.size() >= request.max_paths) {
+      break;
+    }
     // Endpoints arrive worst first, so once one meets the ceiling
-    // every later one does too.
+    // every later one does too: a filtered path's slack is never
+    // better than its endpoint's unfiltered worst.
     if (request.slack_lesser_than.has_value() &&
         endpoint.slack_ns >= request.slack_lesser_than.value()) {
       break;
     }
-    Result<PathReport> report =
-        engine.WorstPathReport(request.kind, endpoint.pin);
-    if (!report.ok()) return SceneError(scene, report.status());
-    out.paths.push_back(std::move(report).value());
+    Result<std::vector<PathReport>> reports = engine.WorstPaths(
+        request.kind, endpoint.pin, request.nworst, filter);
+    if (!reports.ok()) return SceneError(scene, reports.status());
+    for (PathReport& report : reports.value()) {
+      if (!request.group.empty()) report.group = request.group;
+      if (passes_ceiling(report.slack_ns)) {
+        out.paths.push_back(std::move(report));
+      }
+    }
+  }
+  if (request.nworst > 1) {
+    // Several paths per endpoint break the endpoint order: the
+    // collected set is re-sorted worst first and capped, so
+    // -max_paths still takes the worst paths overall.
+    std::stable_sort(out.paths.begin(), out.paths.end(),
+                     [](const PathReport& a, const PathReport& b) {
+                       return a.slack_ns < b.slack_ns;
+                     });
+    if (out.paths.size() > request.max_paths) {
+      out.paths.resize(request.max_paths);
+    }
   }
   return out;
 }
@@ -502,6 +578,9 @@ Result<std::vector<ScenePathReports>> TimingService::ReportPaths(
   }
   if (request.max_paths == 0) {
     return Invalid("path report needs max_paths of at least 1");
+  }
+  if (request.nworst == 0) {
+    return Invalid("path report needs nworst of at least 1");
   }
   const Status valid = Validate(design.sdc_path, scenes);
   if (!valid.ok()) return valid;

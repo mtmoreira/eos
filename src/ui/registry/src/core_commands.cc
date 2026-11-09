@@ -3908,9 +3908,12 @@ bool CollectionClockExists(const CommandContext& ctx,
 }
 
 // The display name of a collection member: the design name, or the
-// clock name. "<deleted>" when the member no longer resolves.
+// clock name, or the path's scene:endpoint#rank. "<deleted>" when
+// the member no longer resolves. A path member owns its data, so
+// it always resolves.
 std::string CollectionDisplayName(const CommandContext& ctx,
                                   const CollectionMember& member) {
+  if (member.IsPath()) return member.path->DisplayName();
   if (member.IsClock()) {
     return CollectionClockExists(ctx, member.clock)
                ? member.clock
@@ -3922,14 +3925,18 @@ std::string CollectionDisplayName(const CommandContext& ctx,
 }
 
 std::string CollectionMemberKey(const CollectionMember& member) {
+  if (member.IsPath()) return member.path->Key();
   if (member.IsClock()) return "clock:" + member.clock;
   return "obj:" + std::to_string(member.object.raw());
 }
 
 // Deterministic order: display name, clocks after design objects
-// on a name tie, then raw id. Every collection is stored in this
-// order, so index, compare, and iteration mean the same thing
-// every run. Duplicates are removed.
+// on a name tie, then raw id. Path members with the same display
+// name (a setup and a hold path over one endpoint, merged by
+// algebra) order by their member key, so the key's kind keeps
+// them distinct instead of collapsing to one. Every collection is
+// stored in this order, so index, compare, and iteration mean the
+// same thing every run. Duplicates are removed.
 void SortCollectionMembers(const CommandContext& ctx,
                            std::vector<CollectionMember>& members) {
   std::sort(members.begin(), members.end(),
@@ -3938,6 +3945,10 @@ void SortCollectionMembers(const CommandContext& ctx,
               const std::string bn = CollectionDisplayName(ctx, b);
               if (an != bn) return an < bn;
               if (a.IsClock() != b.IsClock()) return !a.IsClock();
+              if (a.IsPath() && b.IsPath()) {
+                return CollectionMemberKey(a) < CollectionMemberKey(b);
+              }
+              if (a.IsPath() != b.IsPath()) return !a.IsPath();
               return a.object.raw() < b.object.raw();
             });
   members.erase(std::unique(members.begin(), members.end()),
@@ -4004,6 +4015,7 @@ bool IsSequentialCellName(const std::string& name) {
 }
 
 const char* CollectionObjectClass(const CollectionMember& member) {
+  if (member.IsPath()) return "path";
   if (member.IsClock()) return "clock";
   switch (member.object.kind()) {
     case ObjectKind::kCell: return "cell";
@@ -4039,6 +4051,17 @@ std::vector<std::string> CollectionClassAttributes(const char* cls) {
     attrs.push_back("is_generated");
     attrs.push_back("source");
     attrs.push_back("master_clock");
+  } else if (kind == "path") {
+    attrs.push_back("endpoint");
+    attrs.push_back("startpoint");
+    attrs.push_back("slack");
+    attrs.push_back("arrival");
+    attrs.push_back("required");
+    attrs.push_back("delay_type");
+    attrs.push_back("scene");
+    attrs.push_back("group");
+    attrs.push_back("points");
+    attrs.push_back("rank");
   }
   return attrs;
 }
@@ -4067,6 +4090,28 @@ std::optional<std::string> CollectionIntrinsicAttribute(
     return CollectionDisplayName(ctx, member);
   }
   if (attribute == "object_class") return std::string(cls);
+  if (member.IsPath()) {
+    // Intrinsic path attributes read the stored report and
+    // selection record: no design or constraint lookup. The
+    // numbers format like every other numeric attribute, so the
+    // filter grammar's numeric compare applies.
+    const PathMember& path = *member.path;
+    if (attribute == "endpoint") return path.report.endpoint;
+    if (attribute == "startpoint") return path.report.startpoint;
+    if (attribute == "slack") return FormatNum(path.report.slack_ns);
+    if (attribute == "arrival") return FormatNum(path.report.arrival_ns);
+    if (attribute == "required") {
+      return FormatNum(path.report.required_ns);
+    }
+    if (attribute == "delay_type") return path.kind;
+    if (attribute == "scene") return path.scene;
+    if (attribute == "group") return path.group;
+    if (attribute == "points") {
+      return std::to_string(path.report.points.size());
+    }
+    if (attribute == "rank") return std::to_string(path.rank);
+    return std::nullopt;
+  }
   if (member.IsClock()) {
     if (kind != "clock") return std::nullopt;
     if (attribute == "period" || attribute == "waveform") {
@@ -4189,7 +4234,7 @@ std::string CollectionFilterValue(const CommandContext& ctx,
 bool CollectionKnownAttribute(const CommandContext& ctx,
                               const std::string& attribute) {
   static const char* kClasses[] = {"cell", "instance", "net",
-                                   "port", "pin",  "clock"};
+                                   "port", "pin",  "clock", "path"};
   for (const char* cls : kClasses) {
     for (const std::string& known : CollectionClassAttributes(cls)) {
       if (known == attribute) return true;
@@ -4515,6 +4560,75 @@ bool TraverseOne(const CommandContext& ctx, const CollectionMember& source,
   }
   const db::Design& design = *ctx.project.design;
   const char* source_class = CollectionObjectClass(source);
+  if (source.IsPath()) {
+    // Paths are valid sources: the traversal reads the stored
+    // report's point pins against the design. A point pin the
+    // design does not hold fails naming the path and the pin,
+    // rather than silently dropping a point.
+    const PathMember& path = *source.path;
+    const auto point_pin = [&design, &path](
+                               const analysis::PathPoint& point,
+                               ObjectId& pin, std::string& error) {
+      pin = design.Find(ObjectKind::kPin, point.pin);
+      if (pin.is_null()) {
+        error = "path " + path.DisplayName() + " has point pin " +
+                point.pin + " not present in the design";
+        return false;
+      }
+      return true;
+    };
+    if (target == "pin") {
+      for (const analysis::PathPoint& point : path.report.points) {
+        ObjectId pin;
+        if (!point_pin(point, pin, error)) return false;
+        out.push_back(CollectionMember::Design(pin));
+      }
+      return true;
+    }
+    if (target == "net") {
+      for (const analysis::PathPoint& point : path.report.points) {
+        ObjectId pin;
+        if (!point_pin(point, pin, error)) return false;
+        const db::PinRecord* record = design.FindPin(pin);
+        if (record != nullptr && !record->net.is_null()) {
+          out.push_back(CollectionMember::Design(record->net));
+        }
+      }
+      return true;
+    }
+    if (target == "instance") {
+      for (const analysis::PathPoint& point : path.report.points) {
+        ObjectId pin;
+        if (!point_pin(point, pin, error)) return false;
+        const db::PinRecord* record = design.FindPin(pin);
+        if (record != nullptr) {
+          out.push_back(CollectionMember::Design(record->instance));
+        }
+      }
+      return true;
+    }
+    if (target == "clock") {
+      // The clock named by the path's group, when the group name
+      // is a clock; a group_path name or an empty group
+      // contributes nothing.
+      if (!path.group.empty()) {
+        for (const std::string& name : CollectionClockNames(ctx)) {
+          if (name == path.group) {
+            out.push_back(CollectionMember::Clock(name));
+            break;
+          }
+        }
+      }
+      return true;
+    }
+    if (target == "port") {
+      error = "cannot traverse from a path to ports: ports have no "
+              "fanin or fanout in the flat model";
+      return false;
+    }
+    error = "unknown traversal target: " + target;
+    return false;
+  }
   if (target == "clock") {
     if (source.IsClock() || std::string(source_class) == "instance" ||
         std::string(source_class) == "cell") {
@@ -4696,6 +4810,23 @@ std::optional<CollectionMember> ResolveAttributeTarget(
     }
     return hit->second.front();
   }
+  // A path display name (scene:endpoint#rank) resolves by
+  // scanning the session's collections for a member with that
+  // name. The '#' after a scene prefix is what marks it as a
+  // path, so a design object can never be shadowed by one.
+  const std::size_t hash = token.find('#');
+  const std::size_t colon = token.find(':');
+  if (hash != std::string::npos && colon != std::string::npos &&
+      colon < hash) {
+    for (const auto& pair : ctx.collections) {
+      for (const CollectionMember& member : pair.second) {
+        if (member.IsPath() &&
+            CollectionDisplayName(ctx, member) == token) {
+          return member;
+        }
+      }
+    }
+  }
   if (ctx.HasDesign()) {
     const db::Design& design = *ctx.project.design;
     ObjectId id = design.Find(ObjectKind::kPort, token);
@@ -4723,6 +4854,17 @@ std::optional<CollectionMember> ResolveAttributeTarget(
 bool MemberTargetNames(const CommandContext& ctx,
                        const CollectionMember& member,
                        std::vector<std::string>& out, std::string& error) {
+  if (member.IsPath()) {
+    // Paths have no SDC target: a path handle passed where an
+    // SDC command takes targets must fail, not silently expand
+    // to endpoint names. This is the one place where a path
+    // member is deliberately not a first-class collection
+    // member.
+    error = "path " + member.path->DisplayName() +
+            " has no SDC target: a timing path is not a design "
+            "object or clock";
+    return false;
+  }
   if (member.IsClock()) {
     bool any = false;
     for (const db::Constraint& c : ctx.project.constraints.all()) {
@@ -10522,6 +10664,238 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(payload);
       });
 
+  // ---- get_timing_paths (Immediate unit 12, review item I8) --------
+  // The creation half of C4: returns a collection of timing paths
+  // (one member per path, owning its stored PathReport) instead
+  // of rendering text tables. The paths are scriptable objects:
+  // filter by slack, sort by arrival, traverse to pins, nets,
+  // and cells, intersect setup and hold collections. It runs the
+  // analysis itself per scene, exactly as report_timing does: it
+  // does not reuse ctx.timing.last_results and must not depend on
+  // set_bottleneck_capture. One full STA run per scene is the
+  // cost of the command; a script that calls it three times pays
+  // three analyses. -nworst is the paths per endpoint (the
+  // enumeration report_timing lacks, so -to with -max_paths
+  // above 1 is allowed here); -from and -through select by
+  // startpoint and intermediate object as an AND with -to,
+  // -group, and -slack_less_than. An empty result is an empty
+  // collection, never an error.
+  add("get_timing_paths",
+      "get_timing_paths [-delay_type max|min] [-max_paths N] "
+      "[-nworst N] [-from <object>] [-through <object>]... "
+      "[-to <pin>] [-slack_less_than X] [-group <name>] "
+      "[-scene <name>] [-filter <expr>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-delay_type", 1, false},
+                 {"-max_paths", 1, false},
+                 {"-nworst", 1, false},
+                 {"-from", 1, false},
+                 {"-through", 1, true},
+                 {"-to", 1, false},
+                 {"-slack_less_than", 1, false},
+                 {"-group", 1, false},
+                 {"-scene", 1, false},
+                 {"-filter", 1, false},
+                 {"-of_objects", 1, false}},
+                "get_timing_paths", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "get_timing_paths: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        if (opts.Seen("-of_objects")) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "get_timing_paths: -of_objects is not supported; "
+              "select paths through objects with -through instead");
+        }
+        analysis::PathReportRequest request;
+        if (opts.Seen("-delay_type")) {
+          const std::string delay_type = *opts.Value("-delay_type");
+          if (delay_type == "max") {
+            request.kind = analysis::CheckKind::kSetup;
+          } else if (delay_type == "min") {
+            request.kind = analysis::CheckKind::kHold;
+          } else {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "get_timing_paths: -delay_type must be max or min, "
+                "got: " + delay_type);
+          }
+        }
+        if (opts.Seen("-max_paths")) {
+          std::uint64_t parsed = 0;
+          if (!ParseU64(*opts.Value("-max_paths"), parsed) ||
+              parsed == 0) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "get_timing_paths: -max_paths must be a positive "
+                "integer, got: " + *opts.Value("-max_paths"));
+          }
+          request.max_paths = static_cast<std::size_t>(parsed);
+        }
+        if (opts.Seen("-nworst")) {
+          std::uint64_t parsed = 0;
+          if (!ParseU64(*opts.Value("-nworst"), parsed) ||
+              parsed == 0) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "get_timing_paths: -nworst must be a positive "
+                "integer, got: " + *opts.Value("-nworst"));
+          }
+          request.nworst = static_cast<std::size_t>(parsed);
+        }
+        double ceiling = 0.0;
+        if (auto bad = ParseOptDouble(opts, "-slack_less_than",
+                                      "get_timing_paths", ceiling)) {
+          return *bad;
+        }
+        if (opts.Seen("-slack_less_than")) {
+          request.slack_lesser_than = ceiling;
+        }
+        if (opts.Seen("-to")) request.endpoint = *opts.Value("-to");
+        if (opts.Seen("-group")) request.group = *opts.Value("-group");
+        // Expands one -from/-through value to the names the
+        // service resolves: a collection handle expands to its
+        // members' display names (pins, nets, instances, and,
+        // for -from, clocks); any other value passes through
+        // for the facade to resolve against the loaded network.
+        // A path member cannot select -from/-through objects,
+        // and a clock cannot be a -through object.
+        const auto expand = [&ctx](
+                                const std::string& value, bool from_side,
+                                std::vector<std::string>& out,
+                                std::string& error) {
+          const auto hit = ctx.collections.find(value);
+          if (hit == ctx.collections.end()) {
+            if (!from_side && CollectionClockExists(ctx, value)) {
+              error = "clock " + value +
+                      " cannot be a -through object: -through "
+                      "takes pins, nets, and instances";
+              return false;
+            }
+            out.push_back(value);
+            return true;
+          }
+          for (const CollectionMember& member : hit->second) {
+            if (member.IsPath()) {
+              error = "a path collection cannot select " +
+                      std::string(from_side ? "-from" : "-through") +
+                      " objects: paths are results, not selectors";
+              return false;
+            }
+            if (member.IsClock() && !from_side) {
+              error = "clock " + member.clock +
+                      " cannot be a -through object: -through "
+                      "takes pins, nets, and instances";
+              return false;
+            }
+            out.push_back(CollectionDisplayName(ctx, member));
+          }
+          return true;
+        };
+        if (opts.Seen("-from")) {
+          std::string error;
+          if (!expand(*opts.Value("-from"), true, request.from,
+                      error)) {
+            return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                       "get_timing_paths: " + error);
+          }
+        }
+        for (const std::string& value : opts.Values("-through")) {
+          std::string error;
+          if (!expand(value, false, request.through, error)) {
+            return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                       "get_timing_paths: " + error);
+          }
+        }
+        bool from_odb = false;
+        std::vector<analysis::SceneAnalysis> scenes;
+        if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          return *bad;
+        }
+        if (opts.Seen("-scene")) {
+          const std::string wanted = *opts.Value("-scene");
+          std::vector<analysis::SceneAnalysis> selected;
+          for (const analysis::SceneAnalysis& scene : scenes) {
+            if (scene.scenario.name == wanted) {
+              selected.push_back(scene);
+            }
+          }
+          if (selected.empty()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "get_timing_paths: unknown scenario: " + wanted);
+          }
+          scenes = std::move(selected);
+        }
+        // A -from or -through that expanded to no names selects
+        // nothing: an empty collection, never an error, and no
+        // analysis to run.
+        if ((opts.Seen("-from") && request.from.empty()) ||
+            (opts.Seen("-through") && request.through.empty())) {
+          return CommandResult::Ok(CollectionPayload(
+              ctx, MintCollection(ctx, {})));
+        }
+        analysis::TimingService service;
+        const Result<std::vector<analysis::ScenePathReports>> reported =
+            from_odb
+                ? service.ReportPaths(*ctx.timing.odb, ctx.timing.sdc_path,
+                                      scenes, request)
+                : service.ReportPaths(
+                      analysis::VerilogDesign{ctx.timing.verilog_path,
+                                              ctx.timing.top_cell,
+                                              ctx.timing.sdc_path},
+                      scenes, request);
+        if (!reported.ok()) return FromStatus(reported.status());
+        std::vector<CollectionMember> members;
+        const std::string delay_type =
+            request.kind == analysis::CheckKind::kHold ? "min" : "max";
+        for (const analysis::ScenePathReports& scene :
+             reported.value()) {
+          // Rank is 1-based within the endpoint for this scene
+          // and kind, 1 the worst; the service returns paths
+          // worst first per endpoint.
+          std::map<std::string, std::size_t> per_endpoint;
+          for (const analysis::PathReport& path : scene.paths) {
+            PathMember member;
+            member.scene = scene.scenario.name;
+            member.kind = delay_type;
+            member.endpoint = path.endpoint;
+            member.rank = ++per_endpoint[path.endpoint];
+            member.group = path.group;
+            member.report = path;
+            members.push_back(CollectionMember::Path(std::move(member)));
+          }
+        }
+        if (opts.Seen("-filter")) {
+          GetQueryOptions query;
+          query.filter = opts.Value("-filter");
+          if (auto bad = ApplyPatternAndFilter(ctx, query, members)) {
+            return *bad;
+          }
+        }
+        const std::string handle =
+            MintCollection(ctx, std::move(members));
+        std::string payload = CollectionPayload(ctx, handle);
+        std::map<std::string, std::size_t> per_scene;
+        for (const CollectionMember& member : ctx.collections[handle]) {
+          per_scene[member.path->scene]++;
+        }
+        for (const auto& [scene, count] : per_scene) {
+          payload += "\nscene=" + scene +
+                     " paths=" + std::to_string(count);
+        }
+        return CommandResult::Ok(payload);
+      });
+
   // ---- report_constraint (Immediate unit 6, review item I3) ---------
   // The verdict-shaped constraint report, worst-violator tier
   // (Timing Constraints U-2022.12 ch. 2, PrimeTime report_constraint
@@ -11510,7 +11884,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
   // captured paths of every scene.
   add("report_bottleneck",
       "report_bottleneck [-delay_type max|min] [-max_cells <n>] "
-      "[-scene <name>] [-file <path>]",
+      "[-scene <name>] [-file <path>] [-paths <collection>]",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
         SdcOptions opts;
@@ -11519,7 +11893,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                 {{"-delay_type", 1, false},
                  {"-max_cells", 1, false},
                  {"-scene", 1, false},
-                 {"-file", 1, false}},
+                 {"-file", 1, false},
+                 {"-paths", 1, false}},
                 "report_bottleneck", opts)) {
           return *bad;
         }
@@ -11555,31 +11930,80 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           max_cells = static_cast<std::size_t>(parsed);
         }
-        if (ctx.timing.last_results.empty()) {
+        if (ctx.timing.last_results.empty() && !opts.Seen("-paths")) {
           return CommandResult::Fail(
               Diag::kInvalidConfiguration,
               "no timing results: run eos::run_timing first");
         }
-        if (!ctx.timing.last_capture_enabled) {
+        if (!ctx.timing.last_capture_enabled && !opts.Seen("-paths")) {
           return CommandResult::Fail(
               Diag::kInvalidConfiguration,
               "bottleneck capture was off at the last timing update: "
               "run eos::set_bottleneck_capture on, then eos::run_timing "
               "again");
         }
+        // -paths reads a path collection instead of the capture:
+        // without it, the capture precondition above stands
+        // unchanged. The ranking below reads `stored` either way.
+        // A collection may mix kinds; only the requested kind's
+        // paths rank, so a scene with no paths of that kind ranks
+        // empty, exactly as a capture list with no paths does.
+        std::vector<analysis::ScenePathReports> paths_from_collection;
+        std::set<std::string> collection_scenes;
+        std::string paths_handle;
+        if (opts.Seen("-paths")) {
+          paths_handle = *opts.Value("-paths");
+          const auto hit = ctx.collections.find(paths_handle);
+          if (hit == ctx.collections.end()) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "report_bottleneck: unknown collection: " +
+                    paths_handle);
+          }
+          std::map<std::string, analysis::ScenePathReports> by_scene;
+          for (const CollectionMember& member : hit->second) {
+            if (!member.IsPath()) {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "report_bottleneck: -paths needs a path "
+                  "collection, but " +
+                      paths_handle + " holds " +
+                      CollectionDisplayName(ctx, member) + " (" +
+                      CollectionObjectClass(member) + ")");
+            }
+            collection_scenes.insert(member.path->scene);
+            if (member.path->kind !=
+                (kind == analysis::CheckKind::kHold ? "min" : "max")) {
+              continue;
+            }
+            analysis::ScenePathReports& scene_paths =
+                by_scene[member.path->scene];
+            scene_paths.scenario.name = member.path->scene;
+            scene_paths.paths.push_back(member.path->report);
+          }
+          for (auto& entry : by_scene) {
+            paths_from_collection.push_back(std::move(entry.second));
+          }
+        }
         // The scene is resolved against the last timing results:
         // a scene that ran with no violations has no stored entry,
-        // which ranks as empty, not as missing data.
+        // which ranks as empty, not as missing data. With -paths
+        // it resolves against the collection's scenes instead.
         std::string report_scene = "all";
         if (opts.Seen("-scene")) {
           const std::string name = *opts.Value("-scene");
-          const auto found = std::find_if(
-              ctx.timing.last_results.begin(),
-              ctx.timing.last_results.end(),
-              [&](const analysis::SceneResult& result) {
-                return result.scenario.name == name;
-              });
-          if (found == ctx.timing.last_results.end()) {
+          bool known = false;
+          if (opts.Seen("-paths")) {
+            known = collection_scenes.count(name) != 0;
+          } else {
+            known = std::any_of(
+                ctx.timing.last_results.begin(),
+                ctx.timing.last_results.end(),
+                [&](const analysis::SceneResult& result) {
+                  return result.scenario.name == name;
+                });
+          }
+          if (!known) {
             return CommandResult::Fail(
                 Diag::kInvalidConfiguration,
                 "report_bottleneck: unknown scene: " + name);
@@ -11587,9 +12011,11 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           report_scene = name;
         }
         const std::vector<analysis::ScenePathReports>& stored =
-            kind == analysis::CheckKind::kSetup
-                ? ctx.timing.last_bottleneck_setup_paths
-                : ctx.timing.last_bottleneck_hold_paths;
+            opts.Seen("-paths")
+                ? paths_from_collection
+                : (kind == analysis::CheckKind::kSetup
+                       ? ctx.timing.last_bottleneck_setup_paths
+                       : ctx.timing.last_bottleneck_hold_paths);
         struct RankedCell {
           std::string instance;
           std::string cell;
@@ -11649,8 +12075,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         text += kind == analysis::CheckKind::kSetup ? "setup" : "hold";
         text += ", " + std::to_string(path_count) +
                 " violating paths, scene " + report_scene + "):\n";
-        text += "Ranking from the paths saved by the last run_timing "
-                "with bottleneck capture on.\n";
+        if (opts.Seen("-paths")) {
+          text += "Ranking from the path collection " + paths_handle +
+                  ".\n";
+        } else {
+          text += "Ranking from the paths saved by the last run_timing "
+                  "with bottleneck capture on.\n";
+        }
         std::vector<std::vector<std::string>> table;
         table.push_back({"Rank", "Cell Instance", "Cell Type", "Paths",
                          "Worst Slack (ns)"});

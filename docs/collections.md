@@ -5,8 +5,10 @@ objects and clocks (review ruling O6): handles as arguments, a
 -filter language, algebra, lifetime and invalidation rules, and a
 documented per-class attribute set. The Synopsys model is adopted
 (PrimeTime-adjacent names and semantics) over the Cadence
-find-plus-handle model. C4, path collections as report inputs, is
-deliberately not built here: it waits on get_timing_paths (I8).
+find-plus-handle model. C4, path collections as report inputs,
+is built in Immediate unit 12 (`get_timing_paths`): creation
+from `get_timing_paths` and `report_bottleneck -paths` are in;
+`report_timing` over a path collection is the pending follow-up.
 
 ## Vocabulary (C1)
 
@@ -204,6 +206,7 @@ offered (the model is flat), and abbreviation stays out.
 
 ## Not in this unit
 
-C4, path collections as report inputs (`report_timing` over a
-path collection, creation from `get_timing_paths`), waits on
-`get_timing_paths` (I8) and is not built here.
+C4, path collections as report inputs: creation from
+`get_timing_paths` (Immediate unit 12) is built, and
+`report_bottleneck -paths` reads a path collection. `report_timing`
+over a path collection is still pending as the follow-up.
