@@ -69,9 +69,10 @@ jobs:
       - name: Build
         run: |
           set -o pipefail
-          # -j2, not -j$(nproc): the 6 GiB ci-eos VM OOM-killed the runner
-          # at -j4 on 2026-11-08 (5.5G peak, runner failed oom-kill).
-          cmake --build build -j2 2>&1 | tee build.log
+          # -j1: the 6 GiB ci-eos VM OOM-killed the runner at -j4
+          # (run 42438398258) and at -j2 (run 42537691208) on 2026-11-08.
+          # One job at a time keeps peak memory at a single link.
+          cmake --build build -j1 2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
           echo "build_exit=${rc}" | tee -a build.log
           exit $rc
