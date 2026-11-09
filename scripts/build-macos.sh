@@ -114,10 +114,6 @@ if [[ $COLOR -eq 1 ]]; then
   C_BOLD=$'\033[1m'
 fi
 
-# Braille spinner frames, one per array element so no multibyte
-# substring math is needed (macOS ships bash 3.2).
-SPINNER=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
-
 # --- helpers ---
 fmt_time() {
   local s="$1"
@@ -154,15 +150,21 @@ EOF
   printf '\n'
 }
 
-# run_stage <name> <description> <command...>: run one build stage with
-# a live spinner, a PASS/FAIL line with elapsed time, and a progress
-# bar. The command's output goes to the log file only. Returns the
-# command's exit code. In dry-run mode the command is replaced by a
-# short sleep so the whole display can be exercised anywhere.
+# run_stage <name> <command...>: run one build stage with a PASS/FAIL
+# line with elapsed time, and a progress bar. The command's output goes
+# to the log file only. Returns the command's exit code. In dry-run mode
+# the command is replaced by a short sleep so the whole display can be
+# exercised anywhere.
+#
+# NOTE: this display uses plain sequential lines only, never carriage
+# return redraws. An earlier version animated a spinner by rewriting
+# the same line with '\r\033[K'; when the terminal window was resized
+# during a run, the terminal reflowed the scrollback and the redrawn
+# lines scattered across the view. Do not reintroduce in-place redraws.
 run_stage() {
-  local name="$1" desc="$2"
-  shift 2
-  local start=$SECONDS rc=0 pid=0 i=0 elapsed=0
+  local name="$1"
+  shift 1
+  local start=$SECONDS rc=0 pid=0 elapsed=0
   STAGE_INDEX=$(( STAGE_INDEX + 1 ))
   printf '%s [%d/%d] %s\n' "▶" "$STAGE_INDEX" "$STAGE_TOTAL" "$name"
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -173,22 +175,15 @@ run_stage() {
     pid=$!
   fi
   trap 'kill "$pid" 2>/dev/null' INT TERM
-  while kill -0 "$pid" 2>/dev/null; do
-    if [[ $TTY -eq 1 ]]; then
-      printf '\r\033[K  %s %s' "${SPINNER[$i]}" "$desc"
-      i=$(( (i + 1) % 10 ))
-    fi
-    sleep 0.2
-  done
   wait "$pid"
   rc=$?
   trap - INT TERM
   elapsed=$(( SECONDS - start ))
   if [[ $rc -eq 0 ]]; then
-    printf '\r\033[K  %sPASS (%s)%s\n' "$C_GREEN" "$(fmt_time "$elapsed")" "$C_RESET"
+    printf '  %sPASS (%s)%s\n' "$C_GREEN" "$(fmt_time "$elapsed")" "$C_RESET"
     printf '[%s] STAGE PASS: %s (%ss)\n' "$(date '+%H:%M:%S')" "$name" "$elapsed" >>"$LOG_FILE"
   else
-    printf '\r\033[K  %sFAIL (%s)%s\n' "$C_RED" "$(fmt_time "$elapsed")" "$C_RESET"
+    printf '  %sFAIL (%s)%s\n' "$C_RED" "$(fmt_time "$elapsed")" "$C_RESET"
     printf '[%s] STAGE FAIL: %s (%ss) exit=%s\n' "$(date '+%H:%M:%S')" "$name" "$elapsed" "$rc" >>"$LOG_FILE"
   fi
   printf '%s\n' "$(bar "$STAGE_INDEX" "$STAGE_TOTAL")"
@@ -364,22 +359,22 @@ main() {
   printf 'Log: %s\n\n' "$LOG_FILE"
 
   local overall_start=$SECONDS rc=0
-  if ! run_stage "Prerequisites" "Checking Homebrew, CMake, Qt and the build tools..." do_prerequisites; then
+  if ! run_stage "Prerequisites" do_prerequisites; then
     fail_summary "Prerequisites"
     echo "exit=1" >>"$LOG_FILE"
     exit 1
   fi
-  if ! run_stage "Configure" "Configuring build-fresh with the Homebrew prefix..." do_configure; then
+  if ! run_stage "Configure" do_configure; then
     fail_summary "Configure"
     echo "exit=1" >>"$LOG_FILE"
     exit 1
   fi
-  if ! run_stage "Build eos-gui" "Compiling the EOS GUI application..." do_build_gui; then
+  if ! run_stage "Build eos-gui" do_build_gui; then
     fail_summary "Build eos-gui"
     echo "exit=1" >>"$LOG_FILE"
     exit 1
   fi
-  if ! run_stage "Build eos-gui-bundle" "Assembling eos-gui.app with the Dock icon..." do_build_bundle; then
+  if ! run_stage "Build eos-gui-bundle" do_build_bundle; then
     fail_summary "Build eos-gui-bundle"
     echo "exit=1" >>"$LOG_FILE"
     exit 1
