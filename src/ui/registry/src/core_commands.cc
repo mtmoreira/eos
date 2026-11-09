@@ -13,6 +13,8 @@
 #include "eos/pd/place.h"
 #include "eos/pd/route.h"
 #include "eos/pv/extract.h"
+#include "eos/pv/signoff.h"
+#include "eos/db/odb.h"
 #include "odb/db.h"
 #include "eos/session/flow.h"
 #include "eos/synth/abc.h"
@@ -301,6 +303,7 @@ void ResetProject(CommandContext& ctx) {
   ctx.timing = CommandContext::TimingSession();
   ctx.synth = CommandContext::SynthSession();
   ctx.place = CommandContext::PlaceSession();
+  ctx.signoff = CommandContext::SignoffSession();
   ctx.wire_rc_overrides.clear();
   ctx.engine_log_lines.clear();
 }
@@ -7480,6 +7483,208 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           payload += "\npin name=" + pin.name + " dir=" + pin.direction +
                      " placed=" + (pin.placed ? "1" : "0") +
                      " rect=" + area_text(pin.rect);
+        }
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- signoff_summary (full-flow GUI unit F13) --------------------
+  // The structured signoff query the GUI Signoff panel reads:
+  // the DRC, LVS, and antenna verdicts parsed from the external
+  // PV evidence reports (docs/gcd-pv-results.md and
+  // docs/gcd-lvs-magic.md by default), one DRC row per rule
+  // family, one LVS row per comparison path, one row per named
+  // discrepancy, and the successor residual, plus the design
+  // fingerprint and the stale flag. It is a query, not a report:
+  // it writes no file, runs no engine, and needs no design in
+  // the session: the panel renders the recorded gcd verdicts
+  // until a design is loaded. It fails fast with the path named
+  // when a report cannot be read or does not parse, never with
+  // a silent empty panel.
+  add("signoff_summary",
+      "signoff_summary [-pv <path>] [-lvs <path>]",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions options;
+        if (auto bad = SdcOptions::Parse(
+                args, {{"-pv", 1, false}, {"-lvs", 1, false}},
+                "signoff_summary", options)) {
+          return *bad;
+        }
+        if (!options.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "signoff_summary: unexpected positional argument: " +
+                  options.Positionals().front());
+        }
+        const std::string pv_path =
+            options.Value("-pv").value_or("docs/gcd-pv-results.md");
+        const std::string lvs_path =
+            options.Value("-lvs").value_or("docs/gcd-lvs-magic.md");
+        for (const std::string& report_path : {pv_path, lvs_path}) {
+          if (report_path.find(' ') != std::string::npos) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "signoff_summary: report path contains a space: " +
+                    report_path);
+          }
+        }
+        const auto read_report = [](const std::string& path,
+                                    std::string* text)
+            -> std::optional<CommandResult> {
+          if (auto bad = CheckReadable(path)) return bad;
+          std::ifstream in(path);
+          std::stringstream buffer;
+          buffer << in.rdbuf();
+          *text = buffer.str();
+          return std::nullopt;
+        };
+        std::string pv_text;
+        std::string lvs_text;
+        if (auto bad = read_report(pv_path, &pv_text)) return *bad;
+        if (auto bad = read_report(lvs_path, &lvs_text)) return *bad;
+        pv::SignoffRecord record;
+        record.pv_report = pv_path;
+        record.lvs_report = lvs_path;
+        std::string error;
+        if (!pv::ParsePvText(pv_text, pv_path, &record, &error)) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     error);
+        }
+        if (!pv::ParseLvsText(lvs_text, lvs_path, &record, &error)) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     error);
+        }
+        // The design fingerprint input: the synth record, the
+        // timing record, and the live database identity (top
+        // block, counts, and the placement hash over instance
+        // name, master, and coordinates, name-sorted). Empty
+        // when the session holds no design at all. A
+        // floorplan-only or routing-only change moves no
+        // instance, so it does not flip the fingerprint in v1;
+        // a place or a new mapping does.
+        std::string input;
+        const auto add_part = [&input](const std::string& part) {
+          if (part.empty()) return;
+          if (!input.empty()) input += '|';
+          input += part;
+        };
+        add_part(ctx.synth.verilog_path);
+        add_part(ctx.synth.top_cell);
+        add_part(ctx.synth.mapped_liberty);
+        add_part(ctx.synth.mapped_verilog);
+        add_part(ctx.synth.opt_verilog);
+        add_part(ctx.synth.equiv_verdict);
+        add_part(ctx.timing.verilog_path);
+        add_part(ctx.timing.top_cell);
+        add_part(ctx.timing.sdc_path);
+        add_part(ctx.timing.spef_path);
+        for (const auto& entry : ctx.timing.liberty_by_corner) {
+          add_part(entry.first + "=" + entry.second);
+        }
+        if (ctx.timing.odb.has_value()) {
+          const db::OdbDatabase& odb = *ctx.timing.odb;
+          add_part("odb:" + odb.TopBlockName());
+          add_part("instances:" +
+                   std::to_string(odb.InstanceCount()));
+          add_part("nets:" + std::to_string(odb.NetCount()));
+          std::vector<db::OdbInstanceInfo> instances = odb.Instances();
+          std::sort(instances.begin(), instances.end(),
+                    [](const db::OdbInstanceInfo& a,
+                       const db::OdbInstanceInfo& b) {
+                      return a.name < b.name;
+                    });
+          std::string placement;
+          for (const db::OdbInstanceInfo& inst : instances) {
+            placement += inst.name + "," + inst.master + "," +
+                         std::to_string(inst.x) + "," +
+                         std::to_string(inst.y) + ";";
+          }
+          add_part("placement:" + pv::FingerprintHash(placement));
+        }
+        const std::string fingerprint =
+            pv::FingerprintHash(input.empty() ? "none" : input);
+        const bool had_design = !input.empty();
+        // Stale evidence: the stored baseline is the fingerprint
+        // and the report hashes from the last run. The first run
+        // baselines. A changed report (the checks were re-run)
+        // re-baselines. A baseline taken with no design adopts
+        // the design when one loads, instead of flagging it
+        // stale. Otherwise a changed design with unchanged
+        // reports is stale until the checks are re-run.
+        bool stale = false;
+        CommandContext::SignoffSession& stored = ctx.signoff;
+        if (!stored.has_record || stored.pv_path != pv_path ||
+            stored.lvs_path != lvs_path ||
+            stored.pv_hash != pv::FingerprintHash(pv_text) ||
+            stored.lvs_hash != pv::FingerprintHash(lvs_text)) {
+          stored.has_record = true;
+          stored.had_design = had_design;
+          stored.fingerprint = fingerprint;
+          stored.pv_path = pv_path;
+          stored.lvs_path = lvs_path;
+          stored.pv_hash = pv::FingerprintHash(pv_text);
+          stored.lvs_hash = pv::FingerprintHash(lvs_text);
+        } else if (!stored.had_design && had_design) {
+          stored.fingerprint = fingerprint;
+          stored.had_design = true;
+        } else if (fingerprint != stored.fingerprint) {
+          stale = true;
+        }
+        const auto verdict = [](pv::SignoffVerdict value) {
+          return value == pv::SignoffVerdict::kPass ? "pass" : "fail";
+        };
+        std::string payload =
+            "signoff drc=" + std::string(verdict(record.drc)) +
+            " lvs=" + verdict(record.lvs) +
+            " antenna=" + verdict(record.antenna) +
+            " stale=" + std::string(stale ? "1" : "0") +
+            " drc_categories=" +
+            std::to_string(record.drc_categories) +
+            " drc_violations=" +
+            std::to_string(record.drc_violations) +
+            " antenna_net_violations=" +
+            std::to_string(record.antenna_net_violations) +
+            " antenna_pin_violations=" +
+            std::to_string(record.antenna_pin_violations) +
+            " pv_report=" + pv_path + " lvs_report=" + lvs_path +
+            " fingerprint=" + fingerprint;
+        for (const pv::SignoffDrcFamily& family : record.drc_families) {
+          payload += "\ndrc family=" + family.family +
+                     " categories=" +
+                     std::to_string(family.categories) +
+                     " violations=" +
+                     std::to_string(family.violations);
+        }
+        for (const pv::SignoffLvsPath& lvs_path_record :
+             record.lvs_paths) {
+          payload += "\nlvs path=" + lvs_path_record.path +
+                     " classes_compared=" +
+                     std::to_string(lvs_path_record.classes_compared) +
+                     " classes_equivalent=" +
+                     std::to_string(lvs_path_record.classes_equivalent);
+          if (lvs_path_record.has_fingers) {
+            payload += " fingers_extracted=" +
+                       std::to_string(
+                           lvs_path_record.fingers_extracted) +
+                       " fingers_reference=" +
+                       std::to_string(
+                           lvs_path_record.fingers_reference);
+          }
+          payload += " verdict=" + std::string(verdict(lvs_path_record.verdict));
+        }
+        for (const pv::SignoffLvsIssue& issue : record.lvs_issues) {
+          payload += "\nlvs issue=" + issue.issue +
+                     " cell=" + issue.cell + " kind=" + issue.kind +
+                     " path=" + issue.path;
+        }
+        if (record.lvs_residual.has_value()) {
+          const pv::SignoffLvsResidual& residual = *record.lvs_residual;
+          payload += "\nlvs_residual cell=" + residual.cell +
+                     " transistors=" +
+                     std::to_string(residual.transistors) +
+                     " instances=" +
+                     std::to_string(residual.instances) +
+                     " cause=" + residual.cause + " path=magic";
         }
         return CommandResult::Ok(payload);
       });

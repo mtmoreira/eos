@@ -14,6 +14,7 @@
 #include "eos/ui/panels.h"
 #include "eos/ui/registry.h"
 #include "eos/ui/schematic.h"
+#include "eos/ui/signoff.h"
 #include "eos/ui/timing.h"
 #include "eos/analysis/timing.h"
 #include "gtest/gtest.h"
@@ -84,6 +85,11 @@ using eos::ui::SchematicModel;
 using eos::ui::SchematicNet;
 using eos::ui::SchematicPoint;
 using eos::ui::SessionView;
+using eos::ui::SignoffDrcFamily;
+using eos::ui::SignoffLvsIssue;
+using eos::ui::SignoffLvsPath;
+using eos::ui::SignoffLvsResidual;
+using eos::ui::SignoffModel;
 using eos::ui::StepStatus;
 using eos::ui::SymbolForType;
 using eos::ui::TimingClock;
@@ -121,6 +127,51 @@ const char kFloorplanPayload[] =
     "pin name=d dir=in placed=1 rect=-50,3950,50,4050\n"
     "pin name=y1 dir=out placed=1 rect=4950,1950,5050,2050\n"
     "pin name=y2 dir=out placed=1 rect=4950,2950,5050,3050\n";
+
+// A signoff_summary payload for the gcd evidence: DRC 0
+// violations in 145 categories, LVS NOT CLEAN with D1 and D2
+// named on both extraction paths, antenna 0 violations. The
+// three DRC families here are a subset of the fourteen in the
+// report (their category counts sum to 22, within the 145
+// total); the full family list is covered by the registry
+// tests, which parse the real documents.
+const char kSignoffPayload[] =
+    "signoff drc=pass lvs=fail antenna=pass stale=0 drc_categories=145 "
+    "drc_violations=0 antenna_net_violations=0 antenna_pin_violations=0 "
+    "pv_report=docs/gcd-pv-results.md lvs_report=docs/gcd-lvs-magic.md "
+    "fingerprint=0123456789abcdef\n"
+    "drc family=m1 categories=8 violations=0\n"
+    "drc family=m2 categories=8 violations=0\n"
+    "drc family=via categories=6 violations=0\n"
+    "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+    "verdict=fail\n"
+    "lvs path=magic classes_compared=68 classes_equivalent=67 "
+    "fingers_extracted=3676 fingers_reference=3676 verdict=fail\n"
+    "lvs issue=D1 cell=none kind=extraction_artifact path=klayout\n"
+    "lvs issue=D2 cell=sky130_fd_sc_hd__a21oi_2 kind=unresolved "
+    "path=klayout\n"
+    "lvs issue=D1 cell=none kind=closed path=magic\n"
+    "lvs issue=D2 cell=sky130_fd_sc_hd__a21oi_2 kind=resolved_artifact "
+    "path=magic\n"
+    "lvs_residual cell=sky130_fd_sc_hd__a21oi_2 transistors=4 "
+    "instances=2 cause=proven path=magic\n";
+
+void RegisterSignoffCommand(CommandRegistry& registry,
+                            const std::string& payload, bool ok,
+                            int* calls = nullptr) {
+  auto status = registry.Register(
+      "signoff_summary", "signoff_summary",
+      [payload, ok, calls](CommandContext&,
+                           const std::vector<std::string>&) {
+        if (calls != nullptr) ++(*calls);
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no signoff verdicts");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
 
 void RegisterFloorplanCommand(CommandRegistry& registry,
                               const std::string& payload, bool ok,
@@ -3512,6 +3563,155 @@ TEST(PlacementModel, RejectsMalformedPayloads) {
     EXPECT_FALSE(model.Loaded());
   }
 }
+TEST(SignoffModel, ParsesFullPayload) {
+  SignoffModel model;
+  ASSERT_TRUE(model.LoadPayload(kSignoffPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_TRUE(model.DrcPass());
+  EXPECT_FALSE(model.LvsPass());
+  EXPECT_TRUE(model.AntennaPass());
+  EXPECT_FALSE(model.Stale());
+  EXPECT_EQ(model.DrcCategories(), 145u);
+  EXPECT_EQ(model.DrcViolations(), 0u);
+  EXPECT_EQ(model.AntennaNetViolations(), 0u);
+  EXPECT_EQ(model.AntennaPinViolations(), 0u);
+  EXPECT_EQ(model.PvReport(), "docs/gcd-pv-results.md");
+  EXPECT_EQ(model.LvsReport(), "docs/gcd-lvs-magic.md");
+  EXPECT_EQ(model.Fingerprint(), "0123456789abcdef");
+  ASSERT_EQ(model.DrcFamilies().size(), 3u);
+  EXPECT_EQ(model.DrcFamilies()[0].family, "m1");
+  EXPECT_EQ(model.DrcFamilies()[0].categories, 8u);
+  EXPECT_EQ(model.DrcFamilies()[0].violations, 0u);
+  ASSERT_EQ(model.LvsPaths().size(), 2u);
+  EXPECT_EQ(model.LvsPaths()[0].path, "klayout");
+  EXPECT_EQ(model.LvsPaths()[0].classes_compared, 68u);
+  EXPECT_EQ(model.LvsPaths()[0].classes_equivalent, 67u);
+  EXPECT_FALSE(model.LvsPaths()[0].has_fingers);
+  EXPECT_FALSE(model.LvsPaths()[0].pass);
+  EXPECT_EQ(model.LvsPaths()[1].path, "magic");
+  EXPECT_TRUE(model.LvsPaths()[1].has_fingers);
+  EXPECT_EQ(model.LvsPaths()[1].fingers_extracted, 3676u);
+  EXPECT_EQ(model.LvsPaths()[1].fingers_reference, 3676u);
+  ASSERT_EQ(model.LvsIssues().size(), 4u);
+  EXPECT_EQ(model.LvsIssues()[0].issue, "D1");
+  EXPECT_EQ(model.LvsIssues()[0].cell, "none");
+  EXPECT_EQ(model.LvsIssues()[0].kind, "extraction_artifact");
+  EXPECT_EQ(model.LvsIssues()[0].path, "klayout");
+  EXPECT_EQ(model.LvsIssues()[1].issue, "D2");
+  EXPECT_EQ(model.LvsIssues()[1].cell, "sky130_fd_sc_hd__a21oi_2");
+  EXPECT_EQ(model.LvsIssues()[1].kind, "unresolved");
+  EXPECT_TRUE(model.HasResidual());
+  EXPECT_EQ(model.Residual().cell, "sky130_fd_sc_hd__a21oi_2");
+  EXPECT_EQ(model.Residual().transistors, 4u);
+  EXPECT_EQ(model.Residual().instances, 2u);
+  EXPECT_EQ(model.Residual().cause, "proven");
+}
+
+TEST(SignoffModel, RejectsMalformedPayloads) {
+  const std::string header =
+      "signoff drc=pass lvs=fail antenna=pass stale=0 drc_categories=145 "
+      "drc_violations=0 antenna_net_violations=0 antenna_pin_violations=0 "
+      "pv_report=docs/gcd-pv-results.md lvs_report=docs/gcd-lvs-magic.md "
+      "fingerprint=0123456789abcdef\n";
+  const std::string body =
+      "drc family=m1 categories=8 violations=0\n"
+      "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+      "verdict=fail\n"
+      "lvs path=magic classes_compared=68 classes_equivalent=67 "
+      "fingers_extracted=3676 fingers_reference=3676 verdict=fail\n"
+      "lvs issue=D1 cell=none kind=extraction_artifact path=klayout\n"
+      "lvs issue=D2 cell=sky130_fd_sc_hd__a21oi_2 kind=unresolved "
+      "path=klayout\n"
+      "lvs_residual cell=sky130_fd_sc_hd__a21oi_2 transistors=4 "
+      "instances=2 cause=proven path=magic\n";
+  const std::string bad[] = {
+      // No header.
+      "drc family=m1 categories=8 violations=0\n",
+      // Wrong tag.
+      "floorplan drc=pass lvs=fail antenna=pass stale=0 "
+      "drc_categories=145 drc_violations=0 antenna_net_violations=0 "
+      "antenna_pin_violations=0 pv_report=docs/gcd-pv-results.md "
+      "lvs_report=docs/gcd-lvs-magic.md fingerprint=0123456789abcdef\n",
+      // Unknown header key.
+      header.substr(0, header.size() - 1) + " extra=1\n" + body,
+      // Missing header key (no fingerprint).
+      "signoff drc=pass lvs=fail antenna=pass stale=0 drc_categories=145 "
+      "drc_violations=0 antenna_net_violations=0 antenna_pin_violations=0 "
+      "pv_report=docs/gcd-pv-results.md lvs_report=docs/gcd-lvs-magic.md\n" +
+          body,
+      // DRC verdict says pass but a family has a violation.
+      header +
+          "drc family=m1 categories=8 violations=1\n"
+          "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+          "verdict=fail\n"
+          "lvs path=magic classes_compared=68 classes_equivalent=67 "
+          "fingers_extracted=3676 fingers_reference=3676 verdict=fail\n",
+      // LVS verdict says pass but both paths fail.
+      "signoff drc=pass lvs=pass antenna=pass stale=0 drc_categories=145 "
+      "drc_violations=0 antenna_net_violations=0 antenna_pin_violations=0 "
+      "pv_report=docs/gcd-pv-results.md lvs_report=docs/gcd-lvs-magic.md "
+      "fingerprint=0123456789abcdef\n" +
+          body,
+      // Family category sum over the header total.
+      header +
+          "drc family=m1 categories=200 violations=0\n"
+          "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+          "verdict=fail\n"
+          "lvs path=magic classes_compared=68 classes_equivalent=67 "
+          "fingers_extracted=3676 fingers_reference=3676 verdict=fail\n",
+      // Path rows in the wrong order (magic first).
+      header +
+          "lvs path=magic classes_compared=68 classes_equivalent=67 "
+          "fingers_extracted=3676 fingers_reference=3676 verdict=fail\n"
+          "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+          "verdict=fail\n",
+      // Duplicate path row.
+      header +
+          "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+          "verdict=fail\n"
+          "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+          "verdict=fail\n",
+      // Magic path row without finger totals (the magic row
+      // always carries both).
+      header +
+          "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+          "verdict=fail\n"
+          "lvs path=magic classes_compared=68 classes_equivalent=67 "
+          "verdict=fail\n",
+      // Duplicate issue (issue, path) pair.
+      header + body +
+          "lvs issue=D1 cell=none kind=extraction_artifact path=klayout\n",
+      // Unknown line tag.
+      header + body + "net name=n1\n",
+      // Empty line in the middle.
+      header + "\n" + body,
+      // Non-integer count.
+      "signoff drc=pass lvs=fail antenna=pass stale=0 "
+      "drc_categories=one drc_violations=0 antenna_net_violations=0 "
+      "antenna_pin_violations=0 pv_report=docs/gcd-pv-results.md "
+      "lvs_report=docs/gcd-lvs-magic.md fingerprint=0123456789abcdef\n" +
+          body,
+      // Short fingerprint.
+      "signoff drc=pass lvs=fail antenna=pass stale=0 drc_categories=145 "
+      "drc_violations=0 antenna_net_violations=0 antenna_pin_violations=0 "
+      "pv_report=docs/gcd-pv-results.md lvs_report=docs/gcd-lvs-magic.md "
+      "fingerprint=abc\n" +
+          body,
+      // Residual on the wrong path.
+      header +
+          "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+          "verdict=fail\n"
+          "lvs path=magic classes_compared=68 classes_equivalent=67 "
+          "fingers_extracted=3676 fingers_reference=3676 verdict=fail\n"
+          "lvs_residual cell=sky130_fd_sc_hd__a21oi_2 transistors=4 "
+          "instances=2 cause=proven path=klayout\n",
+  };
+  for (const std::string& payload : bad) {
+    SignoffModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+}
 
 TEST(PlacementModel, ReloadReplacesPreviousPlacement) {
   PlacementModel model;
@@ -3534,6 +3734,38 @@ TEST(PlacementModel, ReloadReplacesPreviousPlacement) {
   EXPECT_FALSE(model.Loaded());
   EXPECT_TRUE(model.Instances().empty());
   EXPECT_TRUE(model.Slacks().empty());
+}
+TEST(SignoffModel, ReloadReplacesPreviousVerdicts) {
+  SignoffModel model;
+  ASSERT_TRUE(model.LoadPayload(kSignoffPayload));
+  ASSERT_TRUE(model.LvsIssues().size() == 4u);
+  ASSERT_TRUE(model.LoadPayload(
+      "signoff drc=fail lvs=fail antenna=fail stale=1 drc_categories=10 "
+      "drc_violations=3 antenna_net_violations=2 antenna_pin_violations=1 "
+      "pv_report=pv.md lvs_report=lvs.md fingerprint=fedcba9876543210\n"
+      "drc family=m1 categories=10 violations=3\n"
+      "lvs path=klayout classes_compared=5 classes_equivalent=4 "
+      "verdict=fail\n"
+      "lvs path=magic classes_compared=5 classes_equivalent=4 "
+      "fingers_extracted=100 fingers_reference=100 verdict=fail\n"));
+  EXPECT_FALSE(model.DrcPass());
+  EXPECT_TRUE(model.Stale());
+  EXPECT_EQ(model.DrcViolations(), 3u);
+  ASSERT_EQ(model.LvsPaths().size(), 2u);
+  EXPECT_TRUE(model.LvsPaths()[1].has_fingers);
+  EXPECT_EQ(model.LvsPaths()[1].fingers_extracted, 100u);
+  EXPECT_TRUE(model.LvsIssues().empty());
+  EXPECT_FALSE(model.HasResidual());
+  // A malformed reload leaves the previous verdicts untouched.
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.DrcViolations(), 3u);
+  model.Clear();
+  EXPECT_FALSE(model.Loaded());
+  EXPECT_TRUE(model.DrcFamilies().empty());
+  EXPECT_TRUE(model.LvsPaths().empty());
+  EXPECT_TRUE(model.LvsIssues().empty());
+  EXPECT_FALSE(model.HasResidual());
 }
 
 void RegisterIssuesCommand(CommandRegistry& registry,
@@ -4467,6 +4699,10 @@ struct AutoNavView {
   CommandRegistry registry;
   CommandContext context;
   SessionView view;
+  // The stub signoff_summary fails until the test flips this:
+  // the Signoff stage button starts disabled and only enables
+  // once verdicts load.
+  bool signoff_ok = false;
   AutoNavView() : view(registry, context) {
     OutlineTestApp();
     auto elaborate = registry.Register(
@@ -4477,6 +4713,17 @@ struct AutoNavView {
         });
     EXPECT_TRUE(elaborate.ok());
     RegisterOkCommand(registry, "run_timing");
+    auto signoff = registry.Register(
+        "signoff_summary", "signoff_summary",
+        [this](CommandContext&, const std::vector<std::string>&) {
+          if (!signoff_ok) {
+            return CommandResult::Fail(
+                eos::ui::Diag::kInvalidConfiguration,
+                "no signoff verdicts");
+          }
+          return CommandResult::Ok(kSignoffPayload);
+        });
+    EXPECT_TRUE(signoff.ok());
   }
 };
 
@@ -4574,6 +4821,37 @@ TEST(MainWindowAutoNav, ConsoleEntrySequenceEndsOnResults) {
   EXPECT_TRUE(synthesis->isEnabled());
   synthesis->click();
   EXPECT_EQ(window.CurrentTab(), 2);
+}
+TEST(MainWindowAutoNav, SignoffSummaryShowsSignoffTab) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  EXPECT_FALSE(window.SignoffEnabled());
+  EXPECT_EQ(window.CurrentTab(), 0);
+  fixture.signoff_ok = true;
+  ASSERT_TRUE(fixture.view.Dispatch("signoff_summary", {}).ok);
+  window.Refresh();
+  EXPECT_TRUE(window.SignoffEnabled());
+  EXPECT_EQ(window.CurrentTab(), 6);
+}
+
+TEST(MainWindowAutoNav, SignoffButtonShowsSignoffTab) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  fixture.signoff_ok = true;
+  ASSERT_TRUE(fixture.view.Dispatch("signoff_summary", {}).ok);
+  window.Refresh();
+  ASSERT_EQ(window.CurrentTab(), 6);
+  // Move away through the stepper's Read step (Sources tab),
+  // then take the Signoff stage button back to Signoff.
+  QPushButton* read = AutoNavButtonWithPrefix(window, "Read");
+  ASSERT_NE(read, nullptr);
+  read->click();
+  EXPECT_EQ(window.CurrentTab(), 1);
+  QPushButton* signoff = AutoNavButtonWithPrefix(window, "Signoff");
+  ASSERT_NE(signoff, nullptr);
+  EXPECT_TRUE(signoff->isEnabled());
+  signoff->click();
+  EXPECT_EQ(window.CurrentTab(), 6);
 }
 
 // A SessionView with the nested hierarchy, so the center can
@@ -4724,19 +5002,20 @@ TEST(CenterView, HighlightGateForwardsToSchematicOnlyWhenLeaf) {
             "No schematic for this level.");
 }
 
-TEST(PanelsView, HasSixTabsWithTiming) {
+TEST(PanelsView, HasSevenTabsWithSignoff) {
   OutlineTestApp();
   CommandRegistry registry;
   CommandContext context;
   SessionView view(registry, context);
   PanelsView panels(view);
-  ASSERT_EQ(panels.count(), 6);
+  ASSERT_EQ(panels.count(), 7);
   EXPECT_EQ(panels.tabText(0).toStdString(), "Issues");
   EXPECT_EQ(panels.tabText(1).toStdString(), "Sources");
   EXPECT_EQ(panels.tabText(2).toStdString(), "Results");
   EXPECT_EQ(panels.tabText(3).toStdString(), "Timing");
   EXPECT_EQ(panels.tabText(4).toStdString(), "Opt log");
   EXPECT_EQ(panels.tabText(5).toStdString(), "Messages");
+  EXPECT_EQ(panels.tabText(6).toStdString(), "Signoff");
 }
 
 // F1: the Results tab carries the mapped synthesis section from
@@ -5184,6 +5463,78 @@ TEST(GuiSessionView, DispatchPlaceShowsPlacementCenter) {
   EXPECT_TRUE(view.ShowingPlacement());
   ASSERT_TRUE(view.Dispatch("close_design", {}).ok);
   EXPECT_FALSE(view.ShowingPlacement());
+}
+TEST(GuiSessionView, RefreshSignoffPopulatesModelWithoutEcho) {
+  CommandRegistry registry;
+  RegisterSignoffCommand(registry, kSignoffPayload, true);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshSignoff();
+  EXPECT_TRUE(view.Signoff().Loaded());
+  EXPECT_TRUE(view.Signoff().DrcPass());
+  EXPECT_FALSE(view.Signoff().LvsPass());
+  ASSERT_EQ(view.Signoff().LvsIssues().size(), 4u);
+  EXPECT_EQ(view.Signoff().LvsIssues()[1].cell,
+            "sky130_fd_sc_hd__a21oi_2");
+  EXPECT_TRUE(view.Signoff().HasResidual());
+  EXPECT_TRUE(view.EchoLog().empty());
+}
+
+TEST(GuiSessionView, RefreshSignoffRunsQueryOnEveryRefresh) {
+  CommandRegistry registry;
+  int calls = 0;
+  RegisterSignoffCommand(registry, kSignoffPayload, true, &calls);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshSignoff();
+  EXPECT_EQ(calls, 1);
+  // No key guard here: the query parses two evidence documents
+  // and walks the live design for its fingerprint, so it runs
+  // on every refresh, like the floorplan refresh.
+  view.RefreshSignoff();
+  EXPECT_EQ(calls, 2);
+}
+
+TEST(GuiSessionView, RefreshSignoffClearsOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterSignoffCommand(registry, "", false);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshSignoff();
+  EXPECT_FALSE(view.Signoff().Loaded());
+}
+
+TEST(GuiSessionView, RefreshSignoffClearsOnMalformedPayload) {
+  CommandRegistry registry;
+  RegisterSignoffCommand(registry, "garbage\n", true);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshSignoff();
+  EXPECT_FALSE(view.Signoff().Loaded());
+}
+
+TEST(GuiSessionView, RefreshSignoffClearsWhenQueryStartsFailing) {
+  CommandRegistry registry;
+  std::string payload = kSignoffPayload;
+  bool ok = true;
+  auto status = registry.Register(
+      "signoff_summary", "signoff_summary",
+      [&payload, &ok](CommandContext&,
+                      const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no signoff verdicts");
+        }
+        return CommandResult::Ok(payload);
+      });
+  ASSERT_TRUE(status.ok());
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshSignoff();
+  ASSERT_TRUE(view.Signoff().Loaded());
+  ok = false;
+  view.RefreshSignoff();
+  EXPECT_FALSE(view.Signoff().Loaded());
 }
 
 TEST(GuiSessionView, DispatchFloorplanShowsFloorplanCenter) {

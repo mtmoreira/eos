@@ -700,6 +700,7 @@
         "rsz",
         "scenarios",
         "session",
+        "signoff",
         "sta",
         "timing",
         "yosys"
@@ -783,6 +784,10 @@
           "include"
         ],
         "session": [
+          "cmake-link",
+          "include"
+        ],
+        "signoff": [
           "cmake-link",
           "include"
         ],
@@ -970,6 +975,12 @@
           "include"
         ]
       }
+    },
+    "signoff": {
+      "depends_on": [],
+      "layer": "L4",
+      "path": "src/pv/signoff",
+      "via": {}
     },
     "sourcemap": {
       "depends_on": [],
@@ -1527,6 +1538,14 @@
       ],
       "sources": [
         "tests/unit/pv/extract/extract_test.cc"
+      ]
+    },
+    "pv.signoff": {
+      "modules": [
+        "signoff"
+      ],
+      "sources": [
+        "tests/unit/pv/signoff/signoff_test.cc"
       ]
     },
     "qualification.phase1_exit": {

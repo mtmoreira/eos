@@ -63,6 +63,8 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   // elaboration is done, and shows the Results tab's synthesis
   // section. Place is a button too: it stays disabled until a
   // placement is loaded, and shows the placement canvas.
+  // Signoff is a button too: it stays disabled until
+  // signoff verdicts are loaded, and shows the Signoff tab.
   // Elaboration, Floorplan, and Place are flat buttons, not labels: the
   // user switches the center between the hierarchy views and
   // the floorplan or placement canvas there. The other later stages stay
@@ -112,6 +114,19 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       connect(placement_button_, &QPushButton::clicked, [this]() {
         view_.ShowFloorplan(false);
         view_.ShowPlacement(true);
+        Refresh();
+      });
+      continue;
+    }
+    if (std::string(stage) == "Signoff") {
+      signoff_button_ = new QPushButton(stage, stages);
+      signoff_button_->setFlat(true);
+      signoff_button_->setEnabled(false);
+      stages_layout->addWidget(signoff_button_);
+      connect(signoff_button_, &QPushButton::clicked, [this]() {
+        // PanelsView is created below; clicks only happen after
+        // construction, so it is set by then.
+        panels_->ShowTab(6);
         Refresh();
       });
       continue;
@@ -272,6 +287,10 @@ bool MainWindow::SynthesisEnabled() const {
   return synthesis_button_ != nullptr && synthesis_button_->isEnabled();
 }
 
+bool MainWindow::SignoffEnabled() const {
+  return signoff_button_ != nullptr && signoff_button_->isEnabled();
+}
+
 void MainWindow::NoteStdinClosed() {
   stdin_closed_ = true;
   if (!isVisible()) QCoreApplication::quit();
@@ -365,6 +384,9 @@ void MainWindow::Refresh() {
     case SessionView::ResultDestination::kOptLog:
       panels_->ShowTab(4);
       break;
+    case SessionView::ResultDestination::kSignoff:
+      panels_->ShowTab(6);
+      break;
     case SessionView::ResultDestination::kCenter:
       view_.ShowFloorplan(false);
       view_.ShowPlacement(false);
@@ -378,6 +400,7 @@ void MainWindow::Refresh() {
   view_.RefreshTiming();
   view_.RefreshFloorplan();
   view_.RefreshPlacement();
+  view_.RefreshSignoff();
   view_.RefreshLog();
   browser_->Refresh();
   center_->Refresh();
@@ -430,6 +453,13 @@ void MainWindow::RefreshSteps() {
     placement_button_->setEnabled(view_.Placement().Loaded());
     placement_button_->setStyleSheet(
         view_.ShowingPlacement() ? "font-weight: bold;" : "");
+  }
+  // Signoff stays disabled until verdicts are loaded, and stays
+  // enabled once they are: the flag comes from the live model,
+  // so a later refresh never disables it while the verdicts are
+  // still loaded.
+  if (signoff_button_ != nullptr) {
+    signoff_button_->setEnabled(view_.Signoff().Loaded());
   }
 }
 
