@@ -21,8 +21,13 @@
 #include <QIcon>
 #include <QMetaObject>
 #include <QPixmap>
+#include <QTimer>
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <fcntl.h>
 #include <future>
 #include <memory>
 #include <optional>
@@ -126,9 +131,17 @@ int RunGui(int argc, char** argv, CommandRegistry& registry,
     splash->FinishWhenReady(&window);
   }
 
+  // Quit handshake with the REPL thread: Cmd-Q returns from the
+  // event loop while the REPL thread is still blocked reading
+  // stdin, so the main thread must tell it to leave instead of
+  // joining it unconditionally (it only leaves its read loop at
+  // stdin EOF, which never comes with the terminal open).
+  std::atomic<bool> quit_requested{false};
+  std::atomic<bool> repl_done{false};
+
   std::thread repl;
   if (shell != nullptr) {
-    repl = std::thread([shell, &window]() {
+    repl = std::thread([shell, &window, &quit_requested, &repl_done]() {
       shell->InitInteractiveHistory();
       for (;;) {
         // Linenoise prints the prompt on a terminal and reads
@@ -163,17 +176,69 @@ int RunGui(int argc, char** argv, CommandRegistry& registry,
               done->set_value(out);
             },
             Qt::QueuedConnection);
-        const std::string out = result.get();
+        // Wait for the GUI-thread evaluation, but abandon the
+        // wait when a quit is requested: the event loop has
+        // stopped, so the queued evaluation can never run.
+        std::string out;
+        for (;;) {
+          if (result.wait_for(std::chrono::milliseconds(50)) ==
+              std::future_status::ready) {
+            out = result.get();
+            break;
+          }
+          if (quit_requested.load()) break;
+        }
+        if (quit_requested.load()) break;
         if (!out.empty()) std::printf("%s\n", out.c_str());
       }
+      repl_done.store(true);
       QMetaObject::invokeMethod(
           &window, [&window]() { window.NoteStdinClosed(); },
           Qt::QueuedConnection);
     });
   }
 
-  const int rc = app.exec();
-  if (repl.joinable()) repl.join();
+  const int rc = [&]() {
+    // Test hook for the GUI exit-hang regression test:
+    // EOS_GUI_QUIT_AFTER_MS=<ms> calls QApplication::quit after
+    // the delay, which is exactly the Cmd-Q path (quit with the
+    // terminal REPL thread blocked on open stdin). Production
+    // use never sets it.
+    if (const char* quit_after_ms = std::getenv("EOS_GUI_QUIT_AFTER_MS")) {
+      const int ms = std::atoi(quit_after_ms);
+      if (ms > 0) {
+        QTimer::singleShot(ms, &app, &QCoreApplication::quit);
+      }
+    }
+    return app.exec();
+  }();
+  if (repl.joinable()) {
+    quit_requested.store(true);
+    // Wake the REPL thread's read: redirect stdin to /dev/null so
+    // the tty poll loop sees EOF on its next pass. Never a bare
+    // close: fd 0 must not be left reusable.
+    const int devnull = ::open("/dev/null", O_RDONLY);
+    if (devnull >= 0) {
+      ::dup2(devnull, STDIN_FILENO);
+      if (devnull != STDIN_FILENO) ::close(devnull);
+    }
+    // Bounded wait for the REPL thread to finish, then join if it
+    // did. A piped read already in flight is not woken by the
+    // redirect, so detach after the bound instead of hanging: the
+    // only state that can outlive the join is that blocked read,
+    // which never touches the window.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!repl_done.load() &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (repl_done.load()) {
+      repl.join();
+    } else {
+      repl.detach();
+    }
+  }
   SetGuiShowHandler(nullptr);
   return rc;
 }

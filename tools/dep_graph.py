@@ -242,6 +242,9 @@ def test_map(root, reg):
     the entry already has. The gui icon entry is the same
     shape: an add_test block mentioning icons/check_icon.cmake
     maps to modules [gui] (the module whose artwork it checks).
+    The gui exit-hang entry is the same shape: an add_test
+    block mentioning quit_gui_test.py maps to modules [gui]
+    (the module whose quit path it drives).
     """
     by_target = {m["target"]: m for m in reg.modules}
     tests = {}
@@ -274,6 +277,8 @@ def test_map(root, reg):
             if "rsz/tests" in block:
                 extra |= {"registry", "rsz"}
             if "icons/check_icon.cmake" in block:
+                extra |= {"gui"}
+            if "quit_gui_test.py" in block:
                 extra |= {"gui"}
             if not extra:
                 continue

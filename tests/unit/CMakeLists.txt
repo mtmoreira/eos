@@ -341,3 +341,16 @@ add_test(NAME ui.gui.icon
   COMMAND ${CMAKE_COMMAND}
     -DEOS_GUI_ICON_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../../src/ui/gui/icons
     -P ${CMAKE_CURRENT_SOURCE_DIR}/../../src/ui/gui/icons/check_icon.cmake)
+
+# GUI exit hang: process-level test. Launches the real eos-gui
+# binary with stdin on a pty held open and drives
+# QApplication::quit (the Cmd-Q path) through the
+# EOS_GUI_QUIT_AFTER_MS test hook, asserting clean exit. The
+# binary exists only when Qt6 was found, like the eos-gui
+# target itself.
+if(EOS_HAVE_QT6)
+  add_test(NAME ui.gui.quit
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/unit/ui/gui/quit_gui_test.py
+      $<TARGET_FILE:eos-gui>)
+  set_tests_properties(ui.gui.quit PROPERTIES TIMEOUT 60)
+endif()
