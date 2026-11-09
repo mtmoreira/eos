@@ -1676,6 +1676,12 @@
       ],
       "sources": []
     },
+    "ui.gui.quit": {
+      "modules": [
+        "gui"
+      ],
+      "sources": []
+    },
     "ui.registry": {
       "modules": [
         "checkpoint",

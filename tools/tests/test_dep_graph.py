@@ -309,7 +309,8 @@ def test_real_repo_check_passes_and_rules_hold():
     # The gui app-icon unit adds ui.gui.icon, the 65th ctest entry.
     # F12 adds synth.yosys.abc_dff, the 66th ctest entry.
     # F13 adds pv.signoff, the 67th ctest entry.
-    assert len(all_tests) == 67
+    # The gui exit-hang unit adds ui.gui.quit, the 68th ctest entry.
+    assert len(all_tests) == 68
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),
@@ -402,3 +403,57 @@ def test_script_driven_entry_without_rsz_tests_maps_to_nothing(tmp_path):
                     encoding="utf-8")
     _path, graph = generate(root)
     assert graph["tests"]["rsz.other"]["modules"] == []
+
+
+def make_gui_quit_repo(tmp_path):
+    """Fixture repo with a gui module and the exit-hang entry.
+
+    The entry runs an interpreter, not a test exe, so the
+    exe-link scan maps it to nothing; the quit rule must map
+    it to [gui] instead.
+    """
+    (tmp_path / "structure.yaml").write_text(
+        "layers:\n"
+        "  - id: L6\n"
+        "    level: 6\n"
+        "    name: ui\n"
+        "    roots: [src/ui]\n"
+        "modules:\n"
+        "  - name: gui\n"
+        "    layer: L6\n"
+        "    path: src/ui/gui\n"
+        "    target: eda_ui_gui\n"
+        "    adopted: false\n",
+        encoding="utf-8")
+    write_module(tmp_path, "gui", "src/ui/gui", "eda_ui_gui")
+    (tmp_path / "tests" / "unit").mkdir(parents=True)
+    (tmp_path / "tests" / "unit" / "CMakeLists.txt").write_text(
+        "add_executable(eda_ui_gui_unit_test ui/gui/gui_test.cc)\n"
+        "target_link_libraries(eda_ui_gui_unit_test\n"
+        "  PRIVATE eda_ui_gui GTest::gtest GTest::gtest_main)\n"
+        "add_test(NAME ui.gui COMMAND eda_ui_gui_unit_test)\n"
+        "\n"
+        "add_test(NAME ui.gui.quit\n"
+        "  COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/unit/ui/gui/"
+        "quit_gui_test.py\n"
+        "    $<TARGET_FILE:eos-gui>)\n",
+        encoding="utf-8")
+    (tmp_path / "tests" / "qualification").mkdir(parents=True)
+    (tmp_path / "tests" / "qualification" / "CMakeLists.txt").write_text(
+        "", encoding="utf-8")
+    return tmp_path
+
+
+def test_script_driven_gui_quit_entry_maps_to_gui(tmp_path):
+    root = make_gui_quit_repo(tmp_path)
+    graph_path, graph = generate(root)
+    assert graph["tests"]["ui.gui.quit"]["modules"] == ["gui"]
+    # The exe-linked entry is untouched by the rule.
+    assert graph["tests"]["ui.gui"]["modules"] == ["gui"]
+    # Both entries are mapped, so check passes.
+    result = run_script(root, "check", "--graph", str(graph_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    # A gui change selects both the unit test and the quit entry.
+    assert select(root, graph_path,
+                  "src/ui/gui/src/gui_app.cc") == [
+                      "ui.gui", "ui.gui.quit"]
