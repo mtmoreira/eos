@@ -90,7 +90,8 @@ TEST(Registry, CoreSetIsComplete) {
   // compare_collections, index_collection, query_objects,
   // foreach_in_collection). get_objects is the generic alias and
   // exists already, so it adds no pin. F3 adds floorplan_summary.
-  EXPECT_EQ(shell.registry.Names().size(), 112u);
+  // F4 adds place_summary. F13 adds signoff_summary.
+  EXPECT_EQ(shell.registry.Names().size(), 113u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -4896,6 +4897,305 @@ TEST(CoreCommands, FloorplanSummaryRejectsBadOptions) {
   ASSERT_FALSE(result.ok);
   EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
   EXPECT_NE(result.message.find("floorplan_summary"), std::string::npos);
+}
+
+// F13: the signoff_summary query fixtures. Minimal PV and LVS
+// evidence documents in the docs/gcd-pv-results.md and
+// docs/gcd-lvs-magic.md shapes: same headings, result
+// sentences, discrepancy paragraphs, and summary tables, with
+// two DRC families instead of fourteen.
+const char kSignoffPv[] =
+    "# PV results (test fixture)\n"
+    "\n"
+    "## 2. DRC\n"
+    "\n"
+    "Result: the report database holds 3 rule categories and 0 "
+    "violations.\n"
+    "Coverage by rule family (categories per family): metal layers "
+    "m1 2, m2 1; every remaining family is a single category.\n"
+    "\n"
+    "## 3. LVS\n"
+    "\n"
+    "### 3.4 Results\n"
+    "\n"
+    "68 cell classes compared. Every stdcell class gcd uses is "
+    "topologically equivalent to its CDL definition except "
+    "`sky130_fd_sc_hd__a21oi_2` (Section 3.5).\n"
+    "\n"
+    "### 3.5 The named discrepancies\n"
+    "\n"
+    "D1. Substrate net model (extraction artifact, named, not a "
+    "layout error): the runset forces the substrate to a global "
+    "net.\n"
+    "\n"
+    "D2. `sky130_fd_sc_hd__a21oi_2` (a real extraction-level "
+    "difference, cause not fully resolved): inside the extracted "
+    "cell the VGND net appears as two nets.\n"
+    "\n"
+    "### 3.6 LVS verdict\n"
+    "\n"
+    "LVS does not pass clean on gcd at this pin.\n"
+    "\n"
+    "## 4. Antenna\n"
+    "\n"
+    "Result: 0 net violations, 0 pin violations.\n"
+    "\n"
+    "## 5. Summary and tier position\n"
+    "\n"
+    "| Check | Verdict | Evidence |\n"
+    "|---|---|---|\n"
+    "| DRC (KLayout deck, 3 categories) | PASS, 0 violations | "
+    "Section 2 |\n"
+    "| Antenna (final geometry) | PASS, 0 net and 0 pin violations | "
+    "Section 4 |\n"
+    "| LVS (KLayout extraction + Netgen) | NOT CLEAN | Sections 3.4 "
+    "to 3.6 |\n";
+
+const char kSignoffLvs[] =
+    "# LVS by the Magic extraction path (test fixture)\n"
+    "\n"
+    "## 4. Results\n"
+    "\n"
+    "Netgen compared 68 standard cell classes and the gcd top "
+    "level. 67 of the 68 classes are topologically equivalent "
+    "to their CDL definitions, with cell pin lists equivalent "
+    "in every class. The single exception is "
+    "`sky130_fd_sc_hd__a21oi_2` (Section 5).\n"
+    "\n"
+    "Top level: the flat totals agree exactly: 3,676 fingers "
+    "extracted against 3,676 in the reference.\n"
+    "\n"
+    "## 5. D2 resolved at the cell level, and the successor residual\n"
+    "\n"
+    "### 5.2 Decision on D2\n"
+    "\n"
+    "D2 as recorded in unit 3.1 does not exist in this cell's "
+    "geometry under the Magic extraction model. By the judging "
+    "rule of Section 2, D2 is decided a modeling artifact of the "
+    "KLayout extraction path.\n"
+    "\n"
+    "## 6. D1, and the LVS verdict for this path\n"
+    "\n"
+    "D1 is closed under this extraction model.\n"
+    "\n"
+    "LVS verdict for the Magic extraction path, as measured: "
+    "NOT CLEAN, with one named residual. 67 of 68 standard "
+    "cell classes are equivalent, and there are no property "
+    "errors. The single residual is the a21oi_2 series midpoint "
+    "representation of Section 5.3 (4 transistors in 2 instances, "
+    "cause proven by controlled diagnostic).\n"
+    "\n"
+    "## 7. Summary\n"
+    "\n"
+    "| Item | Unit 3.1 (KLayout path) | Unit F3 (Magic path) |\n"
+    "|---|---|---|\n"
+    "| Cell classes equivalent | 67 of 68 (a21oi_2 excepted) | 67 of "
+    "68 (a21oi_2 excepted) |\n"
+    "| Flat devices (extracted vs reference) | 2,941 vs 2,937 | 3,676 "
+    "vs 3,676 fingers |\n"
+    "| D1 substrate split | Present (extraction artifact) | Closed "
+    "(no split) |\n"
+    "| D2 | VGND split in a21oi_2, cause unresolved | VGND split "
+    "absent; decided KLayout modeling artifact |\n"
+    "| Remaining residual | D1 and D2 | a21oi_2 series midpoint "
+    "representation, cause proven |\n"
+    "| Verdict | NOT CLEAN | NOT CLEAN, one named residual |\n";
+
+// F13: signoff_summary parses the two reports into the
+// machine-readable payload: the header verdicts and counts,
+// one DRC row per family, one LVS row per path, one row per
+// named discrepancy, and the successor residual. The first run
+// baselines, so it is not stale.
+TEST(CoreCommands, SignoffSummaryParsesReports) {
+  TimingTempDir dir;
+  const std::string pv = dir.Write("pv.md", kSignoffPv);
+  const std::string lvs = dir.Write("lvs.md", kSignoffLvs);
+  Shell shell;
+  const CommandResult result =
+      shell.Run("signoff_summary", {"-pv", pv, "-lvs", lvs});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("signoff drc=pass lvs=fail "
+                                "antenna=pass stale=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("drc_categories=3 drc_violations=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("antenna_net_violations=0 "
+                                "antenna_pin_violations=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("pv_report=" + pv), std::string::npos);
+  EXPECT_NE(result.payload.find("lvs_report=" + lvs),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("fingerprint="), std::string::npos);
+  EXPECT_NE(result.payload.find("drc family=m1 categories=2 "
+                                "violations=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("drc family=m2 categories=1 "
+                                "violations=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("lvs path=klayout classes_compared=68 "
+                                "classes_equivalent=67 verdict=fail"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("lvs path=magic classes_compared=68 "
+                                "classes_equivalent=67 "
+                                "fingers_extracted=3676 "
+                                "fingers_reference=3676 verdict=fail"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("lvs issue=D1 cell=none "
+                                "kind=extraction_artifact path=klayout"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("lvs issue=D2 "
+                                "cell=sky130_fd_sc_hd__a21oi_2 "
+                                "kind=unresolved path=klayout"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("lvs issue=D1 cell=none kind=closed "
+                                "path=magic"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("lvs issue=D2 "
+                                "cell=sky130_fd_sc_hd__a21oi_2 "
+                                "kind=resolved_artifact path=magic"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("lvs_residual "
+                                "cell=sky130_fd_sc_hd__a21oi_2 "
+                                "transistors=4 instances=2 cause=proven "
+                                "path=magic"),
+            std::string::npos);
+}
+
+// F13: a missing report fails fast with the path named, never
+// with a silent empty panel.
+TEST(CoreCommands, SignoffSummaryFailsFastOnMissingReport) {
+  TimingTempDir dir;
+  const std::string lvs = dir.Write("lvs.md", kSignoffLvs);
+  const std::string missing = dir.Path("no-such-pv.md");
+  Shell shell;
+  const CommandResult result = shell.Run(
+      "signoff_summary", {"-pv", missing, "-lvs", lvs});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kIoError);
+  EXPECT_NE(result.message.find(missing), std::string::npos);
+}
+
+// F13: the default report paths are the gcd evidence documents
+// relative to the working directory. Under ctest the working
+// directory is the build tree, where they do not exist, so the
+// failure names the default PV path. From the repository root
+// they resolve, and the run parses the recorded gcd verdicts.
+TEST(CoreCommands, SignoffSummaryDefaultPathsAreGcdEvidence) {
+  Shell shell;
+  const bool docs_present = std::ifstream("docs/gcd-pv-results.md") &&
+                            std::ifstream("docs/gcd-lvs-magic.md");
+  const CommandResult result = shell.Run("signoff_summary", {});
+  if (!docs_present) {
+    ASSERT_FALSE(result.ok);
+    EXPECT_EQ(result.diag, Diag::kIoError);
+    EXPECT_NE(result.message.find("docs/gcd-pv-results.md"),
+              std::string::npos);
+    return;
+  }
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("drc_categories=145"),
+            std::string::npos);
+}
+
+// F13: an unparseable report fails fast with the path named.
+TEST(CoreCommands, SignoffSummaryFailsFastOnUnparseableReport) {
+  TimingTempDir dir;
+  const std::string pv = dir.Write("pv.md", "# not a PV report\n");
+  const std::string lvs = dir.Write("lvs.md", kSignoffLvs);
+  Shell shell;
+  const CommandResult result =
+      shell.Run("signoff_summary", {"-pv", pv, "-lvs", lvs});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find(pv), std::string::npos);
+}
+
+TEST(CoreCommands, SignoffSummaryRejectsBadOptions) {
+  TimingTempDir dir;
+  const std::string pv = dir.Write("pv.md", kSignoffPv);
+  const std::string lvs = dir.Write("lvs.md", kSignoffLvs);
+  Shell shell;
+  const CommandResult bogus =
+      shell.Run("signoff_summary", {"-bogus"});
+  ASSERT_FALSE(bogus.ok);
+  EXPECT_EQ(bogus.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(bogus.message.find("signoff_summary"), std::string::npos);
+  const CommandResult positional = shell.Run(
+      "signoff_summary", {"-pv", pv, "-lvs", lvs, "extra"});
+  ASSERT_FALSE(positional.ok);
+  EXPECT_EQ(positional.diag, Diag::kInvalidConfiguration);
+  const CommandResult twice = shell.Run(
+      "signoff_summary",
+      {"-pv", pv, "-pv", pv, "-lvs", lvs});
+  ASSERT_FALSE(twice.ok);
+  EXPECT_EQ(twice.diag, Diag::kInvalidConfiguration);
+  const CommandResult spaced = shell.Run(
+      "signoff_summary",
+      {"-pv", "/tmp/has a space.md", "-lvs", lvs});
+  ASSERT_FALSE(spaced.ok);
+  EXPECT_EQ(spaced.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(spaced.message.find("space"), std::string::npos);
+}
+
+// F13: the stale flag. The first run baselines with no design,
+// so it is not stale. Loading a design adopts the baseline
+// instead of flagging it stale. Changing the design after that
+// is stale until the reports are re-run: rewriting a report
+// (any byte change, even a trailing newline) re-baselines.
+TEST(CoreCommands, SignoffSummaryStaleAfterDesignChange) {
+  TimingTempDir dir;
+  const std::string pv = dir.Write("pv.md", kSignoffPv);
+  const std::string lvs = dir.Write("lvs.md", kSignoffLvs);
+  Shell shell;
+  const auto run = [&shell, &pv, &lvs]() {
+    return shell.Run("signoff_summary", {"-pv", pv, "-lvs", lvs});
+  };
+  const CommandResult first = run();
+  ASSERT_TRUE(first.ok) << first.message;
+  EXPECT_NE(first.payload.find("stale=0"), std::string::npos);
+  shell.ctx.synth.verilog_path = dir.Path("one.v");
+  shell.ctx.synth.top_cell = "one";
+  const CommandResult adopted = run();
+  ASSERT_TRUE(adopted.ok) << adopted.message;
+  EXPECT_NE(adopted.payload.find("stale=0"), std::string::npos);
+  EXPECT_NE(adopted.payload.find("fingerprint="), std::string::npos);
+  EXPECT_EQ(adopted.payload.find(first.payload.substr(
+                first.payload.find("fingerprint="), 27)),
+            std::string::npos);
+  shell.ctx.synth.verilog_path = dir.Path("two.v");
+  shell.ctx.synth.top_cell = "two";
+  const CommandResult stale = run();
+  ASSERT_TRUE(stale.ok) << stale.message;
+  EXPECT_NE(stale.payload.find("stale=1"), std::string::npos);
+  EXPECT_FALSE(dir.Write("pv.md", std::string(kSignoffPv) + "\n").empty());
+  const CommandResult rerun = run();
+  ASSERT_TRUE(rerun.ok) << rerun.message;
+  EXPECT_NE(rerun.payload.find("stale=0"), std::string::npos);
+}
+
+// F13: close_design clears the signoff baseline, so the next
+// run baselines fresh instead of reporting the old design stale.
+TEST(CoreCommands, SignoffSummaryClearsOnCloseDesign) {
+  TimingTempDir dir;
+  const std::string pv = dir.Write("pv.md", kSignoffPv);
+  const std::string lvs = dir.Write("lvs.md", kSignoffLvs);
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  const auto run = [&shell, &pv, &lvs]() {
+    return shell.Run("signoff_summary", {"-pv", pv, "-lvs", lvs});
+  };
+  shell.ctx.synth.verilog_path = dir.Path("one.v");
+  shell.ctx.synth.top_cell = "one";
+  ASSERT_TRUE(run().ok);
+  shell.ctx.synth.verilog_path = dir.Path("two.v");
+  shell.ctx.synth.top_cell = "two";
+  const CommandResult stale = run();
+  ASSERT_TRUE(stale.ok) << stale.message;
+  EXPECT_NE(stale.payload.find("stale=1"), std::string::npos);
+  ASSERT_TRUE(shell.Run("close_design", {}).ok);
+  const CommandResult fresh = run();
+  ASSERT_TRUE(fresh.ok) << fresh.message;
+  EXPECT_NE(fresh.payload.find("stale=0"), std::string::npos);
 }
 
 // F0: LEF and tech LEF for the synth-to-PD bridge tests. The cell

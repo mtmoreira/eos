@@ -337,6 +337,25 @@ struct CommandContext {
   };
   SynthSession synth;
 
+  // Signoff session state (full-flow GUI unit F13): the record
+  // behind the Signoff panel. The verdicts come from the
+  // external PV evidence reports, parsed by eos::signoff_summary;
+  // this is the stored baseline the stale flag compares against:
+  // the design fingerprint and the report paths and content
+  // hashes from the last run. Interface session state like the
+  // timing and synth sessions: cleared by ResetProject on
+  // close_design, and a checkpoint restore does not bring it back.
+  struct SignoffSession {
+    bool has_record = false;
+    bool had_design = false;
+    std::string fingerprint;
+    std::string pv_path;
+    std::string lvs_path;
+    std::string pv_hash;
+    std::string lvs_hash;
+  };
+  SignoffSession signoff;
+
   // Wire-RC overrides (R1 step 2, Q6): per-layer (r_ohm_per_m,
   // c_f_per_m) values recorded by eos::set_wire_rc, consulted by
   // eos::repair_timing for their layer ahead of the tech-derived

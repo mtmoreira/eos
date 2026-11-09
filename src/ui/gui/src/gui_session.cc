@@ -212,6 +212,7 @@ static SessionView::ResultDestination NavigationForCommand(
       name == "check_timing") {
     return Destination::kTiming;
   }
+  if (name == "signoff_summary") return Destination::kSignoff;
   if (name == "report_clock" || name == "report_constraint" ||
       name == "report_analysis_coverage" || name == "report_qor" ||
       name == "report_bottleneck") {
@@ -458,6 +459,14 @@ void SessionView::RefreshPlacement() {
       registry_.Dispatch(context_, "place_summary", {});
   if (!result.ok || !placement_.LoadPayload(result.payload)) {
     placement_.Clear();
+  }
+}
+
+void SessionView::RefreshSignoff() {
+  const CommandResult result =
+      registry_.Dispatch(context_, "signoff_summary", {});
+  if (!result.ok || !signoff_.LoadPayload(result.payload)) {
+    signoff_.Clear();
   }
 }
 

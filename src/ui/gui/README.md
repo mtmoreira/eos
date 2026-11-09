@@ -104,6 +104,22 @@ hierarchy navigation, the Floorplan stage button, and a
 successful close_design take them back. The model refreshes on
 every window refresh: the query is a cheap database walk plus
 the stored place record, so no timing-key guard is needed.
+F13 adds the Signoff tab to the right panels: the
+signoff_summary registry query over the external PV evidence
+reports (docs/gcd-pv-results.md and docs/gcd-lvs-magic.md by
+default), the SignoffModel, and the Signoff tab rendering the
+DRC, LVS, and antenna verdicts with their report paths, the
+per-family DRC counts, the per-path LVS comparison, the named
+discrepancies, and the design fingerprint. A successful
+signoff_summary dispatch takes the user there, and the Signoff
+stage button takes them there too once verdicts are loaded. The
+model refreshes on every window refresh: the query parses two
+evidence documents and walks the live design for its
+fingerprint, so no key guard is needed. When the design
+changes after the verdicts were recorded, the tab shows STALE
+until the checks are re-run; a missing or unparseable report
+fails the query fast with the path named, and the tab shows no
+verdicts rather than an empty panel.
 U6 delivers console command entry plus session persistence: the
 console gains an entry line that takes one registry command per
 Return and dispatches it through the session, so the stepper,

@@ -17,6 +17,7 @@
 #include "eos/ui/gui.h"
 #include "eos/ui/issues.h"
 #include "eos/ui/panels.h"
+#include "eos/ui/signoff.h"
 #include "eos/ui/timing.h"
 
 namespace eos::ui {
@@ -266,6 +267,70 @@ std::string RenderTiming(const TimingModel& timing) {
   return out;
 }
 
+std::string IssueKindText(const std::string& kind) {
+  if (kind == "extraction_artifact") return "extraction artifact";
+  if (kind == "resolved_artifact") {
+    return "resolved as an extraction artifact";
+  }
+  return kind;
+}
+
+std::string RenderSignoff(const SignoffModel& signoff) {
+  if (!signoff.Loaded()) {
+    return "(no signoff verdicts yet: run eos::signoff_summary first)";
+  }
+  std::string out;
+  if (signoff.Stale()) {
+    out += "STALE: the design changed since these verdicts were "
+           "recorded. Re-run the checks and refresh.\n";
+  }
+  out += "DRC: ";
+  out += signoff.DrcPass() ? "PASS" : "FAIL";
+  out += ", " + std::to_string(signoff.DrcViolations()) +
+         " violations in " + std::to_string(signoff.DrcCategories()) +
+         " categories (" + signoff.PvReport() + ")\n";
+  for (const SignoffDrcFamily& family : signoff.DrcFamilies()) {
+    out += "  " + family.family + ": " +
+           std::to_string(family.categories) + " categories, " +
+           std::to_string(family.violations) + " violations\n";
+  }
+  out += "LVS: ";
+  out += signoff.LvsPass() ? "PASS" : "NOT CLEAN";
+  out += " (" + signoff.PvReport() + ", " + signoff.LvsReport() + ")\n";
+  for (const SignoffLvsPath& path : signoff.LvsPaths()) {
+    out += "  " + path.path + ": " +
+           std::to_string(path.classes_equivalent) + " of " +
+           std::to_string(path.classes_compared) +
+           " classes equivalent";
+    if (path.has_fingers) {
+      out += ", " + std::to_string(path.fingers_extracted) +
+             " fingers vs " + std::to_string(path.fingers_reference);
+    }
+    out += path.pass ? ": PASS\n" : ": NOT CLEAN\n";
+  }
+  for (const SignoffLvsIssue& issue : signoff.LvsIssues()) {
+    out += "  " + issue.issue + " (" + issue.path + "): " +
+           IssueKindText(issue.kind);
+    if (issue.cell != "none") out += ", " + issue.cell;
+    out += "\n";
+  }
+  if (signoff.HasResidual()) {
+    const SignoffLvsResidual& residual = signoff.Residual();
+    out += "  Residual (magic): " + residual.cell + ", " +
+           std::to_string(residual.transistors) + " transistors in " +
+           std::to_string(residual.instances) + " instances, cause " +
+           residual.cause + "\n";
+  }
+  out += "Antenna: ";
+  out += signoff.AntennaPass() ? "PASS" : "FAIL";
+  out += ", " + std::to_string(signoff.AntennaNetViolations()) +
+         " net violations, " +
+         std::to_string(signoff.AntennaPinViolations()) +
+         " pin violations (" + signoff.PvReport() + ")\n";
+  out += "Fingerprint: " + signoff.Fingerprint() + "\n";
+  return out;
+}
+
 std::string RenderMessages(const std::vector<std::string>& messages) {
   if (messages.empty()) return "(no messages)";
   std::string out;
@@ -419,6 +484,7 @@ PanelsView::PanelsView(SessionView& view, QWidget* parent)
   messages_->setReadOnly(true);
   messages_layout->addWidget(messages_, 1);
   addTab(messages_tab, "Messages");
+  signoff_ = AddTab(this, "Signoff");
   // No Schematic tab here: the schematic lives in the center
   // panel when the diagram level is a leaf. An issue click
   // highlights the offending gate there through the highlight
@@ -434,6 +500,8 @@ void PanelsView::Refresh() {
   timing_->setPlainText(
       QString::fromStdString(RenderTiming(view_.Timing())));
   optlog_->setPlainText(QString::fromStdString(RenderOptLog(panels)));
+  signoff_->setPlainText(
+      QString::fromStdString(RenderSignoff(view_.Signoff())));
   RefreshMessages();
 }
 

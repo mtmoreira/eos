@@ -23,6 +23,7 @@
 #include "eos/ui/placement.h"
 #include "eos/ui/registry.h"
 #include "eos/ui/schematic.h"
+#include "eos/ui/signoff.h"
 #include "eos/ui/timing.h"
 
 namespace eos::ui {
@@ -279,6 +280,23 @@ class SessionView {
   // refresh, like the floorplan refresh.
   void RefreshPlacement();
 
+  // Signoff model, refreshed from the live session (see
+  // RefreshSignoff). The Signoff panel reads this: the DRC,
+  // LVS, and antenna verdicts parsed from the external PV
+  // evidence reports, with the stale flag, the report paths,
+  // and the design fingerprint.
+  const SignoffModel& Signoff() const { return signoff_; }
+
+  // Re-reads the signoff model from the live session:
+  // dispatches signoff_summary WITHOUT an echo line (a model
+  // refresh is not a user action) and rebuilds the model when
+  // the reports parse; clears it otherwise, or when the query
+  // fails, so stale verdicts never linger. The query parses
+  // two evidence documents and walks the live design for its
+  // fingerprint, so it runs on every refresh, like the
+  // floorplan refresh.
+  void RefreshSignoff();
+
   // Where a just-run command's results live, for the window to
   // navigate to after the command: the panel tab or center view
   // that shows them, or nowhere when the command's results have
@@ -297,6 +315,7 @@ class SessionView {
     kOptLog,
     kSynthesis,
     kCenter,
+    kSignoff,
   };
 
   // Returns the pending navigation and clears it.
@@ -413,6 +432,7 @@ class SessionView {
   std::string timing_key_;
   FloorplanModel floorplan_;
   PlacementModel placement_;
+  SignoffModel signoff_;
   // The center view the user last chose: true for the
   // floorplan canvas, false for the hierarchy views. Set by a
   // successful floorplan dispatch and by explicit stage

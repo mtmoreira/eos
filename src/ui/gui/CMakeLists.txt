@@ -16,6 +16,7 @@ add_library(eda_ui_gui STATIC
   src/panels.cc
   src/placement.cc
   src/schematic.cc
+  src/signoff.cc
   src/timing.cc)
 target_include_directories(eda_ui_gui PUBLIC include)
 target_link_libraries(eda_ui_gui PUBLIC eda_ui_registry)

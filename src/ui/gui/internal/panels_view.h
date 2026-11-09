@@ -2,8 +2,9 @@
 //
 // Built only when Qt6 is found at configure time. The widget is
 // thin over the PanelsModel, the IssuesModel, the TimingModel,
-// and the dispatch message log: it renders six tabs (Issues,
-// Sources, Results, Timing, Opt log, Messages) and keeps no panel state of its own,
+// the SignoffModel, and the dispatch message log: it renders
+// seven tabs (Issues, Sources, Results, Timing, Opt log,
+// Messages, Signoff) and keeps no panel state of its own,
 // except the issues table's content signature (so a refresh
 // that changes nothing keeps the table, and the row selection,
 // as it is). The schematic is not a tab here: it lives in the
@@ -30,13 +31,13 @@ class PanelsView : public QTabWidget {
  public:
   explicit PanelsView(SessionView& view, QWidget* parent = nullptr);
 
-  // Re-renders all six tabs from the models and the message
+  // Re-renders all seven tabs from the models and the message
   // log. Called after any session change, via
   // MainWindow::Refresh.
   void Refresh();
 
   // Shows one tab by index: 0 Issues, 1 Sources, 2 Results,
-  // 3 Timing, 4 Opt log, 5 Messages. The stepper maps its steps onto
+  // 3 Timing, 4 Opt log, 5 Messages, 6 Signoff. The stepper maps its steps onto
   // Issues, Sources, and Opt log, so clicking a step shows
   // that step's outputs. Out-of-range indexes are ignored.
   void ShowTab(int index);
@@ -83,6 +84,7 @@ class PanelsView : public QTabWidget {
   QPlainTextEdit* timing_ = nullptr;
   QPlainTextEdit* optlog_ = nullptr;
   QPlainTextEdit* messages_ = nullptr;
+  QPlainTextEdit* signoff_ = nullptr;
   std::function<void()> on_action_;
   std::function<void(const std::string&)> on_highlight_gate_;
 };

@@ -308,6 +308,11 @@ modules:
     path: src/pv/extract
     target: eda_pv_extract
     adopted: true
+  - name: signoff
+    layer: L4
+    path: src/pv/signoff
+    target: eda_pv_signoff
+    adopted: false
   - name: transactions
     layer: L4
     path: src/eco/transactions
