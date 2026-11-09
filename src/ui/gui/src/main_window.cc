@@ -61,9 +61,11 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   // while any elaboration error exists (backend finding 1).
   // Synthesis is a button too: it stays disabled until
   // elaboration is done, and shows the Results tab's synthesis
-  // section. Elaboration and Floorplan are flat buttons, not labels: the
+  // section. Place is a button too: it stays disabled until a
+  // placement is loaded, and shows the placement canvas.
+  // Elaboration, Floorplan, and Place are flat buttons, not labels: the
   // user switches the center between the hierarchy views and
-  // the floorplan canvas there. The other later stages stay
+  // the floorplan or placement canvas there. The other later stages stay
   // greyed labels until their units land.
   auto* stages = new QWidget(root);
   auto* stages_layout = new QHBoxLayout(stages);
@@ -73,6 +75,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   stages_layout->addWidget(elaboration_button_);
   connect(elaboration_button_, &QPushButton::clicked, [this]() {
     view_.ShowFloorplan(false);
+    view_.ShowPlacement(false);
     Refresh();
   });
   for (const char* stage : kLaterStages) {
@@ -95,7 +98,20 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       floorplan_button_->setEnabled(false);
       stages_layout->addWidget(floorplan_button_);
       connect(floorplan_button_, &QPushButton::clicked, [this]() {
+        view_.ShowPlacement(false);
         view_.ShowFloorplan(true);
+        Refresh();
+      });
+      continue;
+    }
+    if (std::string(stage) == "Place") {
+      placement_button_ = new QPushButton(stage, stages);
+      placement_button_->setFlat(true);
+      placement_button_->setEnabled(false);
+      stages_layout->addWidget(placement_button_);
+      connect(placement_button_, &QPushButton::clicked, [this]() {
+        view_.ShowFloorplan(false);
+        view_.ShowPlacement(true);
         Refresh();
       });
       continue;
@@ -143,10 +159,11 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   browser_ = new HierarchyBrowser(view_, middle);
   browser_->SetSelectionCallback([this]() {
     // Hierarchy navigation shows the hierarchy views: it
-    // clears the floorplan stage, so a click in the tree never
-    // leaves the user on a floorplan canvas for a different
-    // level.
+    // clears the floorplan and placement stages, so a click in
+    // the tree never leaves the user on a floorplan or
+    // placement canvas for a different level.
     view_.ShowFloorplan(false);
+    view_.ShowPlacement(false);
     view_.SetDiagramLevel(view_.SelectedHierarchyPath());
     Refresh();
   });
@@ -350,6 +367,7 @@ void MainWindow::Refresh() {
       break;
     case SessionView::ResultDestination::kCenter:
       view_.ShowFloorplan(false);
+      view_.ShowPlacement(false);
       break;
   }
   view_.RefreshHierarchy();
@@ -359,6 +377,7 @@ void MainWindow::Refresh() {
   view_.RefreshIssues();
   view_.RefreshTiming();
   view_.RefreshFloorplan();
+  view_.RefreshPlacement();
   view_.RefreshLog();
   browser_->Refresh();
   center_->Refresh();
@@ -380,20 +399,23 @@ void MainWindow::RefreshSteps() {
       checkpoint.empty() ? "Checkpoint: none"
                          : "Checkpoint: " + checkpoint));
   // The stage buttons show which center view is active: bold
-  // for the one showing, normal for the other. Floorplan stays
+  // for the one showing, normal for the others. Floorplan stays
   // disabled until a floorplan is loaded, and its label carries
   // the error count while any elaboration error exists.
   // Synthesis stays disabled until elaboration is done, and
   // stays enabled once it is: the flag comes from the live
   // session record, so a later refresh never disables it while
-  // the design is still elaborated.
+  // the design is still elaborated. Place stays disabled until
+  // a placement is loaded.
   if (synthesis_button_ != nullptr) {
     synthesis_button_->setEnabled(view_.ElaborateStep() ==
                                  StepStatus::kDone);
   }
   if (elaboration_button_ != nullptr) {
     elaboration_button_->setStyleSheet(
-        view_.ShowingFloorplan() ? "" : "font-weight: bold;");
+        view_.ShowingFloorplan() || view_.ShowingPlacement()
+            ? ""
+            : "font-weight: bold;");
   }
   if (floorplan_button_ != nullptr) {
     const int errors = view_.Issues().ErrorCount();
@@ -403,6 +425,11 @@ void MainWindow::RefreshSteps() {
     floorplan_button_->setEnabled(view_.Floorplan().Loaded());
     floorplan_button_->setStyleSheet(
         view_.ShowingFloorplan() ? "font-weight: bold;" : "");
+  }
+  if (placement_button_ != nullptr) {
+    placement_button_->setEnabled(view_.Placement().Loaded());
+    placement_button_->setStyleSheet(
+        view_.ShowingPlacement() ? "font-weight: bold;" : "");
   }
 }
 

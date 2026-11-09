@@ -36,12 +36,18 @@ using foundation::Status;
 
 // One instance of the top block, as the ECO adapters see it: its
 // name, its master's name, and its placed location in database
-// units (the DEF distance units of the design).
+// units (the DEF distance units of the design). Width and height
+// are the master's size in database units, from the library
+// (full-flow GUI unit F4): the placement canvas draws each
+// instance as the rectangle (x, y, x + width, y + height), the
+// same geometry the placer's own overlap check uses.
 struct OdbInstanceInfo {
   std::string name;
   std::string master;
   int x = 0;
   int y = 0;
+  int width = 0;
+  int height = 0;
 };
 
 // One signal pin of a master cell, with its direction.

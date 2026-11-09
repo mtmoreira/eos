@@ -1,6 +1,7 @@
 // gui: SessionView unit tests (Qt-free except the guarded
 // splash timing tests below; no engines needed).
 #include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -63,6 +64,8 @@ using eos::ui::FaninCone;
 using eos::ui::FanoutCone;
 using eos::ui::FloorplanModel;
 using eos::ui::FloorplanRect;
+using eos::ui::PlacementModel;
+using eos::ui::PlacementRect;
 using eos::ui::GateSymbol;
 using eos::ui::GuiIssue;
 using eos::ui::HierarchyModel;
@@ -136,6 +139,39 @@ void RegisterFloorplanCommand(CommandRegistry& registry,
   EXPECT_TRUE(status.ok());
 }
 
+// A place_summary payload for the placed optloop design: four
+// placed instances (three AND2, one BUF) in a 5000 by 3200
+// core, HPWL 12345, no overlaps, and a measured post-place
+// slack of 0.05 ns for the func_tt scene. The instance
+// rectangles are 460 by 2720, the BUFX2 master size in the
+// registry fixture, kept here as the AND2/BUF sizes for the
+// demo design.
+const char kPlacementPayload[] =
+    "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=4 total=4 "
+    "hpwl=12345 overlaps=0\n"
+    "inst name=u1 master=AND2 x=200 y=200 w=460 h=2720\n"
+    "inst name=u2 master=AND2 x=900 y=200 w=460 h=2720\n"
+    "inst name=u3 master=AND2 x=1600 y=200 w=460 h=2720\n"
+    "inst name=u4 master=BUF x=2300 y=200 w=460 h=2720\n"
+    "slack scene=func_tt worst_slack_ns=0.05\n";
+
+void RegisterPlacementCommand(CommandRegistry& registry,
+                              const std::string& payload, bool ok,
+                              int* calls = nullptr) {
+  auto status = registry.Register(
+      "place_summary", "place_summary",
+      [payload, ok, calls](CommandContext&,
+                           const std::vector<std::string>&) {
+        if (calls != nullptr) ++(*calls);
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no placement");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
 TEST(GuiSessionView, DispatchEchoesAndRuns) {
   CommandRegistry registry;
   RegisterPing(registry);
@@ -187,6 +223,7 @@ TEST(GuiSessionView, StepStatesFollowSessionFlags) {
   EXPECT_EQ(view.ElaborateStep(), StepStatus::kPending);
   EXPECT_EQ(view.GenericStep(), StepStatus::kPending);
   EXPECT_EQ(view.SynthesisStep(), StepStatus::kPending);
+  EXPECT_EQ(view.PlacementStep(), StepStatus::kPending);
   context.synth.parsed = true;
   EXPECT_EQ(view.ReadStep(), StepStatus::kDone);
   context.synth.elaborated = true;
@@ -195,6 +232,8 @@ TEST(GuiSessionView, StepStatesFollowSessionFlags) {
   EXPECT_EQ(view.GenericStep(), StepStatus::kDone);
   context.synth.mapped = true;
   EXPECT_EQ(view.SynthesisStep(), StepStatus::kDone);
+  context.place.placed = true;
+  EXPECT_EQ(view.PlacementStep(), StepStatus::kDone);
 }
 
 TEST(GuiSessionView, DispatchSeesSharedContext) {
@@ -2671,6 +2710,7 @@ using eos::ui::CenterView;
 using eos::ui::MainWindow;
 using eos::ui::PanelsView;
 using eos::ui::FloorplanDiagram;
+using eos::ui::PlacementDiagram;
 using eos::ui::SchematicDiagram;
 
 // Widget rendering tests: both diagrams sit on a dark
@@ -3372,6 +3412,130 @@ TEST(FloorplanModel, ReloadReplacesPreviousFloorplan) {
   EXPECT_TRUE(model.Pins().empty());
 }
 
+TEST(PlacementModel, ParsesFullPayload) {
+  PlacementModel model;
+  ASSERT_TRUE(model.LoadPayload(kPlacementPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.DieArea(), (PlacementRect{0, 0, 5000, 5000}));
+  EXPECT_EQ(model.CoreArea(), (PlacementRect{0, 0, 5000, 3200}));
+  EXPECT_EQ(model.Placed(), 4u);
+  EXPECT_EQ(model.Total(), 4u);
+  EXPECT_EQ(model.Hpwl(), 12345);
+  EXPECT_EQ(model.Overlaps(), 0u);
+  ASSERT_EQ(model.Instances().size(), 4u);
+  EXPECT_EQ(model.Instances()[0].name, "u1");
+  EXPECT_EQ(model.Instances()[0].master, "AND2");
+  EXPECT_EQ(model.Instances()[0].rect, (PlacementRect{200, 200, 660, 2920}));
+  EXPECT_EQ(model.Instances()[3].name, "u4");
+  EXPECT_EQ(model.Instances()[3].master, "BUF");
+  EXPECT_EQ(model.Instances()[3].rect,
+            (PlacementRect{2300, 200, 2760, 2920}));
+  ASSERT_EQ(model.Slacks().size(), 1u);
+  EXPECT_EQ(model.Slacks()[0].scene, "func_tt");
+  EXPECT_DOUBLE_EQ(model.Slacks()[0].worst_slack_ns, 0.05);
+}
+
+TEST(PlacementModel, ParsesPayloadWithoutSlack) {
+  PlacementModel model;
+  ASSERT_TRUE(model.LoadPayload(
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=2 total=2 "
+      "hpwl=100 overlaps=0\n"
+      "inst name=u1 master=BUFX2 x=1000 y=1000 w=460 h=2720\n"
+      "inst name=u2 master=BUFX2 x=2000 y=1000 w=460 h=2720\n"));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.Instances().size(), 2u);
+  EXPECT_TRUE(model.Slacks().empty());
+}
+
+TEST(PlacementModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      // No header.
+      "inst name=u1 master=AND2 x=200 y=200 w=460 h=2720\n",
+      // Wrong tag.
+      "floorplan die=0,0,5000,5000 core=0,0,5000,3200 placed=4 total=4 "
+      "hpwl=12345 overlaps=0\n",
+      // Unknown header key.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=4 total=4 "
+      "hpwl=12345 overlaps=0 extra=1\n",
+      // Missing header key.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=4 total=4 "
+      "hpwl=12345\n",
+      // Placed exceeds total.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=5 total=4 "
+      "hpwl=12345 overlaps=0\n",
+      // Instance count mismatch.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=4 total=4 "
+      "hpwl=12345 overlaps=0\n"
+      "inst name=u1 master=AND2 x=200 y=200 w=460 h=2720\n",
+      // Duplicate instance name.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=2 total=2 "
+      "hpwl=100 overlaps=0\n"
+      "inst name=u1 master=AND2 x=200 y=200 w=460 h=2720\n"
+      "inst name=u1 master=BUF x=900 y=200 w=460 h=2720\n",
+      // Empty die rectangle.
+      "placement die=0,0,0,0 core=0,0,5000,3200 placed=4 total=4 "
+      "hpwl=12345 overlaps=0\n",
+      // Empty instance rectangle.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=1 total=1 "
+      "hpwl=100 overlaps=0\n"
+      "inst name=u1 master=AND2 x=200 y=200 w=0 h=2720\n",
+      // Non-integer HPWL.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=4 total=4 "
+      "hpwl=many overlaps=0\n",
+      // Short rectangle.
+      "placement die=0,0,5000 core=0,0,5000,3200 placed=4 total=4 "
+      "hpwl=12345 overlaps=0\n",
+      // Unknown line tag.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=4 total=4 "
+      "hpwl=12345 overlaps=0\n"
+      "net name=n1\n",
+      // Duplicate slack scene.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=1 total=1 "
+      "hpwl=100 overlaps=0\n"
+      "inst name=u1 master=AND2 x=200 y=200 w=460 h=2720\n"
+      "slack scene=func_tt worst_slack_ns=0.05\n"
+      "slack scene=func_tt worst_slack_ns=0.06\n",
+      // Non-numeric slack.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=1 total=1 "
+      "hpwl=100 overlaps=0\n"
+      "inst name=u1 master=AND2 x=200 y=200 w=460 h=2720\n"
+      "slack scene=func_tt worst_slack_ns=fast\n",
+      // Empty line in the middle.
+      "placement die=0,0,5000,5000 core=0,0,5000,3200 placed=4 total=4 "
+      "hpwl=12345 overlaps=0\n"
+      "\n"
+      "inst name=u1 master=AND2 x=200 y=200 w=460 h=2720\n",
+  };
+  for (const char* payload : bad) {
+    PlacementModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+}
+
+TEST(PlacementModel, ReloadReplacesPreviousPlacement) {
+  PlacementModel model;
+  ASSERT_TRUE(model.LoadPayload(kPlacementPayload));
+  ASSERT_EQ(model.Instances().size(), 4u);
+  ASSERT_TRUE(model.LoadPayload(
+      "placement die=0,0,10000,10000 core=0,0,9660,8160 placed=2 total=2 "
+      "hpwl=100 overlaps=0\n"
+      "inst name=u1 master=BUFX2 x=1000 y=1000 w=460 h=2720\n"
+      "inst name=u2 master=BUFX2 x=2000 y=1000 w=460 h=2720\n"));
+  EXPECT_EQ(model.DieArea(), (PlacementRect{0, 0, 10000, 10000}));
+  EXPECT_EQ(model.Instances().size(), 2u);
+  EXPECT_EQ(model.Instances()[1].name, "u2");
+  EXPECT_TRUE(model.Slacks().empty());
+  // A malformed reload leaves the previous placement untouched.
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.Instances().size(), 2u);
+  model.Clear();
+  EXPECT_FALSE(model.Loaded());
+  EXPECT_TRUE(model.Instances().empty());
+  EXPECT_TRUE(model.Slacks().empty());
+}
+
 void RegisterIssuesCommand(CommandRegistry& registry,
                            const std::string& payload, bool ok,
                            int* calls = nullptr) {
@@ -3806,6 +3970,114 @@ TEST(FloorplanOutline, EmptyPlaceholderIsWhite) {
   EXPECT_EQ(texts[0]->brush().color(), Qt::white);
   EXPECT_EQ(diagram.CountsText(),
             "(no floorplan yet: run eos::floorplan first)");
+}
+
+struct OutlinePlacementView {
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view;
+  OutlinePlacementView() : view(registry, context) {
+    OutlineTestApp();
+    RegisterPlacementCommand(registry, kPlacementPayload, true);
+    view.RefreshPlacement();
+  }
+};
+
+TEST(PlacementOutline, DrawsDieCoreAndInstances) {
+  OutlinePlacementView fixture;
+  ASSERT_TRUE(fixture.view.Placement().Loaded());
+  PlacementDiagram diagram(fixture.view);
+  diagram.show();
+  QApplication::processEvents();
+  diagram.Refresh();
+  QApplication::processEvents();
+  const QGraphicsScene* scene = diagram.Scene();
+  ASSERT_NE(scene, nullptr);
+  EXPECT_EQ(diagram.CountsText(),
+            "Die: 0,0,5000,5000\nCore: 0,0,5000,3200\nPlaced: 4 / 4\n"
+            "HPWL: 12345\nOverlaps: 0\nfunc_tt worst slack: 0.05 ns\n"
+            "Masters:\nAND2: 3\nBUF: 1");
+  const std::vector<QGraphicsRectItem*> rects =
+      OutlineSceneItems<QGraphicsRectItem>(scene);
+  // Die, core, four instance outlines, four instance hover rects.
+  EXPECT_EQ(rects.size(), 10u);
+  std::size_t die = 0;
+  std::size_t core = 0;
+  std::size_t instances = 0;
+  std::size_t hover = 0;
+  // Scene items come back in stacking order, not payload
+  // order, so instance colors are keyed by the rect's left
+  // edge, which identifies the instance: u1 at 200, u2 at 900,
+  // u3 at 1600 (all AND2), u4 at 2300 (BUF).
+  std::map<qreal, QColor> color_by_left;
+  for (const QGraphicsRectItem* rect : rects) {
+    if (rect->pen().style() == Qt::NoPen) {
+      ++hover;
+      continue;
+    }
+    if (rect->pen().widthF() == 2 &&
+        OutlineRectNear(rect->rect(), QRectF(0, -5000, 5000, 5000))) {
+      EXPECT_EQ(rect->pen().color(), Qt::white);
+      EXPECT_EQ(rect->brush().style(), Qt::NoBrush);
+      ++die;
+    } else if (rect->pen().widthF() == 1 &&
+               OutlineRectNear(rect->rect(),
+                               QRectF(0, -3200, 5000, 3200))) {
+      EXPECT_EQ(rect->pen().color(), Qt::white);
+      EXPECT_EQ(rect->brush().style(), Qt::NoBrush);
+      ++core;
+    } else if (rect->pen().widthF() == 1 &&
+               std::abs(rect->rect().width() - 460) < 0.01 &&
+               std::abs(rect->rect().height() - 2720) < 0.01) {
+      // Instance rectangles carry their master's color on the
+      // outline and a light fill of the same color.
+      EXPECT_EQ(rect->brush().color().alpha(), 64);
+      EXPECT_EQ(rect->brush().color().rgb(),
+                rect->pen().color().rgb());
+      color_by_left[rect->rect().left()] = rect->pen().color();
+      ++instances;
+    }
+  }
+  EXPECT_EQ(die, 1u);
+  EXPECT_EQ(core, 1u);
+  EXPECT_EQ(instances, 4u);
+  EXPECT_EQ(hover, 4u);
+  // Same master, same color; different masters, different
+  // colors.
+  ASSERT_EQ(color_by_left.size(), 4u);
+  EXPECT_EQ(color_by_left[200], color_by_left[900]);
+  EXPECT_EQ(color_by_left[200], color_by_left[1600]);
+  EXPECT_NE(color_by_left[200], color_by_left[2300]);
+  // Every instance is labelled by name, in white text.
+  const std::vector<QGraphicsSimpleTextItem*> texts =
+      OutlineSceneItems<QGraphicsSimpleTextItem>(scene);
+  ASSERT_EQ(texts.size(), 4u);
+  for (const QGraphicsSimpleTextItem* text : texts) {
+    EXPECT_EQ(text->brush().color(), Qt::white) << text->text().toStdString();
+  }
+  std::vector<std::string> names;
+  for (const QGraphicsSimpleTextItem* text : texts) {
+    names.push_back(text->text().toStdString());
+  }
+  std::sort(names.begin(), names.end());
+  EXPECT_EQ(names, (std::vector<std::string>{"u1", "u2", "u3", "u4"}));
+}
+
+TEST(PlacementOutline, EmptyPlaceholderIsWhite) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  CommandContext context;
+  SessionView view(registry, context);
+  PlacementDiagram diagram(view);
+  diagram.Refresh();
+  const std::vector<QGraphicsSimpleTextItem*> texts =
+      OutlineSceneItems<QGraphicsSimpleTextItem>(diagram.Scene());
+  ASSERT_EQ(texts.size(), 1u);
+  EXPECT_EQ(texts[0]->text().toStdString(),
+            "(no placement yet: run eos::place first)");
+  EXPECT_EQ(texts[0]->brush().color(), Qt::white);
+  EXPECT_EQ(diagram.CountsText(),
+            "(no placement yet: run eos::place first)");
 }
 
 TEST(SchematicOutline, MuxDrawsTrapezoid) {
@@ -4773,6 +5045,100 @@ TEST(GuiSessionView, RefreshFloorplanClearsWhenQueryStartsFailing) {
   ok = false;
   view.RefreshFloorplan();
   EXPECT_FALSE(view.Floorplan().Loaded());
+}
+
+TEST(GuiSessionView, RefreshPlacementPopulatesModelWithoutEcho) {
+  CommandRegistry registry;
+  RegisterPlacementCommand(registry, kPlacementPayload, true);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshPlacement();
+  EXPECT_TRUE(view.Placement().Loaded());
+  ASSERT_EQ(view.Placement().Instances().size(), 4u);
+  EXPECT_EQ(view.Placement().Instances()[0].name, "u1");
+  ASSERT_EQ(view.Placement().Slacks().size(), 1u);
+  EXPECT_EQ(view.Placement().Slacks()[0].scene, "func_tt");
+  EXPECT_TRUE(view.EchoLog().empty());
+}
+
+TEST(GuiSessionView, RefreshPlacementRunsQueryOnEveryRefresh) {
+  CommandRegistry registry;
+  int calls = 0;
+  RegisterPlacementCommand(registry, kPlacementPayload, true, &calls);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshPlacement();
+  EXPECT_EQ(calls, 1);
+  // No timing-key guard here: the query is a cheap database
+  // walk plus the stored place record, so it runs on every
+  // refresh, like the floorplan refresh.
+  view.RefreshPlacement();
+  EXPECT_EQ(calls, 2);
+}
+
+TEST(GuiSessionView, RefreshPlacementClearsOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterPlacementCommand(registry, "", false);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshPlacement();
+  EXPECT_FALSE(view.Placement().Loaded());
+}
+
+TEST(GuiSessionView, RefreshPlacementClearsOnMalformedPayload) {
+  CommandRegistry registry;
+  RegisterPlacementCommand(registry, "garbage\n", true);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshPlacement();
+  EXPECT_FALSE(view.Placement().Loaded());
+}
+
+TEST(GuiSessionView, RefreshPlacementClearsWhenQueryStartsFailing) {
+  CommandRegistry registry;
+  std::string payload = kPlacementPayload;
+  bool ok = true;
+  auto status = registry.Register(
+      "place_summary", "place_summary",
+      [&payload, &ok](CommandContext&,
+                      const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no placement");
+        }
+        return CommandResult::Ok(payload);
+      });
+  ASSERT_TRUE(status.ok());
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshPlacement();
+  ASSERT_TRUE(view.Placement().Loaded());
+  ok = false;
+  view.RefreshPlacement();
+  EXPECT_FALSE(view.Placement().Loaded());
+}
+
+TEST(GuiSessionView, DispatchPlaceShowsPlacementCenter) {
+  CommandRegistry registry;
+  auto place_status = registry.Register(
+      "place", "place",
+      [](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Ok("placed=4 total=4 hpwl=12345 overlaps=0");
+      });
+  ASSERT_TRUE(place_status.ok());
+  auto close_status = registry.Register(
+      "close_design", "close_design",
+      [](CommandContext&, const std::vector<std::string>&) {
+        return CommandResult::Ok("");
+      });
+  ASSERT_TRUE(close_status.ok());
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_FALSE(view.ShowingPlacement());
+  ASSERT_TRUE(view.Dispatch("place", {}).ok);
+  EXPECT_TRUE(view.ShowingPlacement());
+  ASSERT_TRUE(view.Dispatch("close_design", {}).ok);
+  EXPECT_FALSE(view.ShowingPlacement());
 }
 
 TEST(GuiSessionView, DispatchFloorplanShowsFloorplanCenter) {

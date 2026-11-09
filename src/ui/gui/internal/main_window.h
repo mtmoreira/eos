@@ -35,11 +35,13 @@ class MainWindow : public QMainWindow {
   explicit MainWindow(SessionView& view, QWidget* parent = nullptr);
 
   // Re-reads step state, hierarchy, diagram, schematic, panels,
-  // issues, timing, floorplan, and the log into the widgets.
-  // Called after any session change. The center shows the block
-  // diagram for a non-leaf level, the schematic for a leaf
-  // level, and the floorplan canvas when the user chose the
-  // floorplan stage and the floorplan model is loaded.
+  // issues, timing, floorplan, placement, and the log into the
+  // widgets. Called after any session change. The center shows
+  // the block diagram for a non-leaf level, the schematic for a
+  // leaf level, the floorplan canvas when the user chose the
+  // floorplan stage and the floorplan model is loaded, and the
+  // placement canvas when the user chose the placement stage
+  // and the placement model is loaded.
   void Refresh();
 
   // Shows a hidden window again (U6): the terminal reopen
@@ -102,13 +104,15 @@ class MainWindow : public QMainWindow {
   QLabel* checkpoint_label_ = nullptr;
   // Stage buttons: Elaboration shows the hierarchy views,
   // Floorplan shows the floorplan canvas when a floorplan is
-  // loaded. Synthesis shows the Results tab's synthesis
+  // loaded, Place shows the placement canvas when a placement
+  // is loaded. Synthesis shows the Results tab's synthesis
   // section once elaboration is done; it stays a plain
   // navigation button, with no bold state. The other later
   // stages stay greyed labels until their units land.
   QPushButton* elaboration_button_ = nullptr;
   QPushButton* synthesis_button_ = nullptr;
   QPushButton* floorplan_button_ = nullptr;
+  QPushButton* placement_button_ = nullptr;
   HierarchyBrowser* browser_ = nullptr;
   CenterView* center_ = nullptr;
   PanelsView* panels_ = nullptr;

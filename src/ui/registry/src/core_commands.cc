@@ -300,6 +300,7 @@ void ResetProject(CommandContext& ctx) {
   ctx.user_attributes.clear();
   ctx.timing = CommandContext::TimingSession();
   ctx.synth = CommandContext::SynthSession();
+  ctx.place = CommandContext::PlaceSession();
   ctx.wire_rc_overrides.clear();
   ctx.engine_log_lines.clear();
 }
@@ -7533,9 +7534,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         // placed database out as a Verilog netlist, so its
         // estimated parasitics are topology-based and do not yet
         // use placed coordinates; P6 extraction (SPEF) changes
-        // that.
+        // that. The per-scene slacks are collected here into
+        // scene_slacks as well, so the place record stored below
+        // carries the same numbers the payload reports (the
+        // place_summary query reads the record, never this
+        // payload text).
         bool from_odb = false;
         std::vector<analysis::SceneAnalysis> scenes;
+        std::vector<std::pair<std::string, double>> scene_slacks;
         if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
           payload += " sta_slack_ns=unavailable (" + bad->message + ")";
         } else if (!from_odb) {
@@ -7555,8 +7561,99 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               payload += " scene=" + result.scenario.name +
                          " worst_slack_ns=" +
                          MetricText(result.metrics, "worst_slack_ns");
+              const auto slack =
+                  result.metrics.find("worst_slack_ns");
+              if (slack != result.metrics.end()) {
+                scene_slacks.push_back(
+                    {result.scenario.name, slack->second.value});
+              }
             }
           }
+        }
+        // The place record (full-flow GUI unit F4): the numbers
+        // the place_summary query reports. Only a successful
+        // run stores it; a failed run leaves the previous
+        // record untouched, like run_timing and last_results.
+        ctx.place.placed = true;
+        ctx.place.placed_count = report.instance_placed_count;
+        ctx.place.total_count = report.instance_total_count;
+        ctx.place.hpwl_dbu = report.hpwl_dbu;
+        ctx.place.overlap_count = report.overlap_count;
+        ctx.place.timing_driven = report.timing_driven;
+        ctx.place.scene_slacks = std::move(scene_slacks);
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- place_summary (full-flow GUI unit F4) -------------------
+  // The structured placement query the GUI placement canvas
+  // reads: the die and core rectangles, the placed and total
+  // instance counts, HPWL, and overlap count from the last
+  // successful place run, one line per placed instance
+  // rectangle, and one line per scene the place run measured
+  // post-place slack for. It is a query, not a report: it runs
+  // no engine, writes no file, and changes no session state.
+  // The counts and slacks come from the session place record
+  // (stored by eos::place), never from the place payload text,
+  // so the query and the payload can never disagree. The
+  // rectangles come from the live database through the facade
+  // Instances(), which carries each master's width and height,
+  // and the die and core rectangles from the same floorplan
+  // geometry query F3 uses. It fails fast with the place
+  // command's own preconditions, and with "no placement" when
+  // no place run has succeeded in this session.
+  add("place_summary", "place_summary",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "place_summary")) {
+          return *bad;
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (!ctx.timing.odb->has_top_block()) {
+          return CommandResult::Fail(
+              Diag::kUnclosedDesign,
+              "no mapped design: the imported database holds no top "
+              "block");
+        }
+        if (!ctx.place.placed) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no placement: eos::place first");
+        }
+        pd::FloorplanGeometry geometry;
+        const foundation::Status status =
+            pd::QueryFloorplanGeometry(ctx.timing.odb->RawDatabase(),
+                                       &geometry);
+        if (!status.ok()) return FromStatus(status);
+        auto area_text = [](const std::array<int, 4>& area) {
+          return std::to_string(area[0]) + "," + std::to_string(area[1]) +
+                 "," + std::to_string(area[2]) + "," +
+                 std::to_string(area[3]);
+        };
+        std::string payload =
+            "placement die=" + area_text(geometry.die_area) +
+            " core=" + area_text(geometry.core_area) +
+            " placed=" + std::to_string(ctx.place.placed_count) +
+            " total=" + std::to_string(ctx.place.total_count) +
+            " hpwl=" + std::to_string(ctx.place.hpwl_dbu) +
+            " overlaps=" + std::to_string(ctx.place.overlap_count);
+        for (const db::OdbInstanceInfo& inst :
+             ctx.timing.odb->Instances()) {
+          payload += "\ninst name=" + inst.name +
+                     " master=" + inst.master +
+                     " x=" + std::to_string(inst.x) +
+                     " y=" + std::to_string(inst.y) +
+                     " w=" + std::to_string(inst.width) +
+                     " h=" + std::to_string(inst.height);
+        }
+        for (const auto& slack : ctx.place.scene_slacks) {
+          payload += "\nslack scene=" + slack.first +
+                     " worst_slack_ns=" + FormatNumber(slack.second);
         }
         return CommandResult::Ok(payload);
       });

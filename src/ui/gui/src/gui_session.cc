@@ -248,11 +248,19 @@ CommandResult SessionView::Dispatch(const std::string& name,
     } else if (name == "close_design") {
       checkpoint_.clear();
       center_floorplan_ = false;
+      center_placement_ = false;
     } else if (name == "floorplan") {
       // A successful floorplan takes the user to the
       // floorplan canvas: the center shows it on the next
       // refresh, once the model loads.
       center_floorplan_ = true;
+    } else if (name == "place") {
+      // A successful place takes the user to the placement
+      // canvas: the center shows it on the next refresh, once
+      // the model loads. It wins over the floorplan canvas
+      // while the placement model is loaded (see
+      // CenterView::Refresh).
+      center_placement_ = true;
     }
   }
   if (result.ok && (name == "read_verilog" || name == "read_filelist" ||
@@ -442,6 +450,14 @@ void SessionView::RefreshFloorplan() {
       registry_.Dispatch(context_, "floorplan_summary", {});
   if (!result.ok || !floorplan_.LoadPayload(result.payload)) {
     floorplan_.Clear();
+  }
+}
+
+void SessionView::RefreshPlacement() {
+  const CommandResult result =
+      registry_.Dispatch(context_, "place_summary", {});
+  if (!result.ok || !placement_.LoadPayload(result.payload)) {
+    placement_.Clear();
   }
 }
 

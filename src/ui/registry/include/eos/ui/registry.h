@@ -188,6 +188,36 @@ struct CommandContext {
   };
   TimingSession timing;
 
+  // Placement session state (full-flow GUI unit F4): the record
+  // of the most recent successful eos::place run, so the
+  // place_summary query can report the place payload's numbers
+  // (placed and total counts, HPWL, overlap count, per-scene
+  // post-place worst slack) without re-running the placer or
+  // the timing analysis. Like the timing and synthesis
+  // sessions, this is interface session state, not project
+  // state: it names a physical database the project
+  // checkpoint does not hold, it is cleared when the design
+  // closes (ResetProject), and a restore does not bring it
+  // back. Only a successful place run updates it; a failed
+  // place leaves the previous record untouched, exactly like
+  // a failed run_timing leaves last_results. The instance
+  // rectangles themselves are never stored here: they come
+  // from the live database at query time, so a later place
+  // run's geometry is what the query reports. The slacks are
+  // the post-place worst slacks the place run measured, one
+  // per scene it analyzed, in place-payload order; empty when
+  // the run had no timing session configured.
+  struct PlaceSession {
+    bool placed = false;
+    int placed_count = 0;
+    int total_count = 0;
+    long long hpwl_dbu = 0;
+    int overlap_count = 0;
+    bool timing_driven = false;
+    std::vector<std::pair<std::string, double>> scene_slacks;
+  };
+  PlaceSession place;
+
   // Synthesis session state (unit S1): the design the synthesis
   // commands have parsed, elaborated and generically optimized,
   // as one advancing state machine. Like the timing session,

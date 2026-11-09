@@ -89,6 +89,21 @@ takes them there too once a floorplan is loaded; hierarchy
 navigation takes them back to the hierarchy views. The model
 refreshes on every window refresh: the query is a cheap
 database walk, so no timing-key guard is needed.
+F4 adds the placement canvas to the center, as the fourth page
+of the center stack: the place_summary registry query over the
+live database plus the stored place record (die and core
+rectangles, placed and total counts, HPWL, overlap count, one
+rectangle per placed instance, and one post-place slack per
+scene the place run measured), the PlacementModel, and the
+PlacementDiagram rendering the die outline, the core outline,
+and one rectangle per placed instance, colored by master with
+a master legend, with the payload counts beside the canvas. A
+successful place dispatch takes the user there, and the Place
+stage button takes them there too once a placement is loaded;
+hierarchy navigation, the Floorplan stage button, and a
+successful close_design take them back. The model refreshes on
+every window refresh: the query is a cheap database walk plus
+the stored place record, so no timing-key guard is needed.
 U6 delivers console command entry plus session persistence: the
 console gains an entry line that takes one registry command per
 Return and dispatches it through the session, so the stepper,

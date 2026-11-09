@@ -85,12 +85,15 @@ eos::read_verilog optloop.v optloop
 eos::elaborate
 eos::synth_generic
 eos::synth_map -target area
+eos::read_sdc top.sdc
 eos::write_def optloop.def -lef ../../src/pd/rsz/tests/mock/eos_mock.lef -tlef ../../src/pd/rsz/tests/mock/eos_mock.tlef
 eos::read_lef ../../src/pd/rsz/tests/mock/eos_mock.tlef
 eos::read_lef ../../src/pd/rsz/tests/mock/eos_mock.lef
 eos::read_def optloop.def
 eos::floorplan
 eos::floorplan_summary
+eos::place
+eos::place_summary
 ```
 
 What you should see: `write_def` reports the design, the cell
@@ -106,7 +109,21 @@ structured payload: the die and core rectangles, one row
 rectangle, and one pin line per IO pin (six pins: the four
 inputs on the left edge, the two outputs on the right), with the
 counts in the header. It is the query the GUI floorplan canvas
-reads; see `docs/floorplan-view.md`.
+reads; see `docs/floorplan-view.md`. `place` reports the placed
+and total instance counts, HPWL, and overlap count, plus the
+post-place worst slack per scene when timing is configured
+(the chain reads `top.sdc` for that: a 1.25 ns virtual clock
+with zero input and output delays). `place_summary` reports
+the same placement as a structured payload: the die and core
+rectangles, one inst line per placed instance with its master
+size, and one slack line per measured scene. It is the query
+the GUI placement canvas reads; see `docs/placement-view.md`.
+On this demo the mock Liberty maps the optloop to 2 instances
+(a 4-input AND and a buffer), placed with HPWL 37266, no
+overlaps, and worst slack 0.9860799954 ns for func_tt. Without
+`read_sdc`, place still succeeds but reports
+`sta_slack_ns=unavailable`, and `place_summary` carries no
+slack line.
 
 This folder is reference data and documentation. It is outside the
 seven-layer code structure: it adds no CMake target and no test.
@@ -157,17 +174,30 @@ checkpoint.
 To see the floorplan canvas, continue in the same GUI session
 with the physical-flow chain above (the mock Liberty maps, so
 run the chain from the GUI console entry, one command per
-Return): `read_liberty`, `synth_map -target area`,
-`write_def`, the two `read_lef` commands, `read_def`, then
+Return): `read_liberty`, `synth_map -target area`, `read_sdc
+top.sdc`, `write_def`, the two `read_lef` commands, `read_def`, then
 `floorplan`. A successful `floorplan` takes the center to the
 floorplan canvas: the die rectangle with the single row inside
 it and the six IO pins on the boundary (four inputs on the left
 edge, two outputs on the right), with the counts beside it (die
-0,0,5000,5000, core 0,0,5000,5000, rows 1, IO placed 6 / 6).
+0,0,10000,10000, core 0,0,10000,6400, rows 1, IO placed 6 / 6).
 The Floorplan stage button in the stepper row lights up once
 the floorplan is loaded; clicking it shows the canvas again,
 and clicking a node in the hierarchy tree takes the center back
 to the hierarchy views.
+
+To see the placement canvas, continue in the same GUI session
+with `read_sdc top.sdc` (if not already run) and then `place`.
+A successful `place` takes the center to the placement canvas:
+the die and core outlines with the two placed instance
+rectangles inside, colored by master (the AND in one color,
+the buffer in another), with the counts beside it (die
+0,0,10000,10000, core 0,0,10000,6400, placed 2 / 2, HPWL
+37266, overlaps 0, func_tt worst slack 0.9860799954 ns). The
+Place stage button in the stepper row lights up once the
+placement is loaded; clicking it shows the canvas again, and
+clicking the Floorplan stage button or a node in the hierarchy
+tree takes the center back.
 
 To drive the same session from the terminal instead, type the
 commands at the terminal eos> prompt while the window is open;

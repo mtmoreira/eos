@@ -1,6 +1,6 @@
 // CenterView: the central panel of the main window.
 //
-// The center is one navigation stack with three pages. For a
+// The center is one navigation stack with four pages. For a
 // non-leaf hierarchy level it shows the block diagram for that
 // level; when the level is a leaf it shows the gate-level
 // schematic for the leaf module instead. The top level keeps
@@ -13,9 +13,19 @@
 // back) and the floorplan model is loaded, the center shows
 // the floorplan canvas instead: the die outline, the core
 // outline, the rows, and the IO pins, with the payload counts
-// beside the canvas.
+// beside the canvas. When the user has chosen the placement
+// stage (a successful place dispatch takes them there, the
+// Place stage button takes them there, a hierarchy navigation
+// or the Floorplan stage button takes them back) and the
+// placement model is loaded, the center shows the placement
+// canvas instead: the die and core outlines and one rectangle
+// per placed instance, colored by master, with the payload
+// counts and the master legend beside the canvas. Placement
+// wins over floorplan while its model is loaded: placement is
+// the later stage, so a successful place takes the user past
+// the floorplan canvas.
 //
-// The three pages share the same navigation callbacks (block
+// The four pages share the same navigation callbacks (block
 // click, breadcrumb) through a single action callback, so the
 // main window refreshes the same way whichever page is
 // showing.
@@ -30,6 +40,7 @@
 #include "eos/ui/gui.h"
 #include "block_diagram.h"
 #include "floorplan_diagram.h"
+#include "placement_diagram.h"
 #include "schematic_diagram.h"
 
 namespace eos::ui {
@@ -38,11 +49,13 @@ class CenterView : public QWidget {
  public:
   explicit CenterView(SessionView& view, QWidget* parent = nullptr);
 
-  // Refreshes all three pages from the session and shows the
-  // page for the current state: the floorplan canvas when the
-  // user chose the floorplan stage and the floorplan model is
-  // loaded, the schematic when the level is a leaf, the block
-  // diagram otherwise.
+  // Refreshes all four pages from the session and shows the
+  // page for the current state: the placement canvas when the
+  // user chose the placement stage and the placement model is
+  // loaded, the floorplan canvas when the user chose the
+  // floorplan stage and the floorplan model is loaded, the
+  // schematic when the level is a leaf, the block diagram
+  // otherwise.
   void Refresh();
 
   // Forwards a gate highlight to the schematic page when it is
@@ -55,9 +68,11 @@ class CenterView : public QWidget {
 
   bool ShowingSchematic() const { return showing_schematic_; }
   bool ShowingFloorplan() const { return showing_floorplan_; }
+  bool ShowingPlacement() const { return showing_placement_; }
   BlockDiagram* Diagram() { return diagram_; }
   SchematicDiagram* Schematic() { return schematic_; }
   FloorplanDiagram* Floorplan() { return floorplan_; }
+  PlacementDiagram* Placement() { return placement_; }
 
  private:
   SessionView& view_;
@@ -65,8 +80,10 @@ class CenterView : public QWidget {
   BlockDiagram* diagram_;
   SchematicDiagram* schematic_;
   FloorplanDiagram* floorplan_;
+  PlacementDiagram* placement_;
   bool showing_schematic_ = false;
   bool showing_floorplan_ = false;
+  bool showing_placement_ = false;
   std::function<void()> on_action_;
 };
 

@@ -14,6 +14,7 @@ add_library(eda_ui_gui STATIC
   src/hierarchy.cc
   src/issues.cc
   src/panels.cc
+  src/placement.cc
   src/schematic.cc
   src/timing.cc)
 target_include_directories(eda_ui_gui PUBLIC include)
@@ -27,6 +28,7 @@ if(Qt6_FOUND)
     src/block_diagram.cc
     src/center_view.cc
     src/floorplan_diagram.cc
+    src/placement_diagram.cc
     src/schematic_diagram.cc
     src/panels_view.cc
     src/splash_screen.cc

@@ -20,6 +20,7 @@
 #include "eos/ui/hierarchy.h"
 #include "eos/ui/issues.h"
 #include "eos/ui/panels.h"
+#include "eos/ui/placement.h"
 #include "eos/ui/registry.h"
 #include "eos/ui/schematic.h"
 #include "eos/ui/timing.h"
@@ -259,6 +260,25 @@ class SessionView {
   // every refresh, like the hierarchy refresh.
   void RefreshFloorplan();
 
+  // Placement model, refreshed from the live session (see
+  // RefreshPlacement). The placement canvas reads this: the
+  // die and core rectangles, the placed and total counts,
+  // HPWL, and overlap count, one rectangle per instance, and
+  // one post-place slack per scene the place run measured.
+  const PlacementModel& Placement() const { return placement_; }
+
+  // Re-reads the placement model from the live session:
+  // dispatches place_summary WITHOUT an echo line (a model
+  // refresh is not a user action) and rebuilds the model when
+  // a place run has succeeded; clears it otherwise, or when
+  // the query or its payload fails, so a stale placement
+  // never lingers. The query fails fast with no technology, no
+  // mapped design, or no placement, so the refresh needs no
+  // gate of its own; and the query itself is a cheap database
+  // walk plus the stored place record, so it runs on every
+  // refresh, like the floorplan refresh.
+  void RefreshPlacement();
+
   // Where a just-run command's results live, for the window to
   // navigate to after the command: the panel tab or center view
   // that shows them, or nowhere when the command's results have
@@ -295,6 +315,16 @@ class SessionView {
   // longer exists.
   bool ShowingFloorplan() const { return center_floorplan_; }
   void ShowFloorplan(bool show) { center_floorplan_ = show; }
+
+  // Whether the center shows the placement canvas instead of
+  // the hierarchy views or the floorplan canvas. A successful
+  // place dispatch takes the user there; a hierarchy
+  // navigation, the Floorplan stage button, or a successful
+  // close_design takes them back. The center shows the canvas
+  // only while the placement model is loaded, so a stale flag
+  // never shows a placement that no longer exists.
+  bool ShowingPlacement() const { return center_placement_; }
+  void ShowPlacement(bool show) { center_placement_ = show; }
 
   // One engine log line for the log window: the local time the
   // line was drained, its severity ("error" for a line
@@ -347,6 +377,13 @@ class SessionView {
     return context_.synth.mapped ? StepStatus::kDone
                                  : StepStatus::kPending;
   }
+  // Placement (full-flow GUI unit F4): Done once a place run
+  // has succeeded in this session. The stepper widget itself
+  // is F11's; this is the state contract it wires.
+  StepStatus PlacementStep() const {
+    return context_.place.placed ? StepStatus::kDone
+                                 : StepStatus::kPending;
+  }
 
  private:
   static std::string EchoLine(const std::string& name,
@@ -375,11 +412,21 @@ class SessionView {
   // (see RefreshTiming). Empty when no timing is loaded.
   std::string timing_key_;
   FloorplanModel floorplan_;
+  PlacementModel placement_;
   // The center view the user last chose: true for the
   // floorplan canvas, false for the hierarchy views. Set by a
   // successful floorplan dispatch and by explicit stage
   // navigation; cleared by a successful close_design.
   bool center_floorplan_ = false;
+  // The center view the user last chose: true for the
+  // placement canvas, false otherwise. Set by a successful
+  // place dispatch and by explicit stage navigation; cleared
+  // by a successful close_design, by hierarchy navigation,
+  // and by the Floorplan stage button. It wins over
+  // center_floorplan_ while the placement model is loaded:
+  // placement is the later stage, so a successful place takes
+  // the user past the floorplan canvas.
+  bool center_placement_ = false;
   // The navigation a just-run command asked for, consumed once
   // by the window on the next refresh (see ResultDestination).
   ResultDestination pending_navigation_ = ResultDestination::kNone;
