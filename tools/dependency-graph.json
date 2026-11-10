@@ -703,6 +703,7 @@
         "signoff",
         "sta",
         "timing",
+        "waivers",
         "yosys"
       ],
       "layer": "L6",
@@ -795,6 +796,10 @@
           "include"
         ],
         "timing": [
+          "cmake-link",
+          "include"
+        ],
+        "waivers": [
           "cmake-link",
           "include"
         ],
@@ -942,7 +947,8 @@
         "errors",
         "ids",
         "ledger",
-        "scenarios"
+        "scenarios",
+        "waivers"
       ],
       "layer": "L5",
       "path": "src/session/session",
@@ -971,6 +977,10 @@
           "include"
         ],
         "scenarios": [
+          "cmake-link",
+          "include"
+        ],
+        "waivers": [
           "cmake-link",
           "include"
         ]
@@ -1139,6 +1149,19 @@
       "path": "src/io/verilog",
       "via": {}
     },
+    "waivers": {
+      "depends_on": [
+        "errors"
+      ],
+      "layer": "L2",
+      "path": "src/db/waivers",
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ]
+      }
+    },
     "yosys": {
       "depends_on": [
         "abc",
@@ -1212,6 +1235,14 @@
       ],
       "sources": [
         "tests/unit/db/scenarios/scenarios_test.cc"
+      ]
+    },
+    "db.waivers": {
+      "modules": [
+        "waivers"
+      ],
+      "sources": [
+        "tests/unit/db/waivers/waivers_test.cc"
       ]
     },
     "eco.timing_eco": {

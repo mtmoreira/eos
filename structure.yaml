@@ -143,6 +143,11 @@ modules:
     path: src/db/constraints
     target: eda_db_constraints
     adopted: false
+  - name: waivers
+    layer: L2
+    path: src/db/waivers
+    target: eda_db_waivers
+    adopted: false
   - name: checkpoint
     layer: L2
     path: src/db/checkpoint

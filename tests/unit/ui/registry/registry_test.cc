@@ -90,8 +90,10 @@ TEST(Registry, CoreSetIsComplete) {
   // compare_collections, index_collection, query_objects,
   // foreach_in_collection). get_objects is the generic alias and
   // exists already, so it adds no pin. F3 adds floorplan_summary.
-  // F4 adds place_summary. F13 adds signoff_summary.
-  EXPECT_EQ(shell.registry.Names().size(), 114u);
+  // F4 adds place_summary. F13 adds signoff_summary. The
+  // waiver-model unit adds set_waiver, list_waivers,
+  // remove_waiver, and waiver_coverage (four commands).
+  EXPECT_EQ(shell.registry.Names().size(), 118u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -100,6 +102,10 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("create_generated_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
+  EXPECT_NE(shell.registry.Find("set_waiver"), nullptr);
+  EXPECT_NE(shell.registry.Find("list_waivers"), nullptr);
+  EXPECT_NE(shell.registry.Find("remove_waiver"), nullptr);
+  EXPECT_NE(shell.registry.Find("waiver_coverage"), nullptr);
   EXPECT_NE(shell.registry.Find("report_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_issues"), nullptr);
   EXPECT_NE(shell.registry.Find("report_constraint"), nullptr);
@@ -8174,6 +8180,460 @@ TEST(CheckTiming, IncludeExcludeAndFailureModes) {
   EXPECT_NE(unknown.message.find("known checks: "), std::string::npos);
   EXPECT_NE(unknown.message.find("unconstrained_endpoints"),
             std::string::npos);}
+
+// ---- waivers (waiver-model unit) ---------------------------------
+// The waiver commands and their report integration: exact
+// matching, derived status, and the waived/unwaived split in
+// every report that carries violations.
+
+// Sets one waiver with the standard reason and approver, with
+// an optional scene.
+CommandResult SetWaiver(Shell& shell, const std::string& name,
+                        const std::string& kind, const std::string& klass,
+                        const std::string& target,
+                        const std::string& scene = "") {
+  std::vector<std::string> args = {"-kind",    kind,  "-class", klass,
+                                   "-target",  target, "-reason", "accepted",
+                                   "-approved_by", "mtmoreira", "-name",
+                                   name};
+  if (!scene.empty()) {
+    args.push_back("-scene");
+    args.push_back(scene);
+  }
+  return shell.Run("set_waiver", args);
+}
+
+TEST(Waivers, SetWaiverStoresRecordAndValidates) {
+  Shell shell;
+  // No design: set_waiver needs one, as add_constraint does.
+  EXPECT_FALSE(SetWaiver(shell, "w1", "timing", "max_delay", "r2/D").ok);
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  const CommandResult added =
+      SetWaiver(shell, "w-r2", "timing", "max_delay", "r2/D", "func_tt");
+  ASSERT_TRUE(added.ok) << added.message;
+  EXPECT_EQ(added.payload, "waiver=1 name=w-r2 status=unmatched matches=0");
+  const CommandResult listed = shell.Run("list_waivers");
+  ASSERT_TRUE(listed.ok) << listed.message;
+  EXPECT_NE(listed.payload.find(
+                "waiver=1 name=w-r2 kind=timing class=max_delay "
+                "target=r2/D scene=func_tt status=unmatched matches=0 "
+                "reason=accepted approved_by=mtmoreira expires=- "
+                "created_revision="),
+            std::string::npos);
+  // No run has happened, so the timing waiver is unevaluated.
+  EXPECT_NE(listed.payload.find("evaluated=none"), std::string::npos);
+  const CommandResult covered = shell.Run("waiver_coverage");
+  ASSERT_TRUE(covered.ok) << covered.message;
+  EXPECT_EQ(covered.payload, "total=1 active=0 unmatched=1 expired=0");
+  // A duplicate name fails fast; a change means remove then set.
+  EXPECT_FALSE(SetWaiver(shell, "w-r2", "timing", "min_delay", "r2/D").ok);
+  // Unknown kind, the path kind (not in v1), unknown class for
+  // the kind, unknown scene, malformed expiry, empty reason,
+  // empty approver, unknown option, and a missing required
+  // option all fail fast.
+  EXPECT_FALSE(SetWaiver(shell, "w2", "bogus", "max_delay", "r2/D").ok);
+  EXPECT_FALSE(SetWaiver(shell, "w2", "path", "max_delay", "r2/D").ok);
+  EXPECT_FALSE(SetWaiver(shell, "w2", "timing", "no_such_class", "r2/D")
+                   .ok);
+  EXPECT_FALSE(SetWaiver(shell, "w2", "check", "max_delay", "b").ok);
+  EXPECT_FALSE(SetWaiver(shell, "w2", "timing", "max_delay", "r2/D",
+                         "no_such_scene")
+                   .ok);
+  EXPECT_FALSE(shell.Run("set_waiver",
+                         {"-kind", "timing", "-class", "max_delay",
+                          "-target", "r2/D", "-expires", "31-01-2027",
+                          "-reason", "accepted", "-approved_by",
+                          "mtmoreira", "-name", "w2"})
+                   .ok);
+  EXPECT_FALSE(shell.Run("set_waiver",
+                         {"-kind", "timing", "-class", "max_delay",
+                          "-target", "r2/D", "-reason", "",
+                          "-approved_by", "mtmoreira", "-name", "w2"})
+                   .ok);
+  EXPECT_FALSE(shell.Run("set_waiver",
+                         {"-kind", "timing", "-class", "max_delay",
+                          "-target", "r2/D", "-reason", "accepted",
+                          "-approved_by", "", "-name", "w2"})
+                   .ok);
+  EXPECT_FALSE(shell.Run("set_waiver",
+                         {"-kind", "timing", "-class", "max_delay",
+                          "-target", "r2/D", "-bogus", "1", "-reason",
+                          "accepted", "-approved_by", "mtmoreira",
+                          "-name", "w2"})
+                   .ok);
+  EXPECT_FALSE(shell.Run("set_waiver",
+                         {"-kind", "timing", "-class", "max_delay",
+                          "-target", "r2/D", "-reason", "accepted",
+                          "-approved_by", "mtmoreira"})
+                   .ok);
+  // Expiry: a waiver past its date reports expired; one dated
+  // far ahead does not. The dates are far past and far future
+  // so the test does not depend on the run date.
+  ASSERT_TRUE(shell.Run("set_waiver",
+                        {"-kind", "timing", "-class", "min_delay",
+                         "-target", "r2/D", "-expires", "2000-01-01",
+                         "-reason", "accepted", "-approved_by",
+                         "mtmoreira", "-name", "w-old"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("set_waiver",
+                        {"-kind", "timing", "-class", "min_delay",
+                         "-target", "r2/D", "-expires", "2099-01-01",
+                         "-reason", "accepted", "-approved_by",
+                         "mtmoreira", "-name", "w-new"})
+                  .ok);
+  const CommandResult listed2 = shell.Run("list_waivers");
+  ASSERT_TRUE(listed2.ok) << listed2.message;
+  EXPECT_NE(listed2.payload.find("name=w-old"), std::string::npos);
+  EXPECT_NE(listed2.payload.find("status=expired"), std::string::npos);
+  EXPECT_NE(listed2.payload.find("expires=2000-01-01"),
+            std::string::npos);
+  const CommandResult covered2 = shell.Run("waiver_coverage");
+  EXPECT_EQ(covered2.payload, "total=3 active=0 unmatched=2 expired=1");
+  // remove_waiver: an unknown name fails fast naming the
+  // existing names.
+  const CommandResult unknown = shell.Run("remove_waiver", {"nope"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_NE(unknown.message.find("known waivers: w-r2, w-old, w-new"),
+            std::string::npos);
+  const CommandResult removed = shell.Run("remove_waiver", {"w-r2"});
+  ASSERT_TRUE(removed.ok) << removed.message;
+  EXPECT_EQ(removed.payload, "removed=w-r2 waivers=2");
+  ASSERT_TRUE(shell.Run("remove_waiver", {"w-old"}).ok);
+  ASSERT_TRUE(shell.Run("remove_waiver", {"w-new"}).ok);
+  EXPECT_EQ(shell.Run("list_waivers").payload, "waivers=0");
+  EXPECT_EQ(shell.Run("waiver_coverage").payload,
+            "total=0 active=0 unmatched=0 expired=0");
+}
+
+TEST(Waivers, CheckNamesAreTheVocabulary) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  // Every check_timing check name is a valid check-waiver class;
+  // a bogus name, and a timing class used as a check class, fail.
+  static const char* kChecks[] = {
+      "generated_clocks", "loops", "no_driving_cell",
+      "no_input_delay", "no_output_delay", "partial_input_delay",
+      "pulse_clock_cell_type", "unconstrained_endpoints",
+      "case_analysis", "clock_crossing", "gated_clock",
+      "multiple_clock", "multicycle_path",
+  };
+  for (std::size_t i = 0; i < sizeof(kChecks) / sizeof(kChecks[0]);
+       ++i) {
+    const CommandResult added = SetWaiver(
+        shell, "w" + std::to_string(i), "check", kChecks[i], "b");
+    ASSERT_TRUE(added.ok) << "check " << kChecks[i] << ": "
+                          << added.message;
+  }
+  EXPECT_FALSE(SetWaiver(shell, "w-bogus", "check", "no_such_check", "b")
+                   .ok);
+  EXPECT_FALSE(SetWaiver(shell, "w-wrong", "check", "max_delay", "b").ok);
+  // One waiver is active: the design leaves b without an input
+  // delay, so the no_input_delay waiver on b matches. The other
+  // twelve match nothing right now.
+  EXPECT_EQ(shell.Run("waiver_coverage").payload,
+            "total=13 active=1 unmatched=12 expired=0");
+}
+
+TEST(Waivers, ReportConstraintWaivesSetupViolation) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcTight);
+  ASSERT_TRUE(SetWaiver(shell, "w-r2", "timing", "max_delay", "r2/D",
+                        "func_tt")
+                  .ok);
+  const CommandResult report = shell.Run("report_constraint", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  // The violation is waived: no unwaived violator, the measured
+  // worst slack still named, the waived cost carried separately.
+  EXPECT_NE(report.payload.find("scene=func_tt violations=0 "
+                                "worst_slack_ns=-0.1 waived=1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt class=max_delay "
+                                "violator=- slack=none cost=0 weight=1 "
+                                "violations=0 waived=1 waived_cost=0.1"),
+            std::string::npos);
+  // The waived endpoint stays listed, with its waiver name, and
+  // the critical range holds no unwaived violator.
+  EXPECT_NE(report.payload.find("Waived violations (max_delay)"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("r2/D"), std::string::npos);
+  EXPECT_NE(report.payload.find("w-r2"), std::string::npos);
+  EXPECT_EQ(report.payload.find("Critical range (max_delay)"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("waivers unmatched: none"),
+            std::string::npos);
+  // report_constraint runs its own analysis: it does not feed
+  // the session's last results, so list_waivers still shows the
+  // waiver unevaluated.
+  EXPECT_NE(shell.Run("list_waivers").payload.find("status=unmatched "
+                                                   "matches=0"),
+            std::string::npos);
+  // The same fixture without the waiver reports unwaived.
+  TimingTempDir dir2;
+  Shell plain;
+  BuildReportConstraintDesign(plain, dir2, kTimingLiberty,
+                              kTimingSdcTight);
+  const CommandResult plain_report = plain.Run("report_constraint", {});
+  ASSERT_TRUE(plain_report.ok) << plain_report.message;
+  EXPECT_NE(plain_report.payload.find("scene=func_tt violations=1 "
+                                      "worst_slack_ns=-0.1 waived=0"),
+            std::string::npos);
+  EXPECT_NE(plain_report.payload.find("waivers unmatched: none"),
+            std::string::npos);
+}
+
+TEST(Waivers, ReportQorWaivesSetupViolation) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcTight);
+  ASSERT_TRUE(SetWaiver(shell, "w-r2", "timing", "max_delay", "r2/D",
+                        "func_tt")
+                  .ok);
+  const CommandResult report = shell.Run("report_qor", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  // The group violating-path count drops by one, the waived count
+  // rises by one, and the union TNS is the unwaived TNS.
+  EXPECT_NE(report.payload.find("scene=func_tt group=clk check=setup "
+                                "wns="),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("tns=0 violating_paths=0 waived=1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("union_tns=0 union_endpoints=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("union_waived=1"), std::string::npos);
+  EXPECT_NE(report.payload.find("hold_union_waived=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt drc=max_transition "
+                                "violations=0 worst_slack=no limit "
+                                "waived=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("waivers unmatched: none"),
+            std::string::npos);
+}
+
+TEST(Waivers, ReportAnalysisCoverageWaivesUntestedRow) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty, kTimingSdc);
+  ASSERT_TRUE(SetWaiver(shell, "w-cov", "coverage", "setup", "r1/D",
+                        "func_tt")
+                  .ok);
+  const CommandResult report = shell.Run("report_analysis_coverage", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  // The detail row carries the waiver name, the summary still
+  // counts the row as untested, and the type row carries the
+  // waived count.
+  EXPECT_NE(report.payload.find(
+                "scene=func_tt pin=r1/D related=r1/CK type=setup "
+                "status=untested reason=no_startpoint_clock "
+                "waived=w-cov"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find(
+                "scene=func_tt pin=r2/D related=r2/CK type=setup "
+                "status=tested reason=- waived=-"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt type=setup tested=1 "
+                                "untested=1 percent=50.0 waived=1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=func_tt checks=4 tested=2 "
+                                "untested=2"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("waivers unmatched: none"),
+            std::string::npos);
+}
+
+TEST(Waivers, CheckTimingWaivedFindingsPass) {
+  Shell shell;
+  BuildCheckDesign(shell);
+  ASSERT_TRUE(shell.Run("create_clock", {"-period", "10", "clk"}).ok);
+  ASSERT_TRUE(
+      shell.Run("add_constraint", {"input_delay", "d_a", "a"}).ok);
+  // The four not_run default checks never pass, so exclude them:
+  // the verdict then turns on the runnable checks alone.
+  const std::vector<std::string> runnable = {
+      "-exclude", "loops", "-exclude", "no_driving_cell",
+      "-exclude", "partial_input_delay", "-exclude",
+      "pulse_clock_cell_type"};
+  const CommandResult control = shell.Run("check_timing", runnable);
+  ASSERT_TRUE(control.ok) << control.message;
+  EXPECT_NE(control.payload.find("verdict=fail waived=0"),
+            std::string::npos);
+  ASSERT_TRUE(SetWaiver(shell, "w-in", "check", "no_input_delay", "b")
+                  .ok);
+  // One waiver down: the other findings still fail the gate.
+  std::vector<std::string> one = runnable;
+  one.push_back("-verbose");
+  const CommandResult partial = shell.Run("check_timing", one);
+  ASSERT_TRUE(partial.ok) << partial.message;
+  EXPECT_NE(partial.payload.find("verdict=fail waived=1"),
+            std::string::npos);
+  EXPECT_NE(partial.payload.find("check=no_input_delay status=fail "
+                                "findings=1 waived=1"),
+            std::string::npos);
+  EXPECT_NE(partial.payload.find("check=no_output_delay status=fail "
+                                "findings=1 waived=0"),
+            std::string::npos);
+  ASSERT_TRUE(SetWaiver(shell, "w-out", "check", "no_output_delay", "y")
+                  .ok);
+  ASSERT_TRUE(SetWaiver(shell, "w-unc", "check",
+                        "unconstrained_endpoints", "y")
+                  .ok);
+  // Every finding waived: the verdict is pass with the waived
+  // count named, never a fourth verdict.
+  const CommandResult waived = shell.Run("check_timing", one);
+  ASSERT_TRUE(waived.ok) << waived.message;
+  EXPECT_NE(waived.payload.find("verdict=pass waived=3"),
+            std::string::npos);
+  // Per-check status stays raw (fail iff findings non-empty);
+  // the waived count rides alongside.
+  EXPECT_NE(waived.payload.find("check=no_input_delay status=fail "
+                                "findings=1 waived=1"),
+            std::string::npos);
+  EXPECT_NE(waived.payload.find("check=no_output_delay status=fail "
+                                "findings=1 waived=1"),
+            std::string::npos);
+  EXPECT_NE(waived.payload.find("check=unconstrained_endpoints "
+                                "status=fail findings=1 waived=1"),
+            std::string::npos);
+  EXPECT_NE(waived.payload.find("finding=no_input_delay b missing "
+                                "bound input_delay waived=w-in"),
+            std::string::npos);
+  EXPECT_NE(waived.payload.find("finding=no_output_delay y missing "
+                                "bound output_delay waived=w-out"),
+            std::string::npos);
+  EXPECT_NE(waived.payload.find("finding=unconstrained_endpoints y "
+                                "no covering constraint waived=w-unc"),
+            std::string::npos);
+  EXPECT_NE(waived.payload.find("waivers_unmatched=none"),
+            std::string::npos);
+}
+
+TEST(Waivers, TimingSummaryWaivesPath) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcTight);
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  ASSERT_TRUE(SetWaiver(shell, "w-r2", "timing", "max_delay", "r2/D",
+                        "func_tt")
+                  .ok);
+  const CommandResult summary = shell.Run("timing_summary", {});
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("scene=func_tt class=max_delay "
+                                 "violator=- slack=none cost=0 weight=1 "
+                                 "violations=0 waived=1"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("path scene=func_tt check=setup "
+                                 "endpoint=r2/D"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("waived=w-r2"), std::string::npos);
+  EXPECT_NE(summary.payload.find("scene=func_tt waivers_unmatched=none"),
+            std::string::npos);
+  // Against the last run, the waiver is active with one match.
+  const CommandResult listed = shell.Run("list_waivers");
+  ASSERT_TRUE(listed.ok) << listed.message;
+  EXPECT_NE(listed.payload.find("name=w-r2 kind=timing class=max_delay "
+                                "target=r2/D scene=func_tt status=active "
+                                "matches=1"),
+            std::string::npos);
+  EXPECT_NE(listed.payload.find("evaluated=run"), std::string::npos);
+  const CommandResult covered = shell.Run("waiver_coverage");
+  EXPECT_EQ(covered.payload, "total=1 active=1 unmatched=0 expired=0");
+}
+
+TEST(Waivers, ListWaiversNamesUnmatchedTargetInFooter) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcTight);
+  ASSERT_TRUE(SetWaiver(shell, "w-ghost", "timing", "max_delay",
+                        "ghost/D", "func_tt")
+                  .ok);
+  // A target naming nothing is retained and shows as unmatched.
+  const CommandResult listed = shell.Run("list_waivers");
+  ASSERT_TRUE(listed.ok) << listed.message;
+  EXPECT_NE(listed.payload.find("name=w-ghost kind=timing "
+                                "class=max_delay target=ghost/D "
+                                "scene=func_tt status=unmatched matches=0"),
+            std::string::npos);
+  const CommandResult report = shell.Run("report_constraint", {});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=func_tt violations=1 "
+                                "worst_slack_ns=-0.1 waived=0"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("waivers unmatched: w-ghost"),
+            std::string::npos);
+}
+
+TEST(Waivers, WriteSdcByteIdentical) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  const std::string before = dir.Path("before.sdc");
+  const std::string after = dir.Path("after.sdc");
+  ASSERT_TRUE(shell.Run("write_sdc", {before}).ok);
+  ASSERT_TRUE(SetWaiver(shell, "w1", "timing", "max_delay", "r2/D").ok);
+  ASSERT_TRUE(shell.Run("write_sdc", {after}).ok);
+  EXPECT_EQ(ReadTextFile(before), ReadTextFile(after));
+}
+
+TEST(Waivers, RestoreRoundTripsWaivers) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  // The tight SDC, so the re-run after restore reproduces the
+  // violation and the restored waiver matches it again.
+  BuildReportConstraintDesign(shell, dir, kTimingLiberty,
+                              kTimingSdcTight);
+  ASSERT_TRUE(SetWaiver(shell, "w-r2", "timing", "max_delay", "r2/D",
+                        "func_tt")
+                  .ok);
+  ASSERT_TRUE(SetWaiver(shell, "w-cov", "coverage", "setup", "r1/D",
+                        "func_tt")
+                  .ok);
+  const std::string path = dir.Path("waived.eosproj");
+  const CommandResult saved = shell.Run("checkpoint", {path});
+  ASSERT_TRUE(saved.ok) << saved.message;
+  Shell fresh;
+  const CommandResult restored = fresh.Run("restore", {path});
+  ASSERT_TRUE(restored.ok) << restored.message;
+  EXPECT_NE(restored.payload.find("waivers_restored=2"),
+            std::string::npos);
+  const CommandResult listed = fresh.Run("list_waivers");
+  ASSERT_TRUE(listed.ok) << listed.message;
+  EXPECT_NE(listed.payload.find("name=w-r2 kind=timing class=max_delay "
+                                "target=r2/D scene=func_tt"),
+            std::string::npos);
+  EXPECT_NE(listed.payload.find("name=w-cov kind=coverage class=setup "
+                                "target=r1/D scene=func_tt"),
+            std::string::npos);
+  // The restored waivers still match: re-read the timing inputs
+  // (restore resets the timing session, as it must) and run
+  // timing again, and w-r2 is active with one match.
+  ASSERT_TRUE(fresh.Run("read_liberty", {"tt", dir.Path("cells.lib")})
+                  .ok);
+  ASSERT_TRUE(fresh.Run("read_verilog", {dir.Path("top.v"), "top"}).ok);
+  ASSERT_TRUE(fresh.Run("read_sdc", {dir.Path("top.sdc")}).ok);
+  ASSERT_TRUE(fresh.Run("run_timing").ok);
+  EXPECT_NE(fresh.Run("list_waivers").payload.find("name=w-r2 kind=timing "
+                                                   "class=max_delay "
+                                                   "target=r2/D "
+                                                   "scene=func_tt "
+                                                   "status=active "
+                                                   "matches=1"),
+            std::string::npos);
+}
 
 class GuiShowTempDir {
  public:

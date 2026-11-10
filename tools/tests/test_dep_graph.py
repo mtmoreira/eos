@@ -310,7 +310,8 @@ def test_real_repo_check_passes_and_rules_hold():
     # F12 adds synth.yosys.abc_dff, the 66th ctest entry.
     # F13 adds pv.signoff, the 67th ctest entry.
     # The gui exit-hang unit adds ui.gui.quit, the 68th ctest entry.
-    assert len(all_tests) == 68
+    # The waiver model unit adds db.waivers, the 69th ctest entry.
+    assert len(all_tests) == 69
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),
