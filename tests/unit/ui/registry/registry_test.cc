@@ -13,6 +13,9 @@
 
 #include "eos/db/odb.h"
 
+#include "odb/db.h"
+#include "odb/dbWireCodec.h"
+
 namespace eos::ui {
 namespace {
 
@@ -92,8 +95,9 @@ TEST(Registry, CoreSetIsComplete) {
   // exists already, so it adds no pin. F3 adds floorplan_summary.
   // F4 adds place_summary. F13 adds signoff_summary. The
   // waiver-model unit adds set_waiver, list_waivers,
-  // remove_waiver, and waiver_coverage (four commands).
-  EXPECT_EQ(shell.registry.Names().size(), 118u);
+  // remove_waiver, and waiver_coverage (four commands). The
+  // F13 DRC engine unit adds drc_run (one command).
+  EXPECT_EQ(shell.registry.Names().size(), 119u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -5500,6 +5504,183 @@ TEST(CoreCommands, SignoffSummaryClearsOnCloseDesign) {
   const CommandResult fresh = run();
   ASSERT_TRUE(fresh.ok) << fresh.message;
   EXPECT_NE(fresh.payload.find("stale=0"), std::string::npos);
+}
+
+// F13 DRC engine: the shapes the registry DRC tests build on
+// the timing fixture. The timing LEF carries no DRC rules
+// except the width default (MINWIDTH falls back to the layer
+// WIDTH, 65 DBU), so only the metal1.width check is formed.
+enum class DrcShape { kNone, kWire, kNarrowPatch };
+
+void ImportDrcDatabase(Shell& shell, TimingTempDir& dir,
+                       DrcShape shape) {
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kTimingLef))
+                  .ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kTimingDef))
+                  .ok());
+  odb::dbBlock* block =
+      database.RawDatabase()->getChip()->getBlock();
+  odb::dbTechLayer* metal1 =
+      database.RawDatabase()->getTech()->findLayer("metal1");
+  ASSERT_NE(metal1, nullptr);
+  if (shape != DrcShape::kNone) {
+    odb::dbNet* net = block->findNet("n_mid");
+    ASSERT_NE(net, nullptr);
+    odb::dbWire* wire = odb::dbWire::create(net);
+    odb::dbWireEncoder encoder;
+    encoder.begin(wire);
+    encoder.newPath(metal1, odb::dbWireType::ROUTED);
+    if (shape == DrcShape::kWire) {
+      encoder.addPoint(1000, 1000);
+      encoder.addPoint(2000, 1000);
+    } else {
+      // A 0.03 x 0.2 patch rect: min dimension 30 < MINWIDTH
+      // 65, so exactly one width violation, clear of the pins.
+      encoder.addPoint(3000, 7000);
+      encoder.addRect(-15, -100, 15, 100);
+    }
+    encoder.end();
+  }
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  const CommandResult imported = shell.Run("import_odb", {db_path});
+  ASSERT_TRUE(imported.ok) << imported.message;
+}
+
+// F13 DRC engine: drc_run fails fast with no technology.
+TEST(CoreCommands, DrcRunFailsFastWithNoTechnology) {
+  Shell shell;
+  const CommandResult result = shell.Run("drc_run", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no technology data loaded"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.drc.has_record);
+}
+
+// F13 DRC engine: drc_run fails fast with no routed design.
+TEST(CoreCommands, DrcRunFailsFastWithNoRoutedDesign) {
+  TimingTempDir dir;
+  Shell shell;
+  ImportDrcDatabase(shell, dir, DrcShape::kNone);
+  const CommandResult result = shell.Run("drc_run", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no routed design"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.drc.has_record);
+}
+
+// F13 DRC engine: drc_run succeeds on a routed design and
+// stores the record.
+TEST(CoreCommands, DrcRunSucceedsOnRoutedDesign) {
+  TimingTempDir dir;
+  Shell shell;
+  ImportDrcDatabase(shell, dir, DrcShape::kWire);
+  const CommandResult result = shell.Run("drc_run", {});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("drc source=live-database"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("total_violations=0"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find(
+                "drc_check check=metal1.width layer=metal1 rule=65 "
+                "violations=0"),
+            std::string::npos);
+  EXPECT_TRUE(shell.ctx.drc.has_record);
+  EXPECT_EQ(shell.ctx.drc.record.TotalViolations(), 0u);
+}
+
+// F13 DRC engine: drc_run reports a located violation.
+TEST(CoreCommands, DrcRunReportsViolation) {
+  TimingTempDir dir;
+  Shell shell;
+  ImportDrcDatabase(shell, dir, DrcShape::kNarrowPatch);
+  const CommandResult result = shell.Run("drc_run", {});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("total_violations=1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find(
+                "drc_violation check=metal1.width layer=metal1 "
+                "net=n_mid detail=width=30 "
+                "bbox=2985,6900,3015,7100"),
+            std::string::npos);
+  EXPECT_TRUE(shell.ctx.drc.has_record);
+  EXPECT_EQ(shell.ctx.drc.record.TotalViolations(), 1u);
+}
+
+// F13 DRC engine: signoff_summary uses the in-tree DRC record
+// when one exists, and the LVS verdict still comes from the
+// external report.
+TEST(CoreCommands, SignoffSummaryUsesIntreeDrc) {
+  TimingTempDir dir;
+  const std::string pv = dir.Write("pv.md", kSignoffPv);
+  const std::string lvs = dir.Write("lvs.md", kSignoffLvs);
+  Shell shell;
+  ImportDrcDatabase(shell, dir, DrcShape::kNarrowPatch);
+  ASSERT_TRUE(shell.Run("drc_run", {}).ok);
+  const CommandResult result =
+      shell.Run("signoff_summary", {"-pv", pv, "-lvs", lvs});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("drc_source=intree"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("drc=fail"), std::string::npos);
+  EXPECT_NE(result.payload.find("drc_violations=1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("drc_categories=1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("drc family=metal1.width"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find(
+                "drc_violation check=metal1.width layer=metal1 "
+                "net=n_mid detail=width=30"),
+            std::string::npos);
+  // LVS still comes from the external report.
+  EXPECT_NE(result.payload.find("lvs=fail"), std::string::npos);
+}
+
+// F13 DRC engine: without a drc_run, signoff_summary reports
+// the DRC verdicts from the external report.
+TEST(CoreCommands, SignoffSummaryReportsDrcSourceWithoutRun) {
+  TimingTempDir dir;
+  const std::string pv = dir.Write("pv.md", kSignoffPv);
+  const std::string lvs = dir.Write("lvs.md", kSignoffLvs);
+  Shell shell;
+  const CommandResult result =
+      shell.Run("signoff_summary", {"-pv", pv, "-lvs", lvs});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("drc_source=report"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("drc=pass"), std::string::npos);
+  EXPECT_NE(result.payload.find("drc_violations=0"),
+            std::string::npos);
+}
+
+// F13 DRC engine: the in-tree DRC evidence goes stale when
+// the design changes after the run.
+TEST(CoreCommands, SignoffSummaryStaleAfterDrcRunDesignChange) {
+  TimingTempDir dir;
+  const std::string pv = dir.Write("pv.md", kSignoffPv);
+  const std::string lvs = dir.Write("lvs.md", kSignoffLvs);
+  Shell shell;
+  ImportDrcDatabase(shell, dir, DrcShape::kWire);
+  ASSERT_TRUE(shell.Run("drc_run", {}).ok);
+  const auto run = [&shell, &pv, &lvs]() {
+    return shell.Run("signoff_summary", {"-pv", pv, "-lvs", lvs});
+  };
+  const CommandResult fresh = run();
+  ASSERT_TRUE(fresh.ok) << fresh.message;
+  EXPECT_NE(fresh.payload.find("stale=0"), std::string::npos);
+  EXPECT_NE(fresh.payload.find("drc_source=intree"),
+            std::string::npos);
+  shell.ctx.synth.verilog_path = dir.Path("two.v");
+  shell.ctx.synth.top_cell = "two";
+  const CommandResult stale = run();
+  ASSERT_TRUE(stale.ok) << stale.message;
+  EXPECT_NE(stale.payload.find("stale=1"), std::string::npos);
+  EXPECT_NE(stale.payload.find("drc_source=intree"),
+            std::string::npos);
 }
 
 // F0: LEF and tech LEF for the synth-to-PD bridge tests. The cell

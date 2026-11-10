@@ -297,7 +297,7 @@ modules:
     layer: L4
     path: src/pv/drc
     target: eda_pv_drc
-    adopted: false
+    adopted: true
   - name: lvs
     layer: L4
     path: src/pv/lvs

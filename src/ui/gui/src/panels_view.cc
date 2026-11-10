@@ -288,11 +288,23 @@ std::string RenderSignoff(const SignoffModel& signoff) {
   out += signoff.DrcPass() ? "PASS" : "FAIL";
   out += ", " + std::to_string(signoff.DrcViolations()) +
          " violations in " + std::to_string(signoff.DrcCategories()) +
-         " categories (" + signoff.PvReport() + ")\n";
+         " categories (";
+  out += signoff.DrcSource() == "intree" ? "live-database"
+                                         : signoff.PvReport();
+  out += ")\n";
   for (const SignoffDrcFamily& family : signoff.DrcFamilies()) {
     out += "  " + family.family + ": " +
            std::to_string(family.categories) + " categories, " +
            std::to_string(family.violations) + " violations\n";
+  }
+  for (const SignoffDrcViolation& violation :
+       signoff.DrcViolationList()) {
+    out += "  " + violation.check + " " + violation.layer + " " +
+           violation.net + " " + violation.detail + " bbox " +
+           std::to_string(violation.x1) + "," +
+           std::to_string(violation.y1) + "," +
+           std::to_string(violation.x2) + "," +
+           std::to_string(violation.y2) + "\n";
   }
   out += "LVS: ";
   out += signoff.LvsPass() ? "PASS" : "NOT CLEAN";

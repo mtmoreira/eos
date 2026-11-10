@@ -64,6 +64,16 @@ engine feature be tested in CI without any real PDK file.
   reference those layers in TRACKS statements, and the DEF
   parser rejects undefined layers; they carry no repair
   semantics in v1.
+- `eos_mock.tlef` DRC rules (invented fixture values, added
+  2026-11-10 for the F13 DRC engine; documented as invented,
+  never process data): per routing layer, SPACING =
+  pitch - width, MINWIDTH = width - 0.02 um, AREA =
+  width * 0.1 um2, MINSTEP = 0.1 um. SPACING equals the
+  edge-to-edge distance between adjacent-track wires, so
+  router output on adjacent tracks sits exactly at the rule.
+  No cut layers and no VIA definitions exist in the mock;
+  via enclosure and cut spacing are exercised by the DRC
+  engine unit tests with their own inline fixtures.
 - `port_cases.py`: ports the original suite cases onto the mock
   (see "Porting transform" below). Deterministic: re-running
   overwrites identical bytes.

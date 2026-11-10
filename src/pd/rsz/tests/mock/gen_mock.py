@@ -244,6 +244,13 @@ SITE_NAME = "em_site"
 #   em2: R   750,000  C 3.8e-08
 #   em3: R   333,333  C 3.3e-08
 #   em5: R   100,000  C 2.6e-08
+# DRC rules (invented fixture values, added for the F13 DRC engine,
+# 2026-11-10; documented as invented, never process data):
+#   SPACING = pitch - width (adjacent-track wires sit exactly at
+#   the rule, so router output on adjacent tracks passes);
+#   MINWIDTH = width - 0.02 (just below the default wire width);
+#   AREA = width * 0.1 um2 (a 0.1 um long segment of default
+#   width); MINSTEP = 0.1 um on every layer.
 LAYERS = [
     # name, direction, width_um, pitch_um, rpersq, cpersqdist, edgecap
     ("em1", "HORIZONTAL", 0.2, 0.4, 0.20, 0.05, 0.020),
@@ -483,6 +490,10 @@ def emit_tlef(path):
         out.append("  DIRECTION %s ;" % direction)
         out.append("  PITCH %s ;" % fmt(pitch))
         out.append("  WIDTH %s ;" % fmt(width))
+        out.append("  SPACING %s ;" % fmt(pitch - width))
+        out.append("  MINWIDTH %s ;" % fmt(width - 0.02))
+        out.append("  AREA %s ;" % fmt(width * 0.1))
+        out.append("  MINSTEP %s ;" % fmt(0.1))
         out.append("  RESISTANCE RPERSQ %s ;" % fmt(rpersq))
         out.append("  CAPACITANCE CPERSQDIST %s ;" % fmt(cpersq))
         out.append("  EDGECAPACITANCE %s ;" % fmt(edgecap))

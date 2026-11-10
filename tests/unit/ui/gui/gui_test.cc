@@ -86,6 +86,7 @@ using eos::ui::SchematicNet;
 using eos::ui::SchematicPoint;
 using eos::ui::SessionView;
 using eos::ui::SignoffDrcFamily;
+using eos::ui::SignoffDrcViolation;
 using eos::ui::SignoffLvsIssue;
 using eos::ui::SignoffLvsPath;
 using eos::ui::SignoffLvsResidual;
@@ -143,6 +144,32 @@ const char kSignoffPayload[] =
     "drc family=m1 categories=8 violations=0\n"
     "drc family=m2 categories=8 violations=0\n"
     "drc family=via categories=6 violations=0\n"
+    "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+    "verdict=fail\n"
+    "lvs path=magic classes_compared=68 classes_equivalent=67 "
+    "fingers_extracted=3676 fingers_reference=3676 verdict=fail\n"
+    "lvs issue=D1 cell=none kind=extraction_artifact path=klayout\n"
+    "lvs issue=D2 cell=sky130_fd_sc_hd__a21oi_2 kind=unresolved "
+    "path=klayout\n"
+    "lvs issue=D1 cell=none kind=closed path=magic\n"
+    "lvs issue=D2 cell=sky130_fd_sc_hd__a21oi_2 kind=resolved_artifact "
+    "path=magic\n"
+    "lvs_residual cell=sky130_fd_sc_hd__a21oi_2 transistors=4 "
+    "instances=2 cause=proven path=magic\n";
+
+// F13 DRC engine: the same signoff shape with the DRC verdicts
+// from an in-tree drc_run (drc_source=intree): one failing
+// check with one located violation.
+const char kSignoffIntreePayload[] =
+    "signoff drc=fail lvs=fail antenna=pass stale=0 "
+    "drc_source=intree drc_categories=2 drc_violations=1 "
+    "antenna_net_violations=0 antenna_pin_violations=0 "
+    "pv_report=docs/gcd-pv-results.md lvs_report=docs/gcd-lvs-magic.md "
+    "fingerprint=0123456789abcdef\n"
+    "drc family=metal1.width categories=1 violations=1\n"
+    "drc family=metal1.spacing categories=1 violations=0\n"
+    "drc_violation check=metal1.width layer=metal1 net=n_mid "
+    "detail=width=30 bbox=2985,6900,3015,7100\n"
     "lvs path=klayout classes_compared=68 classes_equivalent=67 "
     "verdict=fail\n"
     "lvs path=magic classes_compared=68 classes_equivalent=67 "
@@ -3590,6 +3617,9 @@ TEST(SignoffModel, ParsesFullPayload) {
   EXPECT_EQ(model.PvReport(), "docs/gcd-pv-results.md");
   EXPECT_EQ(model.LvsReport(), "docs/gcd-lvs-magic.md");
   EXPECT_EQ(model.Fingerprint(), "0123456789abcdef");
+  // No drc_source key: an older payload reads as "report".
+  EXPECT_EQ(model.DrcSource(), "report");
+  EXPECT_TRUE(model.DrcViolationList().empty());
   ASSERT_EQ(model.DrcFamilies().size(), 3u);
   EXPECT_EQ(model.DrcFamilies()[0].family, "m1");
   EXPECT_EQ(model.DrcFamilies()[0].categories, 8u);
@@ -3725,6 +3755,106 @@ TEST(SignoffModel, RejectsMalformedPayloads) {
   }
 }
 
+// F13 DRC engine: an in-tree payload parses its located
+// violations.
+TEST(SignoffModel, ParsesIntreePayload) {
+  SignoffModel model;
+  ASSERT_TRUE(model.LoadPayload(kSignoffIntreePayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.DrcSource(), "intree");
+  EXPECT_FALSE(model.DrcPass());
+  EXPECT_EQ(model.DrcCategories(), 2u);
+  EXPECT_EQ(model.DrcViolations(), 1u);
+  ASSERT_EQ(model.DrcFamilies().size(), 2u);
+  EXPECT_EQ(model.DrcFamilies()[0].family, "metal1.width");
+  EXPECT_EQ(model.DrcFamilies()[0].categories, 1u);
+  EXPECT_EQ(model.DrcFamilies()[0].violations, 1u);
+  EXPECT_EQ(model.DrcFamilies()[1].family, "metal1.spacing");
+  EXPECT_EQ(model.DrcFamilies()[1].violations, 0u);
+  ASSERT_EQ(model.DrcViolationList().size(), 1u);
+  EXPECT_EQ(model.DrcViolationList()[0].check, "metal1.width");
+  EXPECT_EQ(model.DrcViolationList()[0].layer, "metal1");
+  EXPECT_EQ(model.DrcViolationList()[0].net, "n_mid");
+  EXPECT_EQ(model.DrcViolationList()[0].detail, "width=30");
+  EXPECT_EQ(model.DrcViolationList()[0].x1, 2985);
+  EXPECT_EQ(model.DrcViolationList()[0].y1, 6900);
+  EXPECT_EQ(model.DrcViolationList()[0].x2, 3015);
+  EXPECT_EQ(model.DrcViolationList()[0].y2, 7100);
+  // LVS still comes from the external report.
+  EXPECT_FALSE(model.LvsPass());
+  ASSERT_EQ(model.LvsPaths().size(), 2u);
+}
+
+// F13 DRC engine: malformed in-tree payloads are rejected
+// and leave the model unchanged.
+TEST(SignoffModel, RejectsMalformedIntreePayloads) {
+  const std::string header =
+      "signoff drc=fail lvs=fail antenna=pass stale=0 "
+      "drc_source=intree drc_categories=2 drc_violations=1 "
+      "antenna_net_violations=0 antenna_pin_violations=0 "
+      "pv_report=docs/gcd-pv-results.md lvs_report=docs/gcd-lvs-magic.md "
+      "fingerprint=0123456789abcdef\n";
+  const std::string families =
+      "drc family=metal1.width categories=1 violations=1\n"
+      "drc family=metal1.spacing categories=1 violations=0\n";
+  const std::string violation =
+      "drc_violation check=metal1.width layer=metal1 net=n_mid "
+      "detail=width=30 bbox=2985,6900,3015,7100\n";
+  const std::string lvs =
+      "lvs path=klayout classes_compared=68 classes_equivalent=67 "
+      "verdict=fail\n"
+      "lvs path=magic classes_compared=68 classes_equivalent=67 "
+      "fingers_extracted=3676 fingers_reference=3676 verdict=fail\n"
+      "lvs issue=D1 cell=none kind=extraction_artifact path=klayout\n"
+      "lvs issue=D2 cell=sky130_fd_sc_hd__a21oi_2 kind=unresolved "
+      "path=klayout\n"
+      "lvs issue=D1 cell=none kind=closed path=magic\n"
+      "lvs issue=D2 cell=sky130_fd_sc_hd__a21oi_2 kind=resolved_artifact "
+      "path=magic\n"
+      "lvs_residual cell=sky130_fd_sc_hd__a21oi_2 transistors=4 "
+      "instances=2 cause=proven path=magic\n";
+  const auto replaced = [](std::string text, const std::string& from,
+                           const std::string& to) {
+    const std::size_t at = text.find(from);
+    EXPECT_NE(at, std::string::npos) << "missing " << from;
+    text.replace(at, from.size(), to);
+    return text;
+  };
+  const std::string good = header + families + violation + lvs;
+  const std::string bad[] = {
+      // A violation line with a report source.
+      replaced(good, "drc_source=intree", "drc_source=report"),
+      // An unknown DRC source.
+      replaced(good, "drc_source=intree", "drc_source=live"),
+      // A violation naming an unknown check.
+      replaced(good, "check=metal1.width", "check=metal1.bogus"),
+      // A violation count mismatch: the family claims one
+      // violation but no line carries it.
+      header + families + lvs,
+      // A violation count mismatch: two lines for one claimed
+      // violation.
+      header + families + violation +
+          "drc_violation check=metal1.width layer=metal1 net=n_mid "
+          "detail=width=40 bbox=100,100,200,200\n" +
+          lvs,
+      // A duplicate violation line.
+      header + families + violation + violation + lvs,
+      // A bbox with three values.
+      replaced(good, "bbox=2985,6900,3015,7100", "bbox=2985,6900,3015"),
+      // An inverted bbox.
+      replaced(good, "bbox=2985,6900,3015,7100",
+               "bbox=3015,6900,2985,7100"),
+      // A non-numeric bbox.
+      replaced(good, "bbox=2985,6900,3015,7100",
+               "bbox=2985,6900,3015,abc"),
+  };
+  for (const std::string& payload : bad) {
+    SignoffModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+}
+
 TEST(PlacementModel, ReloadReplacesPreviousPlacement) {
   PlacementModel model;
   ASSERT_TRUE(model.LoadPayload(kPlacementPayload));
@@ -3775,6 +3905,8 @@ TEST(SignoffModel, ReloadReplacesPreviousVerdicts) {
   model.Clear();
   EXPECT_FALSE(model.Loaded());
   EXPECT_TRUE(model.DrcFamilies().empty());
+  EXPECT_TRUE(model.DrcViolationList().empty());
+  EXPECT_EQ(model.DrcSource(), "report");
   EXPECT_TRUE(model.LvsPaths().empty());
   EXPECT_TRUE(model.LvsIssues().empty());
   EXPECT_FALSE(model.HasResidual());

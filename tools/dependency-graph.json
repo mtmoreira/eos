@@ -190,10 +190,17 @@
       }
     },
     "drc": {
-      "depends_on": [],
+      "depends_on": [
+        "odb"
+      ],
       "layer": "L4",
       "path": "src/pv/drc",
-      "via": {}
+      "via": {
+        "odb": [
+          "cmake-link",
+          "include"
+        ]
+      }
     },
     "drt": {
       "depends_on": [
@@ -686,6 +693,7 @@
         "cts",
         "dbsta",
         "design",
+        "drc",
         "errors",
         "extract",
         "finish",
@@ -729,6 +737,10 @@
           "include"
         ],
         "design": [
+          "cmake-link",
+          "include"
+        ],
+        "drc": [
           "cmake-link",
           "include"
         ],
@@ -1561,6 +1573,15 @@
         "rsz"
       ],
       "sources": []
+    },
+    "pv.drc": {
+      "modules": [
+        "drc",
+        "odb"
+      ],
+      "sources": [
+        "tests/unit/pv/drc/drc_test.cc"
+      ]
     },
     "pv.extract": {
       "modules": [
