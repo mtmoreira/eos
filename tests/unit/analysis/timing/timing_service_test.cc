@@ -1071,7 +1071,7 @@ TEST(TimingService, ReportPathsFromFilterSelectsStartpoint) {
   const auto failed = service.ReportPaths(
       design, {EstimateScene(1, "func_tt", "tt", liberty)}, unknown);
   EXPECT_FALSE(failed.ok());
-  EXPECT_EQ(failed.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_EQ(failed.status().code(), ErrorCode::kNotFound);
 
   // A from name matching an object with no path to the
   // endpoints yields an empty result, never an error: the
@@ -1120,7 +1120,7 @@ TEST(TimingService, ReportPathsThroughFilterSelectsIntermediate) {
   const auto failed = service.ReportPaths(
       design, {EstimateScene(1, "func_tt", "tt", liberty)}, unknown);
   EXPECT_FALSE(failed.ok());
-  EXPECT_EQ(failed.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_EQ(failed.status().code(), ErrorCode::kNotFound);
 }
 
 TEST(TimingService, ReportPathsGroupSelection) {
@@ -1143,7 +1143,7 @@ TEST(TimingService, ReportPathsGroupSelection) {
   const auto failed = service.ReportPaths(
       design, {EstimateScene(1, "func_tt", "tt", liberty)}, unknown);
   EXPECT_FALSE(failed.ok());
-  EXPECT_EQ(failed.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_EQ(failed.status().code(), ErrorCode::kNotFound);
   EXPECT_NE(failed.status().message().find("clk"), std::string::npos);
 }
 

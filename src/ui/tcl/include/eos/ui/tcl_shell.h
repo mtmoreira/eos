@@ -42,8 +42,17 @@ class TclShell {
 
   // Evaluates a script. On success, the value is the script's result
   // string. On a Tcl error (including a failed EOS command), the
-  // status carries the interpreter's message.
+  // status carries the interpreter's message, and its code is the
+  // code the failed command produced, mapped back from the
+  // "EOS <diag>: ..." prefix (a non-EOS Tcl error keeps
+  // kInvalidArgument).
   foundation::Result<std::string> Eval(const std::string& script);
+
+  // The engine log lines the last failed Eval (or RunFiles file)
+  // drained, in order: the lines the failed command appended to
+  // the context's engine log. Empty after a success, and empty
+  // when the build has no Tcl.
+  const std::vector<std::string>& LastFailedEngineLog() const;
 
   // Runs script files in order; prints each file's final result when
   // non-empty, errors to stderr. Returns 0 when every file succeeded,

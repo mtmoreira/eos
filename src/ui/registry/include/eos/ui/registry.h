@@ -63,9 +63,19 @@ enum class Diag : std::int32_t {
   kVerifiedPass = 6,
   kToolCrash = 7,
   kIoError = 8,
+  kInvalidArgument = 9,
+  kNotFound = 10,
+  kInvalidState = 11,
+  kStaleRevision = 12,
+  kOutOfRange = 13,
 };
 
 const char* DiagName(Diag diag);
+
+// Exact-string reverse lookup for DiagName: returns the code for a
+// name DiagName produces, and nullopt for anything else ("unknown"
+// maps to nullopt, never to a code).
+std::optional<Diag> DiagFromName(const std::string& name);
 
 struct CommandResult {
   bool ok = false;

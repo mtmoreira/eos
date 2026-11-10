@@ -55,13 +55,34 @@ using foundation::Result;
 
 CommandResult FromStatus(const foundation::Status& status) {
   Diag diag = Diag::kInvalidConfiguration;
-  if (status.code() == ErrorCode::kUnsupported) {
-    diag = Diag::kUnsupportedFeature;
-  } else if (status.code() == ErrorCode::kIoError) {
-    diag = Diag::kIoError;
+  switch (status.code()) {
+    case ErrorCode::kOk: diag = Diag::kOk; break;
+    case ErrorCode::kInvalidArgument: diag = Diag::kInvalidArgument; break;
+    case ErrorCode::kNotFound: diag = Diag::kNotFound; break;
+    case ErrorCode::kInvalidState: diag = Diag::kInvalidState; break;
+    case ErrorCode::kStaleRevision: diag = Diag::kStaleRevision; break;
+    case ErrorCode::kOutOfRange: diag = Diag::kOutOfRange; break;
+    case ErrorCode::kIoError: diag = Diag::kIoError; break;
+    case ErrorCode::kUnsupported: diag = Diag::kUnsupportedFeature; break;
+    case ErrorCode::kInvalidConfiguration:
+      diag = Diag::kInvalidConfiguration;
+      break;
   }
   return CommandResult::Fail(diag, status.message());
 }
+
+// R9/R10: an engine failure names the command that ran it, and a
+// failure that clears session state names the recovery.
+CommandResult FromStatusContext(const foundation::Status& status,
+                                const std::string& prefix,
+                                const std::string& suffix = "") {
+  const CommandResult failed = FromStatus(status);
+  return CommandResult::Fail(failed.diag, prefix + failed.message + suffix);
+}
+
+const char kSynthClearedRecovery[] =
+    "; the synth session was cleared, re-run eos::read_verilog and "
+    "eos::elaborate";
 
 std::optional<CommandResult> NeedDesign(const CommandContext& ctx) {
   if (!ctx.HasDesign()) {
@@ -71,11 +92,22 @@ std::optional<CommandResult> NeedDesign(const CommandContext& ctx) {
   return std::nullopt;
 }
 
+// Nine sites shared one byte-identical guard and message; one helper
+// with one wording keeps them that way.
+std::optional<CommandResult> NeedTopBlock(const CommandContext& ctx) {
+  if (!ctx.timing.odb->has_top_block()) {
+    return CommandResult::Fail(
+        Diag::kUnclosedDesign,
+        "no mapped design: the imported database holds no top block");
+  }
+  return std::nullopt;
+}
+
 std::optional<CommandResult> ExpectCount(
     const std::vector<std::string>& args, std::size_t count,
     const std::string& usage) {
   if (args.size() != count) {
-    return CommandResult::Fail(Diag::kInvalidConfiguration,
+    return CommandResult::Fail(Diag::kInvalidArgument,
                                "usage: eos::" + usage);
   }
   return std::nullopt;
@@ -1808,7 +1840,7 @@ std::optional<CommandResult> ParseReportOptions(
     const std::string& token = args[i];
     if (token.size() < 2 || token[0] != '-') {
       return CommandResult::Fail(
-          Diag::kInvalidConfiguration,
+          Diag::kInvalidArgument,
           "report_timing takes -key value options, got: " + token);
     }
     const std::string key = token.substr(1);
@@ -1817,15 +1849,15 @@ std::optional<CommandResult> ParseReportOptions(
       if (key == candidate) known = true;
     }
     if (!known) {
-      return CommandResult::Fail(Diag::kInvalidConfiguration,
+      return CommandResult::Fail(Diag::kInvalidArgument,
                                  "unknown report_timing option: -" + key);
     }
     if (i + 1 >= args.size()) {
-      return CommandResult::Fail(Diag::kInvalidConfiguration,
+      return CommandResult::Fail(Diag::kInvalidArgument,
                                  "option -" + key + " needs a value");
     }
     if (options.count(key) != 0) {
-      return CommandResult::Fail(Diag::kInvalidConfiguration,
+      return CommandResult::Fail(Diag::kInvalidArgument,
                                  "option -" + key + " given twice");
     }
     options[key] = args[++i];
@@ -2080,7 +2112,7 @@ class SdcOptions {
     std::map<std::string, const SdcFlagSpec*> by_name;
     for (const SdcFlagSpec& spec : specs) by_name[spec.name] = &spec;
     const auto fail = [&cmd](const std::string& message) {
-      return CommandResult::Fail(Diag::kInvalidConfiguration,
+      return CommandResult::Fail(Diag::kInvalidArgument,
                                  cmd + ": " + message);
     };
     std::size_t i = 0;
@@ -2154,7 +2186,7 @@ std::optional<CommandResult> ParseOptDouble(
   if (!text.has_value()) return std::nullopt;
   if (!ParseDouble(*text, out)) {
     return CommandResult::Fail(
-        Diag::kInvalidConfiguration,
+        Diag::kInvalidArgument,
         cmd + ": option " + flag + " needs a number, got: " + *text);
   }
   return std::nullopt;
@@ -2196,12 +2228,12 @@ std::optional<CommandResult> NormalizeTarget(const std::string& raw,
     }
   }
   if (s.empty()) {
-    return CommandResult::Fail(Diag::kInvalidConfiguration,
+    return CommandResult::Fail(Diag::kInvalidArgument,
                                cmd + ": empty target");
   }
   if (s.find_first_of(" \t{}") != std::string::npos) {
     return CommandResult::Fail(
-        Diag::kInvalidConfiguration,
+        Diag::kInvalidArgument,
         cmd + ": one object per target; a list names several objects, "
               "pass them as separate arguments");
   }
@@ -2247,7 +2279,7 @@ std::optional<CommandResult> ExpandTargetToken(
     return std::nullopt;
   }
   if (IsCollectionHandleShape(s)) {
-    return CommandResult::Fail(Diag::kInvalidConfiguration,
+    return CommandResult::Fail(Diag::kNotFound,
                                cmd + ": unknown collection: " + s);
   }
   std::string target;
@@ -4038,7 +4070,7 @@ std::string ReportClockBrace(const std::vector<std::string>& sources) {
       }
       if (selected.empty()) {
         return CommandResult::Fail(
-            Diag::kInvalidConfiguration,
+            Diag::kNotFound,
             std::string(command) + ": unknown scenario: " + wanted);
       }
       scenes = std::move(selected);
@@ -4073,7 +4105,7 @@ std::string ReportClockBrace(const std::vector<std::string>& sources) {
       kind = analysis::CheckKind::kHold;
     } else {
       return CommandResult::Fail(
-          Diag::kInvalidConfiguration,
+          Diag::kInvalidArgument,
           std::string(command) +
               ": -delay_type must be max or min, got: " + delay_type);
     }
@@ -5140,7 +5172,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (ctx.HasDesign()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidState,
               "a design is already open: " + ctx.project.design->name() +
                   " (eos::close_design first)");
         }
@@ -5179,14 +5211,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
         if (args.empty() || args.size() > 2) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kInvalidArgument,
                                      "usage: eos::create_cell <name> "
                                      "[-macro]");
         }
         bool macro = false;
         if (args.size() == 2) {
           if (args[1] != "-macro") {
-            return CommandResult::Fail(Diag::kInvalidConfiguration,
+            return CommandResult::Fail(Diag::kInvalidArgument,
                                        "unsupported option: " + args[1]);
           }
           macro = true;
@@ -5210,7 +5242,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const ObjectId cell =
             ctx.project.design->Find(ObjectKind::kCell, args[1]);
         if (cell.is_null()) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kNotFound,
                                      "unknown cell: " + args[1]);
         }
         const Result<ObjectId> id =
@@ -5250,7 +5282,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           direction = db::Direction::kInout;
         } else {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "direction must be in, out or inout, got: " + args[1]);
         }
         const Result<ObjectId> id =
@@ -5271,12 +5303,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const ObjectId instance =
             ctx.project.design->Find(ObjectKind::kInstance, args[0]);
         if (instance.is_null()) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kNotFound,
                                      "unknown instance: " + args[0]);
         }
         const ObjectId net = ctx.project.design->Find(ObjectKind::kNet, args[2]);
         if (net.is_null()) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kNotFound,
                                      "unknown net: " + args[2]);
         }
         const Result<ObjectId> id =
@@ -5302,7 +5334,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           level = db::ParasiticsLevel::kExtracted;
         } else {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "parasitics level must be estimate or extracted, got: " +
                   args[3]);
         }
@@ -5366,7 +5398,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = NeedDesign(ctx)) return *bad;
         const auto kind = ParseConstraintKind(args[0]);
         if (!kind.has_value()) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kNotFound,
                                      "unknown constraint kind: " + args[0]);
         }
         const db::ConstraintId id =
@@ -5451,7 +5483,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_waiver: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -5461,7 +5493,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               "-name"}) {
           if (!opts.Seen(required)) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 std::string("set_waiver: option ") + required +
                     " is required");
           }
@@ -5469,7 +5501,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const std::string kind_word = *opts.Value("-kind");
         if (kind_word == "path") {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_waiver: path waivers arrive after get_timing_paths "
               "lands (kind path is not in v1)");
         }
@@ -5477,7 +5509,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             db::ParseWaiverKind(kind_word);
         if (!kind.has_value()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_waiver: unknown waiver kind: " + kind_word +
                   " (timing, check, coverage)");
         }
@@ -5550,7 +5582,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             known += waiver.name;
           }
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kNotFound,
               "remove_waiver: unknown waiver: " + args[0] +
                   (known.empty() ? " (no waivers)"
                                  : " (known waivers: " + known + ")"));
@@ -5616,7 +5648,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
         if (!opts.Seen("-period")) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kInvalidArgument,
                                      "create_clock: option -period is "
                                      "required");
         }
@@ -5627,7 +5659,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (period <= 0.0) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "create_clock: -period must be positive, got: " +
                   FormatNum(period));
         }
@@ -5640,14 +5672,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (!ParseDouble(wave[0], rise) ||
               !ParseDouble(wave[1], fall)) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "create_clock: -waveform needs two numbers, got: " +
                     wave[0] + " " + wave[1]);
           }
           if (rise < 0.0 || fall < 0.0 || rise >= fall ||
               fall > period) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "create_clock: -waveform needs 0 <= rise < fall <= "
                 "period, got: " +
                     FormatNum(rise) + " " + FormatNum(fall) +
@@ -5663,7 +5695,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (targets.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "create_clock: at least one target is required");
         }
         std::string name;
@@ -5673,11 +5705,11 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           name = targets[0];
         } else {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "create_clock: -name is required for several targets");
         }
         if (name.empty()) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kInvalidArgument,
                                      "create_clock: -name must not be "
                                      "empty");
         }
@@ -5725,7 +5757,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = NeedDesign(ctx)) return *bad;
         if (!opts.Seen("-source")) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "create_generated_clock: option -source is required");
         }
         std::vector<std::string> sources;
@@ -5736,7 +5768,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (sources.size() != 1) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "create_generated_clock: -source needs exactly one "
               "object, the collection holds " +
                   std::to_string(sources.size()));
@@ -5745,7 +5777,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const bool combinational = opts.Has("-combinational");
         if (!combinational && !opts.Seen("-master_clock")) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "create_generated_clock: -master_clock or "
               "-combinational is required");
         }
@@ -5755,7 +5787,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (!ParseInt(*opts.Value("-divide_by"), divide_by) ||
               divide_by <= 0) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "create_generated_clock: -divide_by needs a positive "
                 "integer, got: " +
                     *opts.Value("-divide_by"));
@@ -5765,7 +5797,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (!ParseInt(*opts.Value("-multiply_by"), multiply_by) ||
               multiply_by <= 0) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "create_generated_clock: -multiply_by needs a "
                 "positive integer, got: " +
                     *opts.Value("-multiply_by"));
@@ -5773,7 +5805,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!combinational && divide_by == 0 && multiply_by == 0) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "create_generated_clock: at least one of -divide_by, "
               "-multiply_by is required (without -combinational)");
         }
@@ -5785,7 +5817,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (targets.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "create_generated_clock: at least one target is "
               "required");
         }
@@ -5796,13 +5828,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           name = targets[0];
         } else {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "create_generated_clock: -name is required for "
               "several targets");
         }
         if (name.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "create_generated_clock: -name must not be empty");
         }
         std::vector<std::pair<std::string, std::string>> params;
@@ -5846,13 +5878,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = NeedDesign(ctx)) return *bad;
         if (!opts.Seen("-setup") && !opts.Seen("-hold")) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_clock_gating_check: at least one of -setup, "
               "-hold is required");
         }
         if (opts.Has("-high") && opts.Has("-low")) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_clock_gating_check: -high and -low conflict");
         }
         std::vector<std::pair<std::string, std::string>> params;
@@ -5884,7 +5916,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (targets.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_clock_gating_check: at least one target is "
               "required");
         }
@@ -5915,18 +5947,18 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = NeedDesign(ctx)) return *bad;
         if (!opts.Seen("-from") || !opts.Seen("-to")) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_data_check: -from and -to are both required");
         }
         if (!opts.Seen("-setup") && !opts.Seen("-hold")) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_data_check: at least one of -setup, -hold is "
               "required");
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_data_check: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -6002,25 +6034,25 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = NeedDesign(ctx)) return *bad;
         if (opts.Has("-high") && opts.Has("-low")) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_min_pulse_width: -high and -low conflict");
         }
         if (opts.Positionals().size() < 2) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::set_min_pulse_width <ns> [-high | -low] "
               "<target>...");
         }
         double value = 0.0;
         if (!ParseDouble(opts.Positionals()[0], value)) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_min_pulse_width: width needs a number, got: " +
                   opts.Positionals()[0]);
         }
         if (value <= 0.0) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_min_pulse_width: width must be positive, got: " +
                   FormatNum(value));
         }
@@ -6066,7 +6098,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                           (opts.Has("-stop_propagation") ? 1 : 0);
         if (types != 1) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_sense: exactly one of -positive, -negative, "
               "-stop_propagation is required");
         }
@@ -6076,7 +6108,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return *bad;
         }
         if (targets.empty()) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kInvalidArgument,
                                      "set_sense: at least one pin is "
                                      "required");
         }
@@ -6120,7 +6152,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (targets.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_ideal_network: at least one target is required");
         }
         std::vector<std::pair<std::string, std::string>> params;
@@ -6154,20 +6186,20 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = NeedDesign(ctx)) return *bad;
         if (opts.Positionals().size() < 2) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::set_ideal_latency <ns> [-rise | -fall] "
               "[-min | -max] <target>...");
         }
         double value = 0.0;
         if (!ParseDouble(opts.Positionals()[0], value)) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_ideal_latency: latency needs a number, got: " +
                   opts.Positionals()[0]);
         }
         if (value < 0.0) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_ideal_latency: latency must not be negative, "
               "got: " +
                   FormatNum(value));
@@ -6219,21 +6251,21 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = NeedDesign(ctx)) return *bad;
         if (opts.Positionals().size() < 2) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::set_ideal_transition <ns> [-rise | -fall] "
               "[-min | -max] <target>...");
         }
         double value = 0.0;
         if (!ParseDouble(opts.Positionals()[0], value)) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_ideal_transition: transition needs a number, "
               "got: " +
                   opts.Positionals()[0]);
         }
         if (value < 0.0) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_ideal_transition: transition must not be "
               "negative, got: " +
                   FormatNum(value));
@@ -6286,20 +6318,20 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
         if (!opts.Seen("-name") || opts.Value("-name")->empty()) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kInvalidArgument,
                                      "group_path: option -name is "
                                      "required");
         }
         if (!opts.Seen("-from") && !opts.Seen("-to") &&
             !opts.Seen("-through")) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "group_path: at least one of -from, -to, -through is "
               "required");
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "group_path: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -6318,7 +6350,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (critical_range < 0.0) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "group_path: -critical_range must not be negative, "
                 "got: " +
                     FormatNum(critical_range));
@@ -6390,19 +6422,19 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (auto bad = NeedDesign(ctx)) return *bad;
         if (opts.Positionals().size() < 2) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::set_max_time_borrow <ns> <target>...");
         }
         double value = 0.0;
         if (!ParseDouble(opts.Positionals()[0], value)) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_max_time_borrow: borrow needs a number, got: " +
                   opts.Positionals()[0]);
         }
         if (value < 0.0) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_max_time_borrow: borrow must not be negative, "
               "got: " +
                   FormatNum(value));
@@ -6448,7 +6480,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (opts.Positionals().size() != 1) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "write_sdc: expected exactly one output path; usage: "
               "write_sdc [-compress] <path>");
         }
@@ -6528,13 +6560,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "check_timing: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
         if (opts.Has("-verbose") && opts.Has("-summary")) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "check_timing: -verbose and -summary conflict");
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
@@ -6551,7 +6583,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         for (const std::string& name : included) {
           if (FindCheckTimingCheck(name) == nullptr) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kNotFound,
                 "check_timing: unknown check: " + name +
                     " (known checks: " + CheckTimingKnownChecks() + ")");
           }
@@ -6560,13 +6592,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           const CheckTimingCheck* check = FindCheckTimingCheck(name);
           if (check == nullptr) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kNotFound,
                 "check_timing: unknown check: " + name +
                     " (known checks: " + CheckTimingKnownChecks() + ")");
           }
           if (!check->is_default && included.count(name) == 0) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kNotFound,
                 "check_timing: -exclude names a check that is not in "
                 "the run: " +
                     name + " (include it first)");
@@ -6581,7 +6613,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (run.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "check_timing: no checks selected");
         }
         std::vector<CheckTimingOutcome> outcomes;
@@ -6681,7 +6713,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "report_clock: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -6814,7 +6846,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         } else {
           const auto kind = ParseObjectKind(args[0]);
           if (!kind.has_value()) {
-            return CommandResult::Fail(Diag::kInvalidConfiguration,
+            return CommandResult::Fail(Diag::kNotFound,
                                        "unknown object kind: " + args[0]);
           }
           for (const ObjectId id :
@@ -7579,7 +7611,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           -> CommandResult {
         if (args.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::begin_transaction <label>");
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
@@ -7603,7 +7635,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           -> CommandResult {
         if (args.size() > 1) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::commit_transaction [pass|fail|unknown]");
         }
         session::ProofStatus proof = session::ProofStatus::kUnknown;
@@ -7611,7 +7643,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           const auto parsed = ParseProof(args[0]);
           if (!parsed.has_value()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "proof must be pass, fail or unknown, got: " + args[0]);
           }
           proof = *parsed;
@@ -7644,7 +7676,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         std::uint64_t target = 0;
         if (!ParseU64(args[0], target)) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kInvalidArgument,
                                      "not a revision: " + args[0]);
         }
         const foundation::Status status = ctx.project.ledger.RollbackTo(target);
@@ -7668,7 +7700,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           -> CommandResult {
         if (args.empty() || args.size() > 3) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::register_report <name> [pass|fail|unknown] "
               "[timing_model]");
         }
@@ -7677,7 +7709,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           const auto parsed = ParseProof(args[1]);
           if (!parsed.has_value()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "proof must be pass, fail or unknown, got: " + args[1]);
           }
           proof = *parsed;
@@ -7700,12 +7732,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         std::uint64_t id = 0;
         if (!ParseU64(args[0], id)) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kInvalidArgument,
                                      "not an artifact id: " + args[0]);
         }
         const session::ArtifactRecord* record = ctx.project.ledger.FindArtifact(id);
         if (record == nullptr) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kNotFound,
                                      "unknown artifact: " + args[0]);
         }
         return CommandResult::Ok(
@@ -7721,7 +7753,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           -> CommandResult {
         if (args.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::export_check <report>...");
         }
         if (auto bad = NeedDesign(ctx)) return *bad;
@@ -7840,7 +7872,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (ctx.timing.odb.has_value() &&
             ctx.timing.odb->has_top_block()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidState,
               "design already loaded: eos::read_def or "
               "eos::import_odb already loaded a design");
         }
@@ -7871,7 +7903,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (ctx.timing.odb->has_top_block()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidState,
               "design already loaded: eos::read_def or "
               "eos::import_odb already loaded a design");
         }
@@ -7914,18 +7946,18 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (is_area) {
             if (*seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option " + flag + " given twice");
             }
             if (i + 4 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option " + flag + " needs four coordinates");
             }
             for (int k = 0; k < 4; ++k) {
               if (!ParseCoord(args[i + 1 + k], (*area)[k])) {
                 return CommandResult::Fail(
-                    Diag::kInvalidConfiguration,
+                    Diag::kInvalidArgument,
                     "option " + flag + " coordinate is not an integer: " +
                         args[i + 1 + k]);
               }
@@ -7942,12 +7974,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (flag == "-site") {
             if (site_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -site given twice");
             }
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -site needs a value");
             }
             site_seen = true;
@@ -7956,7 +7988,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             continue;
           }
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "unknown floorplan option: " + flag);
         }
         if (!ctx.timing.odb.has_value() ||
@@ -7966,12 +7998,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               Diag::kInvalidConfiguration,
               "no technology data loaded: eos::import_odb first");
         }
-        if (!ctx.timing.odb->has_top_block()) {
-          return CommandResult::Fail(
-              Diag::kUnclosedDesign,
-              "no mapped design: the imported database holds no top "
-              "block");
-        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
         pd::FloorplanReport report;
         const foundation::Status status = pd::RunFloorplan(
             ctx.timing.odb->RawDatabase(), options, &report);
@@ -8015,12 +8042,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               Diag::kInvalidConfiguration,
               "no technology data loaded: eos::import_odb first");
         }
-        if (!ctx.timing.odb->has_top_block()) {
-          return CommandResult::Fail(
-              Diag::kUnclosedDesign,
-              "no mapped design: the imported database holds no top "
-              "block");
-        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
         pd::FloorplanGeometry geometry;
         const foundation::Status status =
             pd::QueryFloorplanGeometry(ctx.timing.odb->RawDatabase(),
@@ -8079,7 +8101,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!options.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "signoff_summary: unexpected positional argument: " +
                   options.Positionals().front());
         }
@@ -8090,7 +8112,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         for (const std::string& report_path : {pv_path, lvs_path}) {
           if (report_path.find(' ') != std::string::npos) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "signoff_summary: report path contains a space: " +
                     report_path);
           }
@@ -8265,14 +8287,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (flag == "-timing_driven") {
             if (timing_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -timing_driven given twice");
             }
             timing_seen = true;
             options.timing_driven = true;
             continue;
           }
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kInvalidArgument,
                                      "unknown place option: " + flag);
         }
         if (!ctx.timing.odb.has_value() ||
@@ -8282,12 +8304,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               Diag::kInvalidConfiguration,
               "no technology data loaded: eos::import_odb first");
         }
-        if (!ctx.timing.odb->has_top_block()) {
-          return CommandResult::Fail(
-              Diag::kUnclosedDesign,
-              "no mapped design: the imported database holds no top "
-              "block");
-        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
         pd::PlaceReport report;
         const foundation::Status status = pd::RunPlace(
             ctx.timing.odb->RawDatabase(), options, &report);
@@ -8386,12 +8403,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               Diag::kInvalidConfiguration,
               "no technology data loaded: eos::import_odb first");
         }
-        if (!ctx.timing.odb->has_top_block()) {
-          return CommandResult::Fail(
-              Diag::kUnclosedDesign,
-              "no mapped design: the imported database holds no top "
-              "block");
-        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
         if (!ctx.place.placed) {
           return CommandResult::Fail(
               Diag::kInvalidConfiguration,
@@ -8445,14 +8457,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               -> std::optional<CommandResult> {
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option " + name + " needs a value");
             }
             return std::nullopt;
           };
           if (flag == "-clock") {
             if (clock_seen) {
-              return CommandResult::Fail(Diag::kInvalidConfiguration,
+              return CommandResult::Fail(Diag::kInvalidArgument,
                                          "option -clock given twice");
             }
             if (auto bad = need_value(flag)) return *bad;
@@ -8468,7 +8480,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (flag == "-root_buffer") {
             if (root_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -root_buffer given twice");
             }
             if (auto bad = need_value(flag)) return *bad;
@@ -8479,7 +8491,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (flag == "-sink_buffer") {
             if (sink_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -sink_buffer given twice");
             }
             if (auto bad = need_value(flag)) return *bad;
@@ -8487,12 +8499,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             options.sink_buffer = args[++i];
             continue;
           }
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kInvalidArgument,
                                      "unknown cts option: " + flag);
         }
         if (!clock_seen) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "cts needs a clock net: cts -clock <net>");
         }
         if (!ctx.timing.odb.has_value() ||
@@ -8502,12 +8514,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               Diag::kInvalidConfiguration,
               "no technology data loaded: eos::import_odb first");
         }
-        if (!ctx.timing.odb->has_top_block()) {
-          return CommandResult::Fail(
-              Diag::kUnclosedDesign,
-              "no mapped design: the imported database holds no top "
-              "block");
-        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
         if (ctx.timing.liberty_by_corner.empty()) {
           return CommandResult::Fail(
               Diag::kInvalidConfiguration,
@@ -8604,22 +8611,22 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             name_slot = &options.top_routing_layer;
             seen = &top_seen;
           } else {
-            return CommandResult::Fail(Diag::kInvalidConfiguration,
+            return CommandResult::Fail(Diag::kInvalidArgument,
                                        "unknown route option: " + flag);
           }
           if (*seen) {
-            return CommandResult::Fail(Diag::kInvalidConfiguration,
+            return CommandResult::Fail(Diag::kInvalidArgument,
                                        "option " + flag + " given twice");
           }
           if (i + 1 >= args.size()) {
-            return CommandResult::Fail(Diag::kInvalidConfiguration,
+            return CommandResult::Fail(Diag::kInvalidArgument,
                                        "option " + flag + " needs a value");
           }
           if (name_slot != nullptr) {
             *name_slot = args[i + 1];
           } else if (!ParseCoord(args[i + 1], *slot)) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "option " + flag + " value is not an integer: " +
                     args[i + 1]);
           }
@@ -8633,12 +8640,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               Diag::kInvalidConfiguration,
               "no technology data loaded: eos::import_odb first");
         }
-        if (!ctx.timing.odb->has_top_block()) {
-          return CommandResult::Fail(
-              Diag::kUnclosedDesign,
-              "no mapped design: the imported database holds no top "
-              "block");
-        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
         if (ctx.timing.liberty_by_corner.empty()) {
           return CommandResult::Fail(
               Diag::kInvalidConfiguration,
@@ -8731,12 +8733,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (flag == "-model") {
             if (model_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -model given twice");
             }
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -model needs a value");
             }
             model_seen = true;
@@ -8745,12 +8747,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (!flag.empty() && flag[0] == '-') {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "unknown extract_parasitics option: " + flag);
           }
           if (!spef_path.empty()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "usage: eos::extract_parasitics <spef_path> "
                 "[-model <path>]");
           }
@@ -8758,7 +8760,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (spef_path.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::extract_parasitics <spef_path> "
               "[-model <path>]");
         }
@@ -8774,12 +8776,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               Diag::kInvalidConfiguration,
               "no technology data loaded: eos::import_odb first");
         }
-        if (!ctx.timing.odb->has_top_block()) {
-          return CommandResult::Fail(
-              Diag::kUnclosedDesign,
-              "no mapped design: the imported database holds no top "
-              "block");
-        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
         pv::ExtractOptions options;
         options.spef_path = spef_path;
         options.model_path = model_path;
@@ -8843,7 +8840,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (flag == "-pdn") {
             if (pdn_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -pdn given twice");
             }
             pdn_seen = true;
@@ -8853,12 +8850,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (flag == "-fill_config") {
             if (fill_config_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -fill_config given twice");
             }
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -fill_config needs a value");
             }
             fill_config_seen = true;
@@ -8866,11 +8863,11 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             continue;
           }
           if (!flag.empty() && flag[0] == '-') {
-            return CommandResult::Fail(Diag::kInvalidConfiguration,
+            return CommandResult::Fail(Diag::kInvalidArgument,
                                        "unknown finish option: " + flag);
           }
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::finish [-pdn] [-fill_config <path>]");
         }
         if (!ctx.timing.odb.has_value() ||
@@ -8880,12 +8877,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               Diag::kInvalidConfiguration,
               "no technology data loaded: eos::import_odb first");
         }
-        if (!ctx.timing.odb->has_top_block()) {
-          return CommandResult::Fail(
-              Diag::kUnclosedDesign,
-              "no mapped design: the imported database holds no top "
-              "block");
-        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
         pd::FinishReport report;
         const foundation::Status status = pd::RunFinish(
             ctx.timing.odb->RawDatabase(), options, &report);
@@ -8907,19 +8899,19 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         for (const std::string& flag : args) {
           if (!flag.empty() && flag[0] == '-') {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "unknown write_gds option: " + flag);
           }
           if (!path.empty()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "usage: eos::write_gds <path>");
           }
           path = flag;
         }
         if (path.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration, "usage: eos::write_gds <path>");
+              Diag::kInvalidArgument, "usage: eos::write_gds <path>");
         }
         if (!ctx.timing.odb.has_value() ||
             ctx.timing.odb->RawDatabase() == nullptr ||
@@ -8928,12 +8920,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               Diag::kInvalidConfiguration,
               "no technology data loaded: eos::import_odb first");
         }
-        if (!ctx.timing.odb->has_top_block()) {
-          return CommandResult::Fail(
-              Diag::kUnclosedDesign,
-              "no mapped design: the imported database holds no top "
-              "block");
-        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
         pd::WriteGdsOptions options;
         options.path = path;
         pd::WriteGdsReport report;
@@ -8974,7 +8961,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         // intended tops elaborate differently by accident.
         if (args.size() < 2) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::read_filelist <path> <top> "
               "[-I <dir>...] [-D <define>...]");
         }
@@ -8989,7 +8976,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             flag = arg;
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option " + arg + " needs a value");
             }
             if (arg == "-I") {
@@ -9005,7 +8992,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             defines.push_back(arg.substr(2));
           } else {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "unknown read_filelist option: " + arg);
           }
           // -I and -D repeat by design (a list takes several
@@ -9018,17 +9005,17 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               flag == "-I" ? include_dirs.back() : defines.back();
           if (value.empty()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "option " + flag + " needs a non-empty value");
           }
           if (flag == "-I" && !IsFilelistCommandToken(value)) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "invalid read_filelist include directory: " + value);
           }
           if (flag == "-D" && !IsFilelistDefine(value)) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "invalid read_filelist define: " + value);
           }
         }
@@ -9087,7 +9074,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           ctx.synth = CommandContext::SynthSession();
           AppendEngineLog(ctx);
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kNotFound,
               "top module '" + top + "' not found in file list " +
                   list_path + " (modules: " + modules + ")");
         }
@@ -9158,7 +9145,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (!found) {
           AppendEngineLog(ctx);
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kNotFound,
               "top module '" + args[1] + "' not found in " + args[0] +
                   " (modules: " + modules + ")");
         }
@@ -9193,7 +9180,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           // untouched; it names a file, not the live design.
           ctx.synth = CommandContext::SynthSession();
           AppendEngineLog(ctx);
-          return FromStatus(stats.status());
+          return FromStatusContext(stats.status(), "elaborate: ",
+                                   kSynthClearedRecovery);
         }
         ctx.synth.elaborated = true;
         ctx.synth.elaborated_cells = stats.value().cell_count;
@@ -9384,17 +9372,17 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         for (std::size_t i = 0; i < args.size(); ++i) {
           if (args[i] != "-script") {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "unknown synth_generic option: " + args[i]);
           }
           if (i + 1 >= args.size()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "option -script needs a value");
           }
           if (script_seen) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "option -script given twice");
           }
           script_seen = true;
@@ -9403,7 +9391,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (script != "default" && script != "balance" &&
             script != "rewrite" && script != "none") {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kNotFound,
               "unknown generic script: " + script);
         }
         if (!ctx.synth.parsed || !ctx.synth.elaborated) {
@@ -9430,7 +9418,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             [&ctx](const foundation::Status& status) {
               AppendEngineLog(ctx);
               ctx.synth = CommandContext::SynthSession();
-              return FromStatus(status);
+              return FromStatusContext(status, "synth_generic: ",
+                                       kSynthClearedRecovery);
             };
         // Dispatch on the design-wide sequential count of the
         // elaborated design: sequential cells live in leaf
@@ -9451,13 +9440,15 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           synth::YosysEngine yosys;
           const foundation::Result<synth::YosysEngine::YosysDesignTotals> totals =
               yosys.DesignTotals();
-          if (!totals.ok()) return FromStatus(totals.status());
+          if (!totals.ok())
+            return FromStatusContext(totals.status(), "synth_generic: ");
           sequential_cells = totals.value().sequential_cells;
           if (sequential_cells > 0) {
             const foundation::Result<
                 std::vector<synth::YosysEngine::YosysIssue>>
                 issues = yosys.Issues(ctx.synth.top_cell);
-            if (!issues.ok()) return FromStatus(issues.status());
+            if (!issues.ok())
+              return FromStatusContext(issues.status(), "synth_generic: ");
             for (const synth::YosysEngine::YosysIssue& issue :
                  issues.value()) {
               if (issue.code == "unresolved_reference") {
@@ -9610,30 +9601,30 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (args[i] == "-target") {
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -target needs a value");
             }
             if (target_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -target given twice");
             }
             target_seen = true;
             target = args[++i];
             if (target != "delay" && target != "area") {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "unknown mapping target: " + target);
             }
           } else if (args[i] == "-liberty") {
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -liberty needs a value");
             }
             if (liberty_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -liberty given twice");
             }
             if (auto bad = CheckReadable(args[i + 1])) return *bad;
@@ -9641,7 +9632,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             liberty = args[++i];
           } else {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "unknown synth_map option: " + args[i]);
           }
         }
@@ -9897,19 +9888,19 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (args[i] == "-strategies") {
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -strategies needs a value");
             }
             if (strategies_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -strategies given twice");
             }
             strategies_seen = true;
             const std::string list = args[++i];
             if (list.empty()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -strategies needs a non-empty list");
             }
             std::set<std::string> seen_names;
@@ -9922,12 +9913,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               synth::OptStrategy strategy;
               if (name.empty() || !ParseOptStrategy(name, &strategy)) {
                 return CommandResult::Fail(
-                    Diag::kInvalidConfiguration,
+                    Diag::kInvalidArgument,
                     "unknown optimization strategy: " + name);
               }
               if (!seen_names.insert(name).second) {
                 return CommandResult::Fail(
-                    Diag::kInvalidConfiguration,
+                    Diag::kInvalidArgument,
                     "strategy given twice: " + name);
               }
               strategies.push_back(strategy);
@@ -9937,41 +9928,41 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           } else if (args[i] == "-margin") {
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -margin needs a value");
             }
             if (margin_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -margin given twice");
             }
             margin_seen = true;
             if (!ParseOptDouble(args[++i], margin) || margin < 0.0) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -margin needs a non-negative number");
             }
           } else if (args[i] == "-max_iterations") {
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -max_iterations needs a value");
             }
             if (max_iterations_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -max_iterations given twice");
             }
             max_iterations_seen = true;
             if (!ParseU64(args[++i], max_iterations) ||
                 max_iterations < 1) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -max_iterations needs a positive integer");
             }
           } else {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "unknown synth_opt option: " + args[i]);
           }
         }
@@ -10379,12 +10370,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             const bool is_lef = flag == "-lef";
             if ((is_lef && lef_seen) || (!is_lef && tlef_seen)) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option " + flag + " given twice");
             }
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option " + flag + " needs a value");
             }
             if (auto bad = CheckReadable(args[i + 1])) return *bad;
@@ -10401,19 +10392,19 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (flag == "-die_area") {
             if (die_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -die_area given twice");
             }
             if (i + 4 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -die_area needs four coordinates");
             }
             std::array<int, 4> area = {0, 0, 0, 0};
             for (int k = 0; k < 4; ++k) {
               if (!ParseCoord(args[i + 1 + k], area[k])) {
                 return CommandResult::Fail(
-                    Diag::kInvalidConfiguration,
+                    Diag::kInvalidArgument,
                     "option -die_area coordinate is not an integer: " +
                         args[i + 1 + k]);
               }
@@ -10425,12 +10416,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (flag.empty() || flag[0] == '-') {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "unknown write_def option: " + flag);
           }
           if (!dest.empty()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "write_def takes one path");
           }
           dest = flag;
@@ -10438,13 +10429,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (dest.empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::write_def <path> -lef <path> -tlef <path> "
               "[-die_area <lx> <ly> <ux> <uy>]");
         }
         if (!lef_seen || !tlef_seen) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "write_def needs -lef and -tlef: the cell LEF for "
               "macro sizes and the tech LEF for database units");
         }
@@ -10536,24 +10527,24 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (args[i] == "-genlib") {
             if (i + 1 >= args.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -genlib needs a value");
             }
             if (genlib_seen) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -genlib given twice");
             }
             genlib_seen = true;
             genlib = args[++i];
             if (genlib.empty()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "option -genlib needs a non-empty value");
             }
           } else if (!args[i].empty() && args[i][0] == '-') {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "unknown check_equivalence option: " + args[i]);
           } else {
             positionals.push_back(args[i]);
@@ -10561,7 +10552,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (positionals.size() != 2) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "usage: eos::check_equivalence <first> <second> "
               "[-genlib <path>]");
         }
@@ -10915,7 +10906,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             request.kind = analysis::CheckKind::kHold;
           } else {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "delay_type must be max or min, got: " +
                     options["delay_type"]);
           }
@@ -10925,7 +10916,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (!ParseU64(options["max_paths"], max_paths) ||
               max_paths == 0) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "max_paths must be a positive integer, got: " +
                     options["max_paths"]);
           }
@@ -10949,13 +10940,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             const double ceiling = std::stod(token, &used);
             if (used != token.size()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "slack_lesser_than must be a number, got: " + token);
             }
             request.slack_lesser_than = ceiling;
           } catch (const std::exception&) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "slack_lesser_than must be a number, got: " + token);
           }
         }
@@ -10973,13 +10964,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             }
             if (!known) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "unknown report_timing column: " + token);
             }
           }
           if (columns.empty()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "-columns needs at least one column");
           }
         } else {
@@ -10993,7 +10984,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (path_type != "end" && path_type != "summary" &&
               path_type != "full") {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "path_type must be end, summary or full, got: " +
                     path_type);
           }
@@ -11003,7 +10994,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           std::uint64_t parsed = 0;
           if (!ParseU64(options["digits"], parsed)) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "digits must be a non-negative integer, got: " +
                     options["digits"]);
           }
@@ -11023,7 +11014,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (selected.empty()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kNotFound,
                 "unknown scenario: " + options["scene"]);
           }
           scenes = std::move(selected);
@@ -11131,13 +11122,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "get_timing_paths: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
         if (opts.Seen("-of_objects")) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "get_timing_paths: -of_objects is not supported; "
               "select paths through objects with -through instead");
         }
@@ -11150,7 +11141,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             request.kind = analysis::CheckKind::kHold;
           } else {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "get_timing_paths: -delay_type must be max or min, "
                 "got: " + delay_type);
           }
@@ -11160,7 +11151,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (!ParseU64(*opts.Value("-max_paths"), parsed) ||
               parsed == 0) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "get_timing_paths: -max_paths must be a positive "
                 "integer, got: " + *opts.Value("-max_paths"));
           }
@@ -11171,7 +11162,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (!ParseU64(*opts.Value("-nworst"), parsed) ||
               parsed == 0) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "get_timing_paths: -nworst must be a positive "
                 "integer, got: " + *opts.Value("-nworst"));
           }
@@ -11230,14 +11221,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           std::string error;
           if (!expand(*opts.Value("-from"), true, request.from,
                       error)) {
-            return CommandResult::Fail(Diag::kInvalidConfiguration,
+            return CommandResult::Fail(Diag::kInvalidArgument,
                                        "get_timing_paths: " + error);
           }
         }
         for (const std::string& value : opts.Values("-through")) {
           std::string error;
           if (!expand(value, false, request.through, error)) {
-            return CommandResult::Fail(Diag::kInvalidConfiguration,
+            return CommandResult::Fail(Diag::kInvalidArgument,
                                        "get_timing_paths: " + error);
           }
         }
@@ -11256,7 +11247,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (selected.empty()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kNotFound,
                 "get_timing_paths: unknown scenario: " + wanted);
           }
           scenes = std::move(selected);
@@ -11367,7 +11358,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "report_constraint: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -11394,7 +11385,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (selected.empty()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kNotFound,
                 "unknown scenario: " + wanted);
           }
           scenes = std::move(selected);
@@ -11900,7 +11891,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "report_analysis_coverage: unexpected positional "
               "argument: " +
                   opts.Positionals()[0]);
@@ -11911,7 +11902,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (*status_details != "tested" &&
               *status_details != "untested") {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "report_analysis_coverage: -status_details must be "
                 "tested or untested, got: " +
                     *status_details);
@@ -11926,7 +11917,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (!known) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "report_analysis_coverage: unknown check type: " +
                     *check_type +
                     " (setup, hold, out_setup, out_hold, recovery, "
@@ -11950,7 +11941,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (selected.empty()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kNotFound,
                 "unknown scenario: " + wanted);
           }
           scenes = std::move(selected);
@@ -12164,7 +12155,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (args[0] != "on" && args[0] != "off") {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "set_bottleneck_capture takes on or off, got: " + args[0]);
         }
         ctx.timing.bottleneck_capture = args[0] == "on";
@@ -12197,7 +12188,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "report_qor: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -12215,7 +12206,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (picked.empty()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kNotFound,
                 "report_qor: unknown scenario: " + name);
           }
           selected = std::move(picked);
@@ -12635,7 +12626,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "report_bottleneck: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -12648,7 +12639,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             kind = analysis::CheckKind::kHold;
           } else {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "report_bottleneck: -delay_type must be max or min, "
                 "got: " + delay_type);
           }
@@ -12659,7 +12650,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (!ParseU64(*opts.Value("-max_cells"), parsed) ||
               parsed == 0) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "report_bottleneck: -max_cells must be a positive "
                 "integer, got: " + *opts.Value("-max_cells"));
           }
@@ -12691,7 +12682,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           const auto hit = ctx.collections.find(paths_handle);
           if (hit == ctx.collections.end()) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kNotFound,
                 "report_bottleneck: unknown collection: " +
                     paths_handle);
           }
@@ -12699,7 +12690,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           for (const CollectionMember& member : hit->second) {
             if (!member.IsPath()) {
               return CommandResult::Fail(
-                  Diag::kInvalidConfiguration,
+                  Diag::kInvalidArgument,
                   "report_bottleneck: -paths needs a path "
                   "collection, but " +
                       paths_handle + " holds " +
@@ -12740,7 +12731,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           if (!known) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kNotFound,
                 "report_bottleneck: unknown scene: " + name);
           }
           report_scene = name;
@@ -12902,7 +12893,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "report_global_timing: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -13041,7 +13032,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "report_global_slack: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -13168,7 +13159,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "report_min_period: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -13300,7 +13291,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "report_min_pulse_width: unexpected positional "
               "argument: " + opts.Positionals()[0]);
         }
@@ -13437,7 +13428,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "report_clock_gating_check: unexpected positional "
               "argument: " + opts.Positionals()[0]);
         }
@@ -13626,7 +13617,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (!opts.Positionals().empty()) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "timing_summary: unexpected positional argument: " +
                   opts.Positionals()[0]);
         }
@@ -13636,7 +13627,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           if (!ParseU64(*opts.Value("-max_paths"), parsed) ||
               parsed == 0) {
             return CommandResult::Fail(
-                Diag::kInvalidConfiguration,
+                Diag::kInvalidArgument,
                 "timing_summary: -max_paths must be a positive "
                 "integer, got: " +
                     *opts.Value("-max_paths"));
@@ -14229,7 +14220,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         std::uint64_t max_iterations = 0;
         if (!ParseU64(args[0], max_iterations) || max_iterations == 0) {
           return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
+              Diag::kInvalidArgument,
               "max_iterations must be a positive integer, got: " + args[0]);
         }
         if (!ctx.timing.odb.has_value() ||
@@ -14329,7 +14320,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
       [&registry](CommandContext&, const std::vector<std::string>& args)
           -> CommandResult {
         if (args.size() > 1) {
-          return CommandResult::Fail(Diag::kInvalidConfiguration,
+          return CommandResult::Fail(Diag::kInvalidArgument,
                                      "usage: eos::help [command|pattern]");
         }
         if (args.empty()) {

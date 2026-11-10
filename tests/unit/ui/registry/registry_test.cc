@@ -163,7 +163,7 @@ TEST(CoreCommands, DesignLifecycleAndUnclosedDesignDiagnostic) {
   ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
   const CommandResult again = shell.Run("create_design", {"other"});
   ASSERT_FALSE(again.ok);
-  EXPECT_EQ(again.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(again.diag, Diag::kInvalidState);
 
   const CommandResult current = shell.Run("current_design");
   ASSERT_TRUE(current.ok);
@@ -187,7 +187,7 @@ TEST(CoreCommands, BuildADesignThroughCommands) {
 
   const CommandResult bad_cell = shell.Run("create_instance", {"u2", "nope"});
   ASSERT_FALSE(bad_cell.ok);
-  EXPECT_EQ(bad_cell.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(bad_cell.diag, Diag::kNotFound);
   const CommandResult bad_dir = shell.Run("create_port", {"x", "sideways"});
   EXPECT_FALSE(bad_dir.ok);
 }
@@ -197,7 +197,7 @@ TEST(CoreCommands, UnsupportedOptionsAreRejectedNeverIgnored) {
   ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
   const CommandResult result = shell.Run("create_cell", {"c1", "-bogus"});
   ASSERT_FALSE(result.ok);
-  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(result.diag, Diag::kInvalidArgument);
   EXPECT_NE(result.message.find("unsupported option"),
             std::string::npos);
   // And the rejected command created nothing.
@@ -263,6 +263,9 @@ TEST(CoreCommands, TransactionsAndReportsThroughCommands) {
   ASSERT_TRUE(shell.Run("begin_transaction", {"place"}).ok);
   const CommandResult twice = shell.Run("begin_transaction", {"again"});
   EXPECT_FALSE(twice.ok);
+  EXPECT_EQ(twice.diag, Diag::kInvalidState);
+  EXPECT_NE(twice.message.find("a transaction is already pending"),
+            std::string::npos);
   const CommandResult committed = shell.Run("commit_transaction", {"pass"});
   ASSERT_TRUE(committed.ok);
   EXPECT_EQ(committed.payload, "revision=1");
@@ -341,6 +344,10 @@ TEST(CoreCommands, CheckpointAndRestoreRoundTripTheWholeProject) {
   }
   const CommandResult refused = live.Run("restore", {path});
   EXPECT_FALSE(refused.ok);
+  EXPECT_EQ(refused.diag, Diag::kInvalidArgument);
+  EXPECT_NE(refused.message.find("checksum mismatch"),
+            std::string::npos);
+  EXPECT_NE(refused.message.find("corrupt"), std::string::npos);
   const CommandResult still = live.Run("current_design");
   ASSERT_TRUE(still.ok);
   EXPECT_NE(still.payload.find("design=live"), std::string::npos);
@@ -403,9 +410,17 @@ TEST(CoreCommands, ExportCheckPassesAndNamesEveryBlockerKind) {
   // export_check with no reports named is a usage error, and with
   // no design open it is the unclosed-design diagnostic.
   Shell empty;
-  EXPECT_EQ(empty.Run("export_check").diag, Diag::kInvalidConfiguration);
-  EXPECT_EQ(empty.Run("export_check", {"timing"}).diag,
-            Diag::kUnclosedDesign);
+  const CommandResult no_reports = empty.Run("export_check");
+  EXPECT_FALSE(no_reports.ok);
+  EXPECT_EQ(no_reports.diag, Diag::kInvalidArgument);
+  EXPECT_NE(no_reports.message.find("usage: eos::export_check"),
+            std::string::npos);
+  const CommandResult no_design = empty.Run("export_check", {"timing"});
+  EXPECT_FALSE(no_design.ok);
+  EXPECT_EQ(no_design.diag, Diag::kUnclosedDesign);
+  EXPECT_NE(no_design.message.find(
+                "no design is open (see eos::create_design)"),
+            std::string::npos);
 }
 
 TEST(CoreCommands, ScenariosAndListCommands) {
@@ -1867,7 +1882,7 @@ TEST(CoreCommands, ReadVerilogUnknownTopRecordsNothing) {
   const CommandResult read = shell.Run(
       "read_verilog", {dir.Write("optdemo.v", kSynthOptDemo), "nope"});
   EXPECT_FALSE(read.ok);
-  EXPECT_EQ(read.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(read.diag, Diag::kNotFound);
   EXPECT_TRUE(shell.ctx.timing.verilog_path.empty());
   EXPECT_FALSE(shell.ctx.synth.parsed);
 }
@@ -2054,6 +2069,12 @@ TEST(CoreCommands, SynthGenericBrokenVariantStillFails) {
   // console output during the run, as the demo/hier README
   // documents.
   EXPECT_NE(generic.message.find("structural hashing"),
+            std::string::npos);
+  // The failure names the recovery: the session was cleared,
+  // so read_verilog and elaborate must run again.
+  EXPECT_NE(generic.message.find(
+                "the synth session was cleared, re-run "
+                "eos::read_verilog and eos::elaborate"),
             std::string::npos);
   // The failure happens after aigmap mutates the design, so the
   // synth state is cleared and the recovery is read_verilog
@@ -3622,8 +3643,14 @@ TEST(CoreCommands, ReportTimingRejectsBadOptions) {
   EXPECT_FALSE(shell.Run("report_timing", {"-columns", "point,bogus"}).ok);
   EXPECT_FALSE(
       shell.Run("report_timing", {"-delay_type", "sideways"}).ok);
-  EXPECT_FALSE(
-      shell.Run("report_timing", {"-to", "r2/D", "-max_paths", "2"}).ok);
+  // -to with -max_paths above 1 still fails fast, as before:
+  // per-endpoint enumeration is not implemented.
+  const CommandResult to_many =
+      shell.Run("report_timing", {"-to", "r2/D", "-max_paths", "2"});
+  EXPECT_FALSE(to_many.ok);
+  EXPECT_EQ(to_many.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(to_many.message.find("does not implement yet"),
+            std::string::npos);
   EXPECT_FALSE(shell.Run("report_timing", {"-max_paths", "0"}).ok);
   EXPECT_FALSE(shell.Run("report_timing", {"-path_type", "wide"}).ok);
 }
@@ -4824,7 +4851,13 @@ TEST(CoreCommands, HelpListsAndDescribesCommands) {
   const CommandResult unknown = shell.Run("help", {"bogus"});
   EXPECT_FALSE(unknown.ok);
   EXPECT_EQ(unknown.diag, Diag::kInvalidCommand);
-  EXPECT_FALSE(shell.Run("help", {"a", "b"}).ok);
+  EXPECT_NE(unknown.message.find("unknown command: bogus"),
+            std::string::npos);
+  const CommandResult too_many = shell.Run("help", {"a", "b"});
+  EXPECT_FALSE(too_many.ok);
+  EXPECT_EQ(too_many.diag, Diag::kInvalidArgument);
+  EXPECT_NE(too_many.message.find("usage: eos::help"),
+            std::string::npos);
 }
 
 TEST(CoreCommands, HelpWildcardPatterns) {
@@ -4961,10 +4994,10 @@ TEST(CoreCommands, CloseTimingDiagnostics) {
   // design question.
   const CommandResult bad_bound = shell.Run("close_timing", {"zero"});
   ASSERT_FALSE(bad_bound.ok);
-  EXPECT_EQ(bad_bound.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(bad_bound.diag, Diag::kInvalidArgument);
   const CommandResult zero_bound = shell.Run("close_timing", {"0"});
   ASSERT_FALSE(zero_bound.ok);
-  EXPECT_EQ(zero_bound.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(zero_bound.diag, Diag::kInvalidArgument);
   // A well-formed bound but no ODB design: closure edits the
   // physical database, so this is the unclosed-design diagnostic.
   const CommandResult no_design = shell.Run("close_timing", {"3"});
@@ -5137,7 +5170,7 @@ TEST(CoreCommands, FloorplanSummaryFailsFastWithoutFloorplan) {
   ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
   const CommandResult result = shell.Run("floorplan_summary", {});
   ASSERT_FALSE(result.ok);
-  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(result.diag, Diag::kInvalidState);
   EXPECT_NE(result.message.find("no floorplan"), std::string::npos);
 }
 
@@ -5166,7 +5199,7 @@ TEST(CoreCommands, FloorplanSummaryRejectsBadOptions) {
   const CommandResult result =
       shell.Run("floorplan_summary", {"-bogus"});
   ASSERT_FALSE(result.ok);
-  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(result.diag, Diag::kInvalidArgument);
   EXPECT_NE(result.message.find("floorplan_summary"), std::string::npos);
 }
 
@@ -5389,22 +5422,22 @@ TEST(CoreCommands, SignoffSummaryRejectsBadOptions) {
   const CommandResult bogus =
       shell.Run("signoff_summary", {"-bogus"});
   ASSERT_FALSE(bogus.ok);
-  EXPECT_EQ(bogus.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(bogus.diag, Diag::kInvalidArgument);
   EXPECT_NE(bogus.message.find("signoff_summary"), std::string::npos);
   const CommandResult positional = shell.Run(
       "signoff_summary", {"-pv", pv, "-lvs", lvs, "extra"});
   ASSERT_FALSE(positional.ok);
-  EXPECT_EQ(positional.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(positional.diag, Diag::kInvalidArgument);
   const CommandResult twice = shell.Run(
       "signoff_summary",
       {"-pv", pv, "-pv", pv, "-lvs", lvs});
   ASSERT_FALSE(twice.ok);
-  EXPECT_EQ(twice.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(twice.diag, Diag::kInvalidArgument);
   const CommandResult spaced = shell.Run(
       "signoff_summary",
       {"-pv", "/tmp/has a space.md", "-lvs", lvs});
   ASSERT_FALSE(spaced.ok);
-  EXPECT_EQ(spaced.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(spaced.diag, Diag::kInvalidArgument);
   EXPECT_NE(spaced.message.find("space"), std::string::npos);
 }
 
@@ -5827,12 +5860,12 @@ TEST(CoreCommands, ReadLefFailsFastAfterDesignLoaded) {
   ASSERT_TRUE(shell.Run("read_def", {def_path}).ok);
   const CommandResult again = shell.Run("read_lef", {lef});
   ASSERT_FALSE(again.ok);
-  EXPECT_EQ(again.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(again.diag, Diag::kInvalidState);
   EXPECT_NE(again.message.find("design already loaded"),
             std::string::npos);
   const CommandResult def_again = shell.Run("read_def", {def_path});
   ASSERT_FALSE(def_again.ok);
-  EXPECT_EQ(def_again.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(def_again.diag, Diag::kInvalidState);
 }
 
 TEST(CoreCommands, WriteDefRejectsBadOptions) {
@@ -5854,22 +5887,22 @@ TEST(CoreCommands, WriteDefRejectsBadOptions) {
   const CommandResult unknown = shell.Run(
       "write_def", {def_path, "-lef", lef, "-tlef", tlef, "-bogus"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidArgument);
   const CommandResult dup_lef = shell.Run(
       "write_def",
       {def_path, "-lef", lef, "-lef", lef, "-tlef", tlef});
   ASSERT_FALSE(dup_lef.ok);
-  EXPECT_EQ(dup_lef.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(dup_lef.diag, Diag::kInvalidArgument);
   const CommandResult no_tlef =
       shell.Run("write_def", {def_path, "-lef", lef});
   ASSERT_FALSE(no_tlef.ok);
-  EXPECT_EQ(no_tlef.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(no_tlef.diag, Diag::kInvalidArgument);
   const CommandResult bad_area = shell.Run(
       "write_def",
       {def_path, "-lef", lef, "-tlef", tlef, "-die_area", "0", "0",
        "wide", "5000"});
   ASSERT_FALSE(bad_area.ok);
-  EXPECT_EQ(bad_area.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(bad_area.diag, Diag::kInvalidArgument);
   const CommandResult empty_area = shell.Run(
       "write_def",
       {def_path, "-lef", lef, "-tlef", tlef, "-die_area", "0", "0",
@@ -5891,7 +5924,7 @@ TEST(CoreCommands, FloorplanRejectsBadOptions) {
 
   const CommandResult unknown = shell.Run("floorplan", {"-bogus"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidArgument);
   const CommandResult duplicate =
       shell.Run("floorplan", {"-site", "core", "-site", "core"});
   ASSERT_FALSE(duplicate.ok);
@@ -5988,11 +6021,11 @@ TEST(CoreCommands, PlaceRejectsBadOptions) {
 
   const CommandResult unknown = shell.Run("place", {"-bogus"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidArgument);
   const CommandResult duplicate =
       shell.Run("place", {"-timing_driven", "-timing_driven"});
   ASSERT_FALSE(duplicate.ok);
-  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidArgument);
 }
 
 TEST(CoreCommands, PlaceTimingDrivenWithoutLibertyFailsFast) {
@@ -6168,7 +6201,7 @@ TEST(CoreCommands, PlaceSummaryRejectsBadOptions) {
 
   const CommandResult result = shell.Run("place_summary", {"-bogus"});
   ASSERT_FALSE(result.ok);
-  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(result.diag, Diag::kInvalidArgument);
 }
 
 // P3: eos::cts option parsing and session preconditions. The
@@ -6180,20 +6213,20 @@ TEST(CoreCommands, CtsRejectsBadOptions) {
   Shell shell;
   const CommandResult unknown = shell.Run("cts", {"-bogus"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidArgument);
   EXPECT_NE(unknown.message.find("unknown cts option"),
             std::string::npos);
   const CommandResult duplicate =
       shell.Run("cts", {"-clock", "clk", "-clock", "clk"});
   ASSERT_FALSE(duplicate.ok);
-  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidArgument);
   EXPECT_NE(duplicate.message.find("given twice"), std::string::npos);
   const CommandResult missing_value = shell.Run("cts", {"-clock"});
   ASSERT_FALSE(missing_value.ok);
-  EXPECT_EQ(missing_value.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(missing_value.diag, Diag::kInvalidArgument);
   const CommandResult no_clock = shell.Run("cts", {});
   ASSERT_FALSE(no_clock.ok);
-  EXPECT_EQ(no_clock.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(no_clock.diag, Diag::kInvalidArgument);
   EXPECT_NE(no_clock.message.find("needs a clock net"),
             std::string::npos);
 }
@@ -6276,21 +6309,21 @@ TEST(CoreCommands, RouteRejectsBadOptions) {
   Shell shell;
   const CommandResult unknown = shell.Run("route", {"-bogus"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidArgument);
   EXPECT_NE(unknown.message.find("unknown route option"),
             std::string::npos);
   const CommandResult duplicate =
       shell.Run("route", {"-min_layer", "1", "-min_layer", "1"});
   ASSERT_FALSE(duplicate.ok);
-  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidArgument);
   EXPECT_NE(duplicate.message.find("given twice"), std::string::npos);
   const CommandResult missing_value = shell.Run("route", {"-max_layer"});
   ASSERT_FALSE(missing_value.ok);
-  EXPECT_EQ(missing_value.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(missing_value.diag, Diag::kInvalidArgument);
   const CommandResult not_a_number =
       shell.Run("route", {"-min_layer", "wide"});
   ASSERT_FALSE(not_a_number.ok);
-  EXPECT_EQ(not_a_number.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(not_a_number.diag, Diag::kInvalidArgument);
 }
 
 TEST(CoreCommands, ExtractParasiticsRejectsBadArguments) {
@@ -6299,28 +6332,28 @@ TEST(CoreCommands, ExtractParasiticsRejectsBadArguments) {
   Shell shell;
   const CommandResult no_args = shell.Run("extract_parasitics", {});
   ASSERT_FALSE(no_args.ok);
-  EXPECT_EQ(no_args.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(no_args.diag, Diag::kInvalidArgument);
   EXPECT_NE(no_args.message.find("usage"), std::string::npos);
   const CommandResult two_positional =
       shell.Run("extract_parasitics", {"a.spef", "b.spef"});
   ASSERT_FALSE(two_positional.ok);
-  EXPECT_EQ(two_positional.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(two_positional.diag, Diag::kInvalidArgument);
   const CommandResult unknown =
       shell.Run("extract_parasitics", {"a.spef", "-bogus"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidArgument);
   EXPECT_NE(unknown.message.find("unknown extract_parasitics option"),
             std::string::npos);
   const CommandResult duplicate = shell.Run(
       "extract_parasitics", {"a.spef", "-model", "m.rules", "-model",
                              "m.rules"});
   ASSERT_FALSE(duplicate.ok);
-  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidArgument);
   EXPECT_NE(duplicate.message.find("given twice"), std::string::npos);
   const CommandResult missing_value =
       shell.Run("extract_parasitics", {"a.spef", "-model"});
   ASSERT_FALSE(missing_value.ok);
-  EXPECT_EQ(missing_value.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(missing_value.diag, Diag::kInvalidArgument);
   EXPECT_NE(missing_value.message.find("needs a value"),
             std::string::npos);
   const CommandResult missing_model =
@@ -6357,11 +6390,11 @@ TEST(CoreCommands, RouteAcceptsDetailedOptions) {
   const CommandResult duplicate = shell.Run(
       "route", {"-max_iterations", "1", "-max_iterations", "2"});
   ASSERT_FALSE(duplicate.ok);
-  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidArgument);
   const CommandResult not_a_number =
       shell.Run("route", {"-max_iterations", "many"});
   ASSERT_FALSE(not_a_number.ok);
-  EXPECT_EQ(not_a_number.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(not_a_number.diag, Diag::kInvalidArgument);
 }
 
 TEST(CoreCommands, RouteRejectsZeroIterations) {
@@ -6462,23 +6495,23 @@ TEST(CoreCommands, FinishRejectsBadOptions) {
   Shell shell;
   const CommandResult unknown = shell.Run("finish", {"-bogus"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidArgument);
   EXPECT_NE(unknown.message.find("unknown finish option"),
             std::string::npos);
   const CommandResult duplicate = shell.Run("finish", {"-pdn", "-pdn"});
   ASSERT_FALSE(duplicate.ok);
-  EXPECT_EQ(duplicate.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(duplicate.diag, Diag::kInvalidArgument);
   EXPECT_NE(duplicate.message.find("given twice"), std::string::npos);
   const CommandResult missing_value =
       shell.Run("finish", {"-fill_config"});
   ASSERT_FALSE(missing_value.ok);
-  EXPECT_EQ(missing_value.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(missing_value.diag, Diag::kInvalidArgument);
   EXPECT_NE(missing_value.message.find("needs a value"),
             std::string::npos);
   const CommandResult positional =
       shell.Run("finish", {"stray"});
   ASSERT_FALSE(positional.ok);
-  EXPECT_EQ(positional.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(positional.diag, Diag::kInvalidArgument);
   EXPECT_NE(positional.message.find("usage"), std::string::npos);
 }
 
@@ -6486,17 +6519,17 @@ TEST(CoreCommands, WriteGdsRejectsBadArguments) {
   Shell shell;
   const CommandResult no_args = shell.Run("write_gds", {});
   ASSERT_FALSE(no_args.ok);
-  EXPECT_EQ(no_args.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(no_args.diag, Diag::kInvalidArgument);
   EXPECT_NE(no_args.message.find("usage"), std::string::npos);
   const CommandResult two_positional =
       shell.Run("write_gds", {"a.gds", "b.gds"});
   ASSERT_FALSE(two_positional.ok);
-  EXPECT_EQ(two_positional.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(two_positional.diag, Diag::kInvalidArgument);
   EXPECT_NE(two_positional.message.find("usage"), std::string::npos);
   const CommandResult unknown =
       shell.Run("write_gds", {"-bogus"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidArgument);
   EXPECT_NE(unknown.message.find("unknown write_gds option"),
             std::string::npos);
 }
@@ -6529,7 +6562,7 @@ TEST(CoreCommands, SynthStatsRejectsBadArguments) {
   ASSERT_TRUE(shell.Run("elaborate").ok);
   const CommandResult extra = shell.Run("synth_stats", {"optloop"});
   EXPECT_FALSE(extra.ok);
-  EXPECT_EQ(extra.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(extra.diag, Diag::kInvalidArgument);
 }
 
 // The stats for the flat optloop, from the live elaborated
@@ -6605,7 +6638,7 @@ TEST(CoreCommands, SynthSummaryRejectsBadArguments) {
   ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
   const CommandResult extra = shell.Run("synth_summary", {"optloop"});
   EXPECT_FALSE(extra.ok);
-  EXPECT_EQ(extra.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(extra.diag, Diag::kInvalidArgument);
 }
 
 // F1: a mapped-only design reports the mapped record with the
@@ -6747,7 +6780,7 @@ TEST(CoreCommands, SynthIssuesRejectsBadArguments) {
   ASSERT_TRUE(shell.Run("elaborate").ok);
   const CommandResult extra = shell.Run("synth_issues", {"optloop"});
   EXPECT_FALSE(extra.ok);
-  EXPECT_EQ(extra.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(extra.diag, Diag::kInvalidArgument);
 }
 
 // The flat optloop is clean: no issues, and the payload names
@@ -6974,14 +7007,14 @@ TEST(RepairCommands, SetWireRcStoresOverrideAndRejectsBadValues) {
   const CommandResult wrong_argc =
       shell.Run("set_wire_rc", {"metal1", "1000"});
   ASSERT_FALSE(wrong_argc.ok);
-  EXPECT_EQ(wrong_argc.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(wrong_argc.diag, Diag::kInvalidArgument);
   EXPECT_NE(wrong_argc.message.find("usage: eos::set_wire_rc"),
             std::string::npos);
 
   const CommandResult not_numbers =
       shell.Run("set_wire_rc", {"metal1", "abc", "2e-9"});
   ASSERT_FALSE(not_numbers.ok);
-  EXPECT_EQ(not_numbers.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(not_numbers.diag, Diag::kInvalidArgument);
   EXPECT_NE(not_numbers.message.find("must be numbers"),
             std::string::npos);
 
@@ -7028,7 +7061,7 @@ TEST(RepairCommands, RepairTimingRejectsAmbiguousAndPartialOptions) {
   const CommandResult missing_def =
       shell.Run("repair_timing", {"-liberty", lib, "-lef", lef});
   ASSERT_FALSE(missing_def.ok);
-  EXPECT_EQ(missing_def.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(missing_def.diag, Diag::kInvalidArgument);
   EXPECT_NE(missing_def.message.find("missing required option -def"),
             std::string::npos);
 
@@ -7247,7 +7280,7 @@ TEST(SdcCommands, CreateClockFailureModes) {
   for (const std::vector<std::string>& args : bad) {
     const CommandResult result = shell.Run("create_clock", args);
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
-    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+    EXPECT_EQ(result.diag, Diag::kInvalidArgument);
   }
 }
 
@@ -7303,7 +7336,7 @@ TEST(SdcCommands, CreateGeneratedClockFailureModes) {
     const CommandResult result =
         shell.Run("create_generated_clock", args);
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
-    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+    EXPECT_EQ(result.diag, Diag::kInvalidArgument);
   }
 }
 
@@ -7331,7 +7364,7 @@ TEST(SdcCommands, ClockGatingCheckStoresSetupHoldAndEdge) {
   for (const std::vector<std::string>& args : bad) {
     const CommandResult result = shell.Run("set_clock_gating_check", args);
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
-    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+    EXPECT_EQ(result.diag, Diag::kInvalidArgument);
   }
 }
 
@@ -7366,7 +7399,7 @@ TEST(SdcCommands, DataCheckStoresCrossProductWithFromParam) {
   for (const std::vector<std::string>& args : bad) {
     const CommandResult result = shell.Run("set_data_check", args);
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
-    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+    EXPECT_EQ(result.diag, Diag::kInvalidArgument);
   }
 }
 
@@ -7394,7 +7427,7 @@ TEST(SdcCommands, MinPulseWidthStoresValueAndEdge) {
   for (const std::vector<std::string>& args : bad) {
     const CommandResult result = shell.Run("set_min_pulse_width", args);
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
-    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+    EXPECT_EQ(result.diag, Diag::kInvalidArgument);
   }
 }
 
@@ -7420,7 +7453,7 @@ TEST(SdcCommands, SenseStoresTypeAndClockNames) {
   for (const std::vector<std::string>& args : bad) {
     const CommandResult result = shell.Run("set_sense", args);
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
-    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+    EXPECT_EQ(result.diag, Diag::kInvalidArgument);
   }
 }
 
@@ -7438,7 +7471,7 @@ TEST(SdcCommands, IdealNetworkStoresNoPropagateFlag) {
   EXPECT_NE(held.payload.find("no_propagate=1"), std::string::npos);
   const CommandResult none = shell.Run("set_ideal_network", {});
   ASSERT_FALSE(none.ok);
-  EXPECT_EQ(none.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(none.diag, Diag::kInvalidArgument);
 }
 
 TEST(SdcCommands, IdealLatencyAndTransitionStoreValueEdgeDelay) {
@@ -7505,7 +7538,7 @@ TEST(SdcCommands, GroupPathStoresEndpointsAndRedefinitionReplaces) {
   for (const std::vector<std::string>& args : bad) {
     const CommandResult result = shell.Run("group_path", args);
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
-    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+    EXPECT_EQ(result.diag, Diag::kInvalidArgument);
   }
 }
 
@@ -7526,7 +7559,7 @@ TEST(SdcCommands, MaxTimeBorrowStoresValue) {
   for (const std::vector<std::string>& args : bad) {
     const CommandResult result = shell.Run("set_max_time_borrow", args);
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
-    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+    EXPECT_EQ(result.diag, Diag::kInvalidArgument);
   }
 }
 
@@ -7771,13 +7804,13 @@ TEST(WriteSdc, FailureModes) {
   const CommandResult unknown =
       shell.Run("write_sdc", {"-bogus", "out.sdc"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidArgument);
   const CommandResult extra = shell.Run("write_sdc", {"a.sdc", "b.sdc"});
   ASSERT_FALSE(extra.ok);
-  EXPECT_EQ(extra.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(extra.diag, Diag::kInvalidArgument);
   const CommandResult none = shell.Run("write_sdc", {});
   ASSERT_FALSE(none.ok);
-  EXPECT_EQ(none.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(none.diag, Diag::kInvalidArgument);
   const CommandResult unwritable =
       shell.Run("write_sdc", {"/nonexistent-dir-xyz/out.sdc"});
   ASSERT_FALSE(unwritable.ok);
@@ -8155,23 +8188,27 @@ TEST(CheckTiming, IncludeExcludeAndFailureModes) {
   EXPECT_NE(included.payload.find("check=multicycle_path status=pass "
                                  "findings=0"),
             std::string::npos);
-  const std::vector<std::vector<std::string>> bad = {
-      {"-include", "no_such_check"}, // unknown check
-      {"-exclude", "no_such_check"}, // unknown check
-      {"-exclude", "multicycle_path"}, // not in the run
-      {"-exclude", "clock_crossing"},  // not in the run
-      {"-verbose", "-summary"},        // conflicting forms
-      {"stray"},                       // positional argument
-      {"-exclude", "generated_clocks", "-exclude", "loops",
-       "-exclude", "no_driving_cell", "-exclude", "no_input_delay",
-       "-exclude", "no_output_delay", "-exclude", "partial_input_delay",
-       "-exclude", "pulse_clock_cell_type", "-exclude",
-       "unconstrained_endpoints"},     // empty run set
+  const std::vector<std::pair<std::vector<std::string>, Diag>> bad = {
+      {{"-include", "no_such_check"}, Diag::kNotFound},  // unknown check
+      {{"-exclude", "no_such_check"}, Diag::kNotFound},  // unknown check
+      {{"-exclude", "multicycle_path"},
+       Diag::kNotFound},  // not in the run
+      {{"-exclude", "clock_crossing"},
+       Diag::kNotFound},  // not in the run
+      {{"-verbose", "-summary"},
+       Diag::kInvalidArgument},  // conflicting forms
+      {{"stray"}, Diag::kInvalidArgument},  // positional argument
+      {{"-exclude", "generated_clocks", "-exclude", "loops",
+        "-exclude", "no_driving_cell", "-exclude", "no_input_delay",
+        "-exclude", "no_output_delay", "-exclude", "partial_input_delay",
+        "-exclude", "pulse_clock_cell_type", "-exclude",
+        "unconstrained_endpoints"},
+       Diag::kInvalidArgument},  // empty run set
   };
-  for (const std::vector<std::string>& args : bad) {
-    const CommandResult result = shell.Run("check_timing", args);
+  for (const std::pair<std::vector<std::string>, Diag>& entry : bad) {
+    const CommandResult result = shell.Run("check_timing", entry.first);
     ASSERT_FALSE(result.ok) << "args accepted: " << result.payload;
-    EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+    EXPECT_EQ(result.diag, entry.second);
   }
   // The unknown-check failure names the known checks.
   const CommandResult unknown =
@@ -8229,46 +8266,93 @@ TEST(Waivers, SetWaiverStoresRecordAndValidates) {
   ASSERT_TRUE(covered.ok) << covered.message;
   EXPECT_EQ(covered.payload, "total=1 active=0 unmatched=1 expired=0");
   // A duplicate name fails fast; a change means remove then set.
-  EXPECT_FALSE(SetWaiver(shell, "w-r2", "timing", "min_delay", "r2/D").ok);
+  const CommandResult dup =
+      SetWaiver(shell, "w-r2", "timing", "min_delay", "r2/D");
+  EXPECT_FALSE(dup.ok);
+  EXPECT_EQ(dup.diag, Diag::kInvalidArgument);
+  EXPECT_NE(dup.message.find("duplicate waiver name: w-r2"),
+            std::string::npos);
   // Unknown kind, the path kind (not in v1), unknown class for
   // the kind, unknown scene, malformed expiry, empty reason,
   // empty approver, unknown option, and a missing required
-  // option all fail fast.
-  EXPECT_FALSE(SetWaiver(shell, "w2", "bogus", "max_delay", "r2/D").ok);
-  EXPECT_FALSE(SetWaiver(shell, "w2", "path", "max_delay", "r2/D").ok);
-  EXPECT_FALSE(SetWaiver(shell, "w2", "timing", "no_such_class", "r2/D")
-                   .ok);
-  EXPECT_FALSE(SetWaiver(shell, "w2", "check", "max_delay", "b").ok);
-  EXPECT_FALSE(SetWaiver(shell, "w2", "timing", "max_delay", "r2/D",
-                         "no_such_scene")
-                   .ok);
-  EXPECT_FALSE(shell.Run("set_waiver",
-                         {"-kind", "timing", "-class", "max_delay",
-                          "-target", "r2/D", "-expires", "31-01-2027",
-                          "-reason", "accepted", "-approved_by",
-                          "mtmoreira", "-name", "w2"})
-                   .ok);
-  EXPECT_FALSE(shell.Run("set_waiver",
-                         {"-kind", "timing", "-class", "max_delay",
-                          "-target", "r2/D", "-reason", "",
-                          "-approved_by", "mtmoreira", "-name", "w2"})
-                   .ok);
-  EXPECT_FALSE(shell.Run("set_waiver",
-                         {"-kind", "timing", "-class", "max_delay",
-                          "-target", "r2/D", "-reason", "accepted",
-                          "-approved_by", "", "-name", "w2"})
-                   .ok);
-  EXPECT_FALSE(shell.Run("set_waiver",
-                         {"-kind", "timing", "-class", "max_delay",
-                          "-target", "r2/D", "-bogus", "1", "-reason",
-                          "accepted", "-approved_by", "mtmoreira",
-                          "-name", "w2"})
-                   .ok);
-  EXPECT_FALSE(shell.Run("set_waiver",
-                         {"-kind", "timing", "-class", "max_delay",
-                          "-target", "r2/D", "-reason", "accepted",
-                          "-approved_by", "mtmoreira"})
-                   .ok);
+  // option all fail fast with the argument code and the reason
+  // named.
+  const CommandResult bad_kind =
+      SetWaiver(shell, "w2", "bogus", "max_delay", "r2/D");
+  EXPECT_FALSE(bad_kind.ok);
+  EXPECT_EQ(bad_kind.diag, Diag::kInvalidArgument);
+  EXPECT_NE(bad_kind.message.find("unknown waiver kind: bogus"),
+            std::string::npos);
+  const CommandResult path_kind =
+      SetWaiver(shell, "w2", "path", "max_delay", "r2/D");
+  EXPECT_FALSE(path_kind.ok);
+  EXPECT_EQ(path_kind.diag, Diag::kInvalidArgument);
+  EXPECT_NE(path_kind.message.find("kind path is not in v1"),
+            std::string::npos);
+  const CommandResult bad_class =
+      SetWaiver(shell, "w2", "timing", "no_such_class", "r2/D");
+  EXPECT_FALSE(bad_class.ok);
+  EXPECT_EQ(bad_class.diag, Diag::kInvalidArgument);
+  EXPECT_NE(bad_class.message.find(
+                "unknown waiver class for kind timing: no_such_class"),
+            std::string::npos);
+  const CommandResult bad_scene =
+      SetWaiver(shell, "w2", "check", "max_delay", "b");
+  EXPECT_FALSE(bad_scene.ok);
+  EXPECT_EQ(bad_scene.diag, Diag::kInvalidArgument);
+  EXPECT_NE(bad_scene.message.find("unknown waiver class for kind check"),
+            std::string::npos);
+  const CommandResult unknown_scene =
+      SetWaiver(shell, "w2", "timing", "max_delay", "r2/D",
+                "no_such_scene");
+  EXPECT_FALSE(unknown_scene.ok);
+  EXPECT_EQ(unknown_scene.diag, Diag::kInvalidArgument);
+  EXPECT_NE(unknown_scene.message.find("unknown scenario: no_such_scene"),
+            std::string::npos);
+  const CommandResult bad_expiry = shell.Run(
+      "set_waiver",
+      {"-kind", "timing", "-class", "max_delay", "-target", "r2/D",
+       "-expires", "31-01-2027", "-reason", "accepted", "-approved_by",
+       "mtmoreira", "-name", "w2"});
+  EXPECT_FALSE(bad_expiry.ok);
+  EXPECT_EQ(bad_expiry.diag, Diag::kInvalidArgument);
+  EXPECT_NE(bad_expiry.message.find(
+                "malformed expiry date, want YYYY-MM-DD: 31-01-2027"),
+            std::string::npos);
+  const CommandResult no_reason = shell.Run(
+      "set_waiver",
+      {"-kind", "timing", "-class", "max_delay", "-target", "r2/D",
+       "-reason", "", "-approved_by", "mtmoreira", "-name", "w2"});
+  EXPECT_FALSE(no_reason.ok);
+  EXPECT_EQ(no_reason.diag, Diag::kInvalidArgument);
+  EXPECT_NE(no_reason.message.find("a waiver needs a reason"),
+            std::string::npos);
+  const CommandResult no_approver = shell.Run(
+      "set_waiver",
+      {"-kind", "timing", "-class", "max_delay", "-target", "r2/D",
+       "-reason", "accepted", "-approved_by", "", "-name", "w2"});
+  EXPECT_FALSE(no_approver.ok);
+  EXPECT_EQ(no_approver.diag, Diag::kInvalidArgument);
+  EXPECT_NE(no_approver.message.find("a waiver needs an approver"),
+            std::string::npos);
+  const CommandResult bad_option = shell.Run(
+      "set_waiver",
+      {"-kind", "timing", "-class", "max_delay", "-target", "r2/D",
+       "-bogus", "1", "-reason", "accepted", "-approved_by",
+       "mtmoreira", "-name", "w2"});
+  EXPECT_FALSE(bad_option.ok);
+  EXPECT_EQ(bad_option.diag, Diag::kInvalidArgument);
+  EXPECT_NE(bad_option.message.find("set_waiver: unknown option: -bogus"),
+            std::string::npos);
+  const CommandResult missing_option = shell.Run(
+      "set_waiver",
+      {"-kind", "timing", "-class", "max_delay", "-target", "r2/D",
+       "-reason", "accepted", "-approved_by", "mtmoreira"});
+  EXPECT_FALSE(missing_option.ok);
+  EXPECT_EQ(missing_option.diag, Diag::kInvalidArgument);
+  EXPECT_NE(missing_option.message.find("set_waiver: option -name is "
+                                        "required"),
+            std::string::npos);
   // Expiry: a waiver past its date reports expired; one dated
   // far ahead does not. The dates are far past and far future
   // so the test does not depend on the run date.
@@ -8296,6 +8380,9 @@ TEST(Waivers, SetWaiverStoresRecordAndValidates) {
   // existing names.
   const CommandResult unknown = shell.Run("remove_waiver", {"nope"});
   ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kNotFound);
+  EXPECT_NE(unknown.message.find("unknown waiver: nope"),
+            std::string::npos);
   EXPECT_NE(unknown.message.find("known waivers: w-r2, w-old, w-new"),
             std::string::npos);
   const CommandResult removed = shell.Run("remove_waiver", {"w-r2"});
@@ -9048,7 +9135,7 @@ TEST(ReportClock, UnknownOptionFailsFast) {
   const CommandResult result =
       shell.Run("report_clock", {"-nonsense"});
   ASSERT_FALSE(result.ok);
-  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(result.diag, Diag::kInvalidArgument);
 }
 
 TEST(ReportClock, PositionalArgumentFailsFast) {
@@ -9056,7 +9143,7 @@ TEST(ReportClock, PositionalArgumentFailsFast) {
   BuildCheckDesign(shell);
   const CommandResult result = shell.Run("report_clock", {"clk"});
   ASSERT_FALSE(result.ok);
-  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(result.diag, Diag::kInvalidArgument);
 }
 
 TEST(ReportClock, SkewGivenTwiceFailsFast) {
@@ -9065,7 +9152,7 @@ TEST(ReportClock, SkewGivenTwiceFailsFast) {
   const CommandResult result =
       shell.Run("report_clock", {"-skew", "-skew"});
   ASSERT_FALSE(result.ok);
-  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(result.diag, Diag::kInvalidArgument);
 }
 
 // ---- collections C1-C3 (Immediate unit 11, review items C1-C3) --------
@@ -9203,7 +9290,7 @@ TEST(Collections, PatternMatchingAndEmptyResultsAreOk) {
 
   const CommandResult bad_kind = shell.Run("get_objects", {"widget", "*"});
   ASSERT_FALSE(bad_kind.ok);
-  EXPECT_EQ(bad_kind.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(bad_kind.diag, Diag::kNotFound);
 
   const CommandResult bad_option =
       shell.Run("get_nets", {"-bogus", "n*"});
@@ -9665,13 +9752,13 @@ TEST(Collections, HandlesAsSdcTargets) {
       {"-source", "eos_coll_1", "-master_clock", "sys", "-divide_by", "2",
        "div2"});
   ASSERT_FALSE(source.ok);
-  EXPECT_EQ(source.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(source.diag, Diag::kInvalidArgument);
 
   // An unknown handle is not a target at all.
   const CommandResult unknown = shell.Run(
       "create_clock", {"-period", "8", "-name", "nope", "eos_coll_99"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kNotFound);
 }
 
 TEST(Collections, BusBracketEscaping) {
@@ -9864,7 +9951,7 @@ TEST(GetTimingPaths, GroupSelectionAndUnknownGroup) {
   const CommandResult unknown =
       shell.Run("get_timing_paths", {"-group", "nope"});
   ASSERT_FALSE(unknown.ok);
-  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(unknown.diag, Diag::kNotFound);
   EXPECT_NE(unknown.message.find("nope"), std::string::npos);
   EXPECT_NE(unknown.message.find("clk"), std::string::npos);
 }
@@ -9921,19 +10008,19 @@ TEST(GetTimingPaths, UnknownSceneEndpointAndFromFailFast) {
   const CommandResult scene =
       shell.Run("get_timing_paths", {"-scene", "func_xx"});
   ASSERT_FALSE(scene.ok);
-  EXPECT_EQ(scene.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(scene.diag, Diag::kNotFound);
   EXPECT_NE(scene.message.find("func_xx"), std::string::npos);
 
   const CommandResult endpoint =
       shell.Run("get_timing_paths", {"-to", "r9/D"});
   ASSERT_FALSE(endpoint.ok);
-  EXPECT_EQ(endpoint.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(endpoint.diag, Diag::kNotFound);
   EXPECT_NE(endpoint.message.find("r9/D"), std::string::npos);
 
   const CommandResult from =
       shell.Run("get_timing_paths", {"-from", "nope"});
   ASSERT_FALSE(from.ok);
-  EXPECT_EQ(from.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(from.diag, Diag::kNotFound);
   EXPECT_NE(from.message.find("nope"), std::string::npos);
 
   // A clock under -through fails naming it as a clock. The
@@ -9942,7 +10029,7 @@ TEST(GetTimingPaths, UnknownSceneEndpointAndFromFailFast) {
   const CommandResult through =
       shell.Run("get_timing_paths", {"-through", "sys"});
   ASSERT_FALSE(through.ok);
-  EXPECT_EQ(through.diag, Diag::kInvalidConfiguration);
+  EXPECT_EQ(through.diag, Diag::kInvalidArgument);
   EXPECT_NE(through.message.find("sys"), std::string::npos);
   EXPECT_NE(through.message.find("cannot be a -through object"),
             std::string::npos);
@@ -10223,6 +10310,293 @@ TEST(ReportBottleneck, ReadsPathsFromCollection) {
   ASSERT_FALSE(wrong_kind.ok);
   EXPECT_NE(wrong_kind.message.find("path collection"),
             std::string::npos);
+}
+
+// The error taxonomy (error-behavior unit): Diag codes are stable
+// strings, DiagFromName reverses them, and FromStatus maps each L0
+// ErrorCode 1:1 so Dispatch returns the command's real code.
+// Two codes have no command path: kStaleRevision
+// (begin_transaction always passes the current revision, so the
+// stale path is ledger-unit tested) and kOutOfRange (only the ID
+// allocator produces it, foundation/ids). kToolCrash stays
+// reserved and unused by any command.
+TEST(ErrorTaxonomy, DiagNameStrings) {
+  EXPECT_EQ(std::string(DiagName(Diag::kOk)), "ok");
+  EXPECT_EQ(std::string(DiagName(Diag::kInvalidCommand)),
+            "invalid_command");
+  EXPECT_EQ(std::string(DiagName(Diag::kInvalidConfiguration)),
+            "invalid_configuration");
+  EXPECT_EQ(std::string(DiagName(Diag::kUnsupportedFeature)),
+            "unsupported_feature");
+  EXPECT_EQ(std::string(DiagName(Diag::kUnclosedDesign)),
+            "unclosed_design");
+  EXPECT_EQ(std::string(DiagName(Diag::kProofUnknown)),
+            "proof_unknown");
+  EXPECT_EQ(std::string(DiagName(Diag::kVerifiedPass)),
+            "verified_pass");
+  EXPECT_EQ(std::string(DiagName(Diag::kToolCrash)), "tool_crash");
+  EXPECT_EQ(std::string(DiagName(Diag::kIoError)), "io_error");
+  EXPECT_EQ(std::string(DiagName(Diag::kInvalidArgument)),
+            "invalid_argument");
+  EXPECT_EQ(std::string(DiagName(Diag::kNotFound)), "not_found");
+  EXPECT_EQ(std::string(DiagName(Diag::kInvalidState)),
+            "invalid_state");
+  EXPECT_EQ(std::string(DiagName(Diag::kStaleRevision)),
+            "stale_revision");
+  EXPECT_EQ(std::string(DiagName(Diag::kOutOfRange)), "out_of_range");
+}
+
+TEST(ErrorTaxonomy, DiagFromNameRoundTrips) {
+  for (const Diag code :
+       {Diag::kOk, Diag::kInvalidCommand, Diag::kInvalidConfiguration,
+        Diag::kUnsupportedFeature, Diag::kUnclosedDesign,
+        Diag::kProofUnknown, Diag::kVerifiedPass, Diag::kToolCrash,
+        Diag::kIoError, Diag::kInvalidArgument, Diag::kNotFound,
+        Diag::kInvalidState, Diag::kStaleRevision, Diag::kOutOfRange}) {
+    const std::optional<Diag> back = DiagFromName(DiagName(code));
+    ASSERT_TRUE(back.has_value()) << DiagName(code);
+    EXPECT_EQ(*back, code);
+  }
+  EXPECT_FALSE(DiagFromName("unknown").has_value());
+  EXPECT_FALSE(DiagFromName("").has_value());
+  EXPECT_FALSE(DiagFromName("bogus").has_value());
+  EXPECT_FALSE(DiagFromName("INVALID_ARGUMENT").has_value());
+  EXPECT_FALSE(DiagFromName("invalid-argument").has_value());
+}
+
+TEST(ErrorTaxonomy, FromStatusMapsEachCodeThroughDispatch) {
+  Shell shell;
+  // An unknown name fails with kInvalidCommand naming it.
+  const CommandResult unknown = shell.Run("nope");
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidCommand);
+  EXPECT_NE(unknown.message.find("unknown command: eos::nope"),
+            std::string::npos);
+  // A bad argument count fails with kInvalidArgument and the
+  // usage line naming the command.
+  const CommandResult bad_count = shell.Run("help", {"a", "b"});
+  ASSERT_FALSE(bad_count.ok);
+  EXPECT_EQ(bad_count.diag, Diag::kInvalidArgument);
+  EXPECT_NE(bad_count.message.find("usage: eos::help"),
+            std::string::npos);
+  // An unknown waiver name fails with kNotFound naming the
+  // existing names (none yet).
+  const CommandResult no_waiver = shell.Run("remove_waiver", {"nope"});
+  ASSERT_FALSE(no_waiver.ok);
+  EXPECT_EQ(no_waiver.diag, Diag::kNotFound);
+  EXPECT_NE(no_waiver.message.find("unknown waiver: nope"),
+            std::string::npos);
+  EXPECT_NE(no_waiver.message.find("(no waivers)"),
+            std::string::npos);
+  // A second design fails with kInvalidState naming the open one.
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  const CommandResult second = shell.Run("create_design", {"top"});
+  ASSERT_FALSE(second.ok);
+  EXPECT_EQ(second.diag, Diag::kInvalidState);
+  EXPECT_NE(second.message.find("a design is already open: top"),
+            std::string::npos);
+  // No scenarios yet: a configuration failure.
+  Shell timing;
+  const CommandResult no_scenarios = timing.Run("run_timing");
+  ASSERT_FALSE(no_scenarios.ok);
+  EXPECT_EQ(no_scenarios.diag, Diag::kInvalidConfiguration);
+  // A scenario but no design source: the unclosed-design
+  // diagnostic.
+  ASSERT_TRUE(timing.Run(
+      "create_scenario", {"func_tt", "func", "tt", "estimate"})
+                  .ok);
+  const CommandResult no_source = timing.Run("run_timing");
+  ASSERT_FALSE(no_source.ok);
+  EXPECT_EQ(no_source.diag, Diag::kUnclosedDesign);
+  // A missing file fails with kIoError naming the path.
+  Shell io;
+  const CommandResult missing =
+      io.Run("read_verilog", {"/no/such/file.v", "top"});
+  ASSERT_FALSE(missing.ok);
+  EXPECT_EQ(missing.diag, Diag::kIoError);
+  EXPECT_NE(missing.message.find("could not read file: /no/such/file.v"),
+            std::string::npos);
+  // A sequential design fails synth_map with kUnsupportedFeature.
+  TimingTempDir dir;
+  Shell map;
+  const std::string liberty = dir.Write("cells.lib", kSynthMapLiberty);
+  ASSERT_TRUE(map.Run("read_verilog",
+                      {dir.Write("demo.v", kSynthDemo), "demo"})
+                  .ok);
+  ASSERT_TRUE(map.Run("elaborate").ok);
+  const CommandResult sequential =
+      map.Run("synth_map", {"-liberty", liberty});
+  ASSERT_FALSE(sequential.ok);
+  EXPECT_EQ(sequential.diag, Diag::kUnsupportedFeature);
+  EXPECT_NE(sequential.message.find("combinational"),
+            std::string::npos);
+}
+
+// The message rules (error-behavior unit): a failure names the
+// offending object, the missing input and its supplying command,
+// and the recovery when session state was cleared.
+TEST(ErrorMessages, NeedDesignNamesTheSupplyingCommand) {
+  Shell shell;
+  const CommandResult result =
+      shell.Run("create_port", {"clk", "in"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kUnclosedDesign);
+  EXPECT_EQ(result.message,
+            "no design is open (see eos::create_design)");
+}
+
+TEST(ErrorMessages, BuildTimingScenesNamesTheSupplyingCommand) {
+  TimingTempDir dir;
+  Shell shell;
+  // No scenarios yet.
+  const CommandResult none = shell.Run("report_timing");
+  ASSERT_FALSE(none.ok);
+  EXPECT_EQ(none.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(none.message.find("no active scenarios (see "
+                              "eos::create_scenario)"),
+            std::string::npos);
+  // A scenario but no design source.
+  ASSERT_TRUE(shell.Run("create_scenario",
+                        {"func_tt", "func", "tt", "estimate"})
+                    .ok);
+  const CommandResult no_source = shell.Run("report_timing");
+  ASSERT_FALSE(no_source.ok);
+  EXPECT_EQ(no_source.diag, Diag::kUnclosedDesign);
+  EXPECT_NE(no_source.message.find("no timing design source: "
+                                   "eos::import_odb or eos::read_verilog "
+                                   "first"),
+            std::string::npos);
+  // A source but no SDC.
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  const CommandResult no_sdc = shell.Run("report_timing");
+  ASSERT_FALSE(no_sdc.ok);
+  EXPECT_EQ(no_sdc.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(no_sdc.message.find("no SDC: eos::read_sdc first"),
+            std::string::npos);
+  // SDC but no Liberty for the scene's corner.
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)})
+                    .ok);
+  const CommandResult no_liberty = shell.Run("report_timing");
+  ASSERT_FALSE(no_liberty.ok);
+  EXPECT_EQ(no_liberty.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(no_liberty.message.find(
+                "no Liberty for corner tt (scene func_tt): "
+                "eos::read_liberty first"),
+            std::string::npos);
+}
+
+TEST(ErrorMessages, SdcOptionsParseFailuresNameTheCommandAndOption) {
+  Shell shell;
+  // An unknown option, with the command prefix.
+  const CommandResult unknown =
+      shell.Run("create_clock", {"-bogus", "1", "clk"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidArgument);
+  EXPECT_EQ(unknown.message, "create_clock: unknown option: -bogus");
+  // An option given twice.
+  const CommandResult twice = shell.Run(
+      "create_clock", {"-period", "10", "-period", "5", "clk"});
+  ASSERT_FALSE(twice.ok);
+  EXPECT_EQ(twice.diag, Diag::kInvalidArgument);
+  EXPECT_EQ(twice.message,
+            "create_clock: option -period given twice");
+  // An option with no value.
+  const CommandResult missing =
+      shell.Run("create_clock", {"-period"});
+  ASSERT_FALSE(missing.ok);
+  EXPECT_EQ(missing.diag, Diag::kInvalidArgument);
+  EXPECT_EQ(missing.message,
+            "create_clock: option -period needs 1 value(s)");
+  // A value that is not a number, with the value named.
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  const CommandResult not_number =
+      shell.Run("create_clock", {"-period", "abc", "clk"});
+  ASSERT_FALSE(not_number.ok);
+  EXPECT_EQ(not_number.diag, Diag::kInvalidArgument);
+  EXPECT_EQ(not_number.message,
+            "create_clock: option -period needs a number, got: abc");
+}
+
+TEST(ErrorMessages, ExpectCountNamesTheCommand) {
+  Shell shell;
+  const CommandResult result = shell.Run("create_design", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidArgument);
+  EXPECT_EQ(result.message, "usage: eos::create_design <name>");
+}
+
+TEST(ErrorMessages, ElaborateFailureNamesTheRecovery) {
+  // An escaped-identifier top parses (the name as written is
+  // "my.top") but is not a plain identifier, so elaboration
+  // fails before any pass runs: the session is cleared and the
+  // recovery is named.
+  TimingTempDir dir;
+  Shell shell;
+  const std::string path = dir.Write("dotted.v",
+                                     "module \\my.top (a, y);\n"
+                                     "  input a;\n"
+                                     "  output y;\n"
+                                     "  assign y = a;\n"
+                                     "endmodule\n");
+  ASSERT_TRUE(shell.Run("read_verilog", {path, "my.top"}).ok);
+  EXPECT_TRUE(shell.ctx.synth.parsed);
+  const CommandResult elaborated = shell.Run("elaborate");
+  ASSERT_FALSE(elaborated.ok);
+  EXPECT_EQ(elaborated.diag, Diag::kInvalidArgument);
+  EXPECT_NE(elaborated.message.find(
+                "top module name is not a plain identifier: my.top"),
+            std::string::npos);
+  EXPECT_NE(elaborated.message.find(
+                "the synth session was cleared, re-run "
+                "eos::read_verilog and eos::elaborate"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.synth.parsed);
+}
+
+TEST(ErrorMessages, LedgerFailuresUseStateCodes) {
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  // Commit and abort with nothing pending.
+  const CommandResult no_commit =
+      shell.Run("commit_transaction", {"pass"});
+  ASSERT_FALSE(no_commit.ok);
+  EXPECT_EQ(no_commit.diag, Diag::kInvalidState);
+  EXPECT_EQ(no_commit.message, "no transaction is pending");
+  const CommandResult no_abort = shell.Run("abort_transaction");
+  ASSERT_FALSE(no_abort.ok);
+  EXPECT_EQ(no_abort.diag, Diag::kInvalidState);
+  EXPECT_EQ(no_abort.message, "no transaction is pending");
+  // Begin while one is pending.
+  ASSERT_TRUE(shell.Run("begin_transaction", {"place"}).ok);
+  const CommandResult twice = shell.Run("begin_transaction", {"again"});
+  ASSERT_FALSE(twice.ok);
+  EXPECT_EQ(twice.diag, Diag::kInvalidState);
+  EXPECT_EQ(twice.message, "a transaction is already pending");
+  ASSERT_TRUE(shell.Run("commit_transaction", {"pass"}).ok);
+  // A revision that is not a number.
+  const CommandResult bad_revision = shell.Run("rollback", {"abc"});
+  ASSERT_FALSE(bad_revision.ok);
+  EXPECT_EQ(bad_revision.diag, Diag::kInvalidArgument);
+  EXPECT_EQ(bad_revision.message, "not a revision: abc");
+}
+
+TEST(ErrorMessages, WriteSdcSkippedRowNamesTheReason) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("bind_clock", {"c1", "clk"}).ok);
+  const std::string path = dir.Path("out.sdc");
+  const CommandResult written = shell.Run("write_sdc", {path});
+  ASSERT_TRUE(written.ok) << written.message;
+  EXPECT_EQ(written.payload,
+            "sdc=" + path +
+                " constraints=0 skipped=1\n"
+                "skipped: clock c1 clk (construction record, not an "
+                "SDC clock)");
 }
 
 }  // namespace

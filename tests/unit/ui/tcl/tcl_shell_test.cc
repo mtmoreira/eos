@@ -75,6 +75,102 @@ TEST(TclShell, CommandFailureIsACatchableTclErrorWithTheDiagnostic) {
   EXPECT_NE(caught.value().find("unclosed_design"), std::string::npos);
 }
 
+// D3: Eval returns the command's real diagnostic, not a
+// constant code, and the engine log drained by a failing
+// command is available for the shell to print.
+TEST(TclShell, EvalReturnsTheCommandsDiag) {
+  Fixture f;
+  auto shell = TclShell::Create(f.registry, f.ctx);
+  ASSERT_TRUE(shell.ok());
+  // An argument failure carries the argument code.
+  const auto bad_args = shell.value()->Eval("eos::help a b");
+  ASSERT_FALSE(bad_args.ok());
+  EXPECT_EQ(bad_args.status().code(),
+            foundation::ErrorCode::kInvalidArgument);
+  EXPECT_NE(bad_args.status().message().find(
+                "EOS invalid_argument: usage: eos::help"),
+            std::string::npos);
+  // An IO failure carries the IO code.
+  const auto missing =
+      shell.value()->Eval("eos::read_verilog /no/such/file.v top");
+  ASSERT_FALSE(missing.ok());
+  EXPECT_EQ(missing.status().code(), foundation::ErrorCode::kIoError);
+  EXPECT_NE(missing.status().message().find(
+                "EOS io_error: could not read file: /no/such/file.v"),
+            std::string::npos);
+  // A plain Tcl error has no EOS diagnostic, so it falls back
+  // to the argument code rather than inventing one.
+  const auto plain = shell.value()->Eval("nosuchcommand");
+  ASSERT_FALSE(plain.ok());
+  EXPECT_EQ(plain.status().code(),
+            foundation::ErrorCode::kInvalidArgument);
+  EXPECT_EQ(plain.status().message().find("EOS "), std::string::npos);
+}
+
+std::filesystem::path RepoRoot() {
+  std::filesystem::path dir =
+      std::filesystem::absolute(__FILE__).parent_path();
+  // tests/unit/ui/tcl -> repo root is four levels up.
+  for (int i = 0; i < 4; ++i) dir = dir.parent_path();
+  return dir;
+}
+
+TEST(TclShell, EvalLeavesFailedEngineLogForFailingCommands) {
+  Fixture f;
+  auto shell = TclShell::Create(f.registry, f.ctx);
+  ASSERT_TRUE(shell.ok());
+  // A failing command that ran no engine leaves nothing.
+  const auto no_engine = shell.value()->Eval("eos::create_net n1");
+  ASSERT_FALSE(no_engine.ok());
+  EXPECT_TRUE(shell.value()->LastFailedEngineLog().empty());
+  // The broken variant fails synth_generic after the ABC
+  // bridge read, draining engine lines.
+  const std::filesystem::path broken =
+      RepoRoot() / "demo" / "hier" / "broken" / "unresolved_top.v";
+  ASSERT_TRUE(shell.value()
+                  ->Eval("eos::read_verilog " + broken.string() +
+                         " unresolved_top")
+                  .ok());
+  ASSERT_TRUE(shell.value()->Eval("eos::elaborate").ok());
+  const auto generic = shell.value()->Eval("eos::synth_generic");
+  ASSERT_FALSE(generic.ok());
+  EXPECT_FALSE(shell.value()->LastFailedEngineLog().empty());
+  // A succeeding command clears the failed log.
+  ASSERT_TRUE(shell.value()->Eval("eos::create_design top").ok());
+  EXPECT_TRUE(shell.value()->LastFailedEngineLog().empty());
+}
+
+// RunFiles stops at the first failing file: later files never
+// run, and the exit is 1.
+TEST(TclShell, RunFilesStopsAtFirstFailingFile) {
+  Fixture f;
+  auto shell = TclShell::Create(f.registry, f.ctx);
+  ASSERT_TRUE(shell.ok());
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "eos_tcl_runfiles_stop";
+  std::filesystem::create_directories(dir);
+  const std::filesystem::path first = dir / "first.tcl";
+  {
+    std::ofstream out(first);
+    out << "eos::create_design top\n";
+    out << "eos::nope\n";
+  }
+  const std::filesystem::path second = dir / "second.tcl";
+  {
+    std::ofstream out(second);
+    out << "eos::create_net n1\n";
+  }
+  EXPECT_EQ(shell.value()->RunFiles(
+                {first.string(), second.string()}),
+            1);
+  // The second file never ran: the design has no objects.
+  const auto current = shell.value()->Eval("eos::current_design");
+  ASSERT_TRUE(current.ok());
+  EXPECT_NE(current.value().find("objects=0"), std::string::npos);
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
 // S6 backfill: RunFiles executes a script file through the same
 // command set, and a missing file is a nonzero exit, not a crash.
 TEST(TclShell, RunFilesExecutesScriptFilesAndRejectsMissingFiles) {
