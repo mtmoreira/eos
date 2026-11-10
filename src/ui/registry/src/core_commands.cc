@@ -12,6 +12,7 @@
 #include "eos/pd/floorplan.h"
 #include "eos/pd/place.h"
 #include "eos/pd/route.h"
+#include "eos/pv/drc.h"
 #include "eos/pv/extract.h"
 #include "eos/pv/signoff.h"
 #include "eos/db/odb.h"
@@ -101,6 +102,64 @@ std::optional<CommandResult> NeedTopBlock(const CommandContext& ctx) {
         "no mapped design: the imported database holds no top block");
   }
   return std::nullopt;
+}
+
+// The design fingerprint (Plan Section 12 export-freshness
+// rule): the synth record, the timing record, and the live
+// database identity (top block, counts, and the placement hash
+// over instance name, master, and coordinates, name-sorted).
+// Returns the hash and sets *had_design when the session holds
+// any design input at all. Empty when the session holds no
+// design at all. A floorplan-only or routing-only change moves
+// no instance, so it does not flip the fingerprint in v1; a
+// place or a new mapping does. Shared by signoff_summary and
+// drc_run: both store the fingerprint they ran against, and
+// signoff_summary flags the stored verdicts stale when the
+// current fingerprint differs.
+std::string DesignFingerprint(const CommandContext& ctx,
+                              bool* had_design) {
+  std::string input;
+  const auto add_part = [&input](const std::string& part) {
+    if (part.empty()) return;
+    if (!input.empty()) input += '|';
+    input += part;
+  };
+  add_part(ctx.synth.verilog_path);
+  add_part(ctx.synth.top_cell);
+  add_part(ctx.synth.mapped_liberty);
+  add_part(ctx.synth.mapped_verilog);
+  add_part(ctx.synth.opt_verilog);
+  add_part(ctx.synth.equiv_verdict);
+  add_part(ctx.timing.verilog_path);
+  add_part(ctx.timing.top_cell);
+  add_part(ctx.timing.sdc_path);
+  add_part(ctx.timing.spef_path);
+  for (const auto& entry : ctx.timing.liberty_by_corner) {
+    add_part(entry.first + "=" + entry.second);
+  }
+  if (ctx.timing.odb.has_value()) {
+    const db::OdbDatabase& odb = *ctx.timing.odb;
+    add_part("odb:" + odb.TopBlockName());
+    add_part("instances:" + std::to_string(odb.InstanceCount()));
+    add_part("nets:" + std::to_string(odb.NetCount()));
+    std::vector<db::OdbInstanceInfo> instances = odb.Instances();
+    std::sort(instances.begin(), instances.end(),
+              [](const db::OdbInstanceInfo& a,
+                 const db::OdbInstanceInfo& b) {
+                return a.name < b.name;
+              });
+    std::string placement;
+    for (const db::OdbInstanceInfo& inst : instances) {
+      placement += inst.name + "," + inst.master + "," +
+                   std::to_string(inst.x) + "," +
+                   std::to_string(inst.y) + ";";
+    }
+    add_part("placement:" + pv::FingerprintHash(placement));
+  }
+  if (had_design != nullptr) {
+    *had_design = !input.empty();
+  }
+  return pv::FingerprintHash(input.empty() ? "none" : input);
 }
 
 std::optional<CommandResult> ExpectCount(
@@ -337,6 +396,7 @@ void ResetProject(CommandContext& ctx) {
   ctx.synth = CommandContext::SynthSession();
   ctx.place = CommandContext::PlaceSession();
   ctx.signoff = CommandContext::SignoffSession();
+  ctx.drc = CommandContext::DrcSession();
   ctx.wire_rc_overrides.clear();
   ctx.engine_log_lines.clear();
 }
@@ -8078,17 +8138,20 @@ void RegisterCoreCommands(CommandRegistry& registry) {
 
   // ---- signoff_summary (full-flow GUI unit F13) --------------------
   // The structured signoff query the GUI Signoff panel reads:
-  // the DRC, LVS, and antenna verdicts parsed from the external
-  // PV evidence reports (docs/gcd-pv-results.md and
-  // docs/gcd-lvs-magic.md by default), one DRC row per rule
+  // the DRC, LVS, and antenna verdicts, one DRC row per rule
   // family, one LVS row per comparison path, one row per named
   // discrepancy, and the successor residual, plus the design
-  // fingerprint and the stale flag. It is a query, not a report:
-  // it writes no file, runs no engine, and needs no design in
-  // the session: the panel renders the recorded gcd verdicts
-  // until a design is loaded. It fails fast with the path named
-  // when a report cannot be read or does not parse, never with
-  // a silent empty panel.
+  // fingerprint and the stale flag. The LVS and antenna verdicts
+  // come from the external PV evidence reports
+  // (docs/gcd-pv-results.md and docs/gcd-lvs-magic.md by
+  // default); the DRC verdicts come from the in-tree record a
+  // drc_run stored, when one exists, else from the external
+  // report. It is a query, not a report: it writes no file,
+  // runs no engine, and needs no design in the session: the
+  // panel renders the recorded gcd verdicts until a design is
+  // loaded. It fails fast with the path named when a report
+  // cannot be read or does not parse, never with a silent empty
+  // panel.
   add("signoff_summary",
       "signoff_summary [-pv <path>] [-lvs <path>]",
       [](CommandContext& ctx, const std::vector<std::string>& args)
@@ -8143,64 +8206,26 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return CommandResult::Fail(Diag::kInvalidConfiguration,
                                      error);
         }
-        // The design fingerprint input: the synth record, the
-        // timing record, and the live database identity (top
-        // block, counts, and the placement hash over instance
-        // name, master, and coordinates, name-sorted). Empty
-        // when the session holds no design at all. A
-        // floorplan-only or routing-only change moves no
-        // instance, so it does not flip the fingerprint in v1;
-        // a place or a new mapping does.
-        std::string input;
-        const auto add_part = [&input](const std::string& part) {
-          if (part.empty()) return;
-          if (!input.empty()) input += '|';
-          input += part;
-        };
-        add_part(ctx.synth.verilog_path);
-        add_part(ctx.synth.top_cell);
-        add_part(ctx.synth.mapped_liberty);
-        add_part(ctx.synth.mapped_verilog);
-        add_part(ctx.synth.opt_verilog);
-        add_part(ctx.synth.equiv_verdict);
-        add_part(ctx.timing.verilog_path);
-        add_part(ctx.timing.top_cell);
-        add_part(ctx.timing.sdc_path);
-        add_part(ctx.timing.spef_path);
-        for (const auto& entry : ctx.timing.liberty_by_corner) {
-          add_part(entry.first + "=" + entry.second);
-        }
-        if (ctx.timing.odb.has_value()) {
-          const db::OdbDatabase& odb = *ctx.timing.odb;
-          add_part("odb:" + odb.TopBlockName());
-          add_part("instances:" +
-                   std::to_string(odb.InstanceCount()));
-          add_part("nets:" + std::to_string(odb.NetCount()));
-          std::vector<db::OdbInstanceInfo> instances = odb.Instances();
-          std::sort(instances.begin(), instances.end(),
-                    [](const db::OdbInstanceInfo& a,
-                       const db::OdbInstanceInfo& b) {
-                      return a.name < b.name;
-                    });
-          std::string placement;
-          for (const db::OdbInstanceInfo& inst : instances) {
-            placement += inst.name + "," + inst.master + "," +
-                         std::to_string(inst.x) + "," +
-                         std::to_string(inst.y) + ";";
-          }
-          add_part("placement:" + pv::FingerprintHash(placement));
-        }
+        bool had_design = false;
         const std::string fingerprint =
-            pv::FingerprintHash(input.empty() ? "none" : input);
-        const bool had_design = !input.empty();
+            DesignFingerprint(ctx, &had_design);
         // Stale evidence: the stored baseline is the fingerprint
         // and the report hashes from the last run. The first run
         // baselines. A changed report (the checks were re-run)
         // re-baselines. A baseline taken with no design adopts
         // the design when one loads, instead of flagging it
         // stale. Otherwise a changed design with unchanged
-        // reports is stale until the checks are re-run.
+        // reports is stale until the checks are re-run. When a
+        // drc_run record exists, the DRC evidence is stale when
+        // the current fingerprint differs from the fingerprint
+        // the run was taken against, independent of the report
+        // re-baseline below: re-reading the reports does not
+        // refresh the in-tree DRC verdicts.
         bool stale = false;
+        const bool drc_intree = ctx.drc.has_record;
+        if (drc_intree && fingerprint != ctx.drc.fingerprint) {
+          stale = true;
+        }
         CommandContext::SignoffSession& stored = ctx.signoff;
         if (!stored.has_record || stored.pv_path != pv_path ||
             stored.lvs_path != lvs_path ||
@@ -8222,27 +8247,69 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const auto verdict = [](pv::SignoffVerdict value) {
           return value == pv::SignoffVerdict::kPass ? "pass" : "fail";
         };
+        // The DRC source: the in-tree record when a drc_run
+        // has stored one, else the external report. The LVS
+        // and antenna verdicts always come from the reports.
+        // The in-tree DRC families are the checks themselves
+        // (one category each), and the violations carry their
+        // locations.
+        pv::SignoffVerdict drc_verdict = record.drc;
+        std::size_t drc_categories = record.drc_categories;
+        std::size_t drc_violations = record.drc_violations;
+        if (drc_intree) {
+          drc_verdict = ctx.drc.record.TotalViolations() == 0
+                            ? pv::SignoffVerdict::kPass
+                            : pv::SignoffVerdict::kFail;
+          drc_categories = ctx.drc.record.checks.size();
+          drc_violations = ctx.drc.record.TotalViolations();
+        }
         std::string payload =
-            "signoff drc=" + std::string(verdict(record.drc)) +
+            "signoff drc=" + std::string(verdict(drc_verdict)) +
             " lvs=" + verdict(record.lvs) +
             " antenna=" + verdict(record.antenna) +
             " stale=" + std::string(stale ? "1" : "0") +
+            " drc_source=" +
+            std::string(drc_intree ? "intree" : "report") +
             " drc_categories=" +
-            std::to_string(record.drc_categories) +
+            std::to_string(drc_categories) +
             " drc_violations=" +
-            std::to_string(record.drc_violations) +
+            std::to_string(drc_violations) +
             " antenna_net_violations=" +
             std::to_string(record.antenna_net_violations) +
             " antenna_pin_violations=" +
             std::to_string(record.antenna_pin_violations) +
             " pv_report=" + pv_path + " lvs_report=" + lvs_path +
             " fingerprint=" + fingerprint;
-        for (const pv::SignoffDrcFamily& family : record.drc_families) {
-          payload += "\ndrc family=" + family.family +
-                     " categories=" +
-                     std::to_string(family.categories) +
-                     " violations=" +
-                     std::to_string(family.violations);
+        if (drc_intree) {
+          for (const pv::DrcCheckResult& check :
+               ctx.drc.record.checks) {
+            payload += "\ndrc family=" + check.check +
+                       " categories=1 violations=" +
+                       std::to_string(check.violations.size());
+          }
+          for (const pv::DrcCheckResult& check :
+               ctx.drc.record.checks) {
+            for (const pv::DrcViolation& violation :
+                 check.violations) {
+              payload += "\ndrc_violation check=" + violation.check +
+                         " layer=" + violation.layer +
+                         " net=" + violation.net +
+                         " detail=" + violation.detail +
+                         " bbox=" + std::to_string(violation.x1) +
+                         "," + std::to_string(violation.y1) + "," +
+                         std::to_string(violation.x2) + "," +
+                         std::to_string(violation.y2);
+            }
+          }
+        } else {
+          for (const pv::SignoffDrcFamily& family :
+               record.drc_families) {
+            payload += "\ndrc family=" + family.family +
+                       " categories=" +
+                       std::to_string(family.categories) +
+                       " violations=" +
+                       std::to_string(family.violations);
+          }
         }
         for (const pv::SignoffLvsPath& lvs_path_record :
              record.lvs_paths) {
@@ -8274,6 +8341,69 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                      " instances=" +
                      std::to_string(residual.instances) +
                      " cause=" + residual.cause + " path=magic";
+        }
+        return CommandResult::Ok(payload);
+      });
+
+  // drc_run (F13 DRC engine): runs the LEF-driven in-tree DRC
+  // on the live ODB and stores the verdict in the session, so
+  // signoff_summary and the Signoff panel can report it. No
+  // options in v1. Fails fast with the offending state named
+  // when there is no technology, no top block, or no routed
+  // design. Only a successful run updates the stored record;
+  // a failed run leaves the previous record untouched, exactly
+  // like a failed run_timing leaves last_results. The payload
+  // is the structured query form: one drc_check line per check
+  // (name, layer, rule value in DBU, violation count) and one
+  // drc_violation line per located violation.
+  add("drc_run", "drc_run",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (!args.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidArgument,
+              "drc_run: unexpected argument: " + args.front());
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
+        pv::DrcRecord record;
+        std::string error;
+        if (!pv::RunDrc(ctx.timing.odb->RawDatabase(), &record,
+                        &error)) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     error);
+        }
+        ctx.drc.has_record = true;
+        ctx.drc.record = record;
+        ctx.drc.fingerprint = DesignFingerprint(ctx, nullptr);
+        std::string payload =
+            "drc source=live-database total_violations=" +
+            std::to_string(record.TotalViolations());
+        for (const pv::DrcCheckResult& check : record.checks) {
+          payload += "\ndrc_check check=" + check.check +
+                     " layer=" + check.layer +
+                     " rule=" + std::to_string(check.rule_value) +
+                     " violations=" +
+                     std::to_string(check.violations.size());
+        }
+        for (const pv::DrcCheckResult& check : record.checks) {
+          for (const pv::DrcViolation& violation :
+               check.violations) {
+            payload += "\ndrc_violation check=" + violation.check +
+                       " layer=" + violation.layer +
+                       " net=" + violation.net +
+                       " detail=" + violation.detail +
+                       " bbox=" + std::to_string(violation.x1) +
+                       "," + std::to_string(violation.y1) + "," +
+                       std::to_string(violation.x2) + "," +
+                       std::to_string(violation.y2);
+          }
         }
         return CommandResult::Ok(payload);
       });

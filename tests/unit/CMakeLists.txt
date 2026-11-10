@@ -171,6 +171,11 @@ target_link_libraries(eda_pv_extract_unit_test
           eda_analysis_timing eda_db_odb GTest::gtest GTest::gtest_main)
 add_test(NAME pv.extract COMMAND eda_pv_extract_unit_test)
 
+add_executable(eda_pv_drc_unit_test pv/drc/drc_test.cc)
+target_link_libraries(eda_pv_drc_unit_test
+  PRIVATE eda_pv_drc eda_db_odb GTest::gtest GTest::gtest_main)
+add_test(NAME pv.drc COMMAND eda_pv_drc_unit_test)
+
 add_executable(eda_pv_signoff_unit_test pv/signoff/signoff_test.cc)
 target_link_libraries(eda_pv_signoff_unit_test
   PRIVATE eda_pv_signoff GTest::gtest GTest::gtest_main)

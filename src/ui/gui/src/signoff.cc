@@ -99,6 +99,48 @@ bool ParseFingerprint(const std::string& text) {
   return true;
 }
 
+// Parses a "x1,y1,x2,y2" bounding box: four comma-separated
+// integers (each optionally negative), with x1 <= x2 and
+// y1 <= y2.
+bool ParseBbox(const std::string& text, int* x1, int* y1, int* x2,
+               int* y2) {
+  int values[4] = {0, 0, 0, 0};
+  std::size_t start = 0;
+  for (int i = 0; i < 4; ++i) {
+    std::size_t comma = text.find(',', start);
+    std::string part;
+    if (i == 3) {
+      if (comma != std::string::npos) return false;
+      part = text.substr(start);
+    } else {
+      if (comma == std::string::npos) return false;
+      part = text.substr(start, comma - start);
+      start = comma + 1;
+    }
+    if (part.empty()) return false;
+    std::size_t j = 0;
+    bool negative = false;
+    if (part[0] == '-') {
+      negative = true;
+      j = 1;
+      if (part.size() == 1) return false;
+    }
+    long value = 0;
+    for (; j < part.size(); ++j) {
+      if (part[j] < '0' || part[j] > '9') return false;
+      value = value * 10 + (part[j] - '0');
+      if (value > 2147483647L) return false;
+    }
+    values[i] = static_cast<int>(negative ? -value : value);
+  }
+  if (values[0] > values[2] || values[1] > values[3]) return false;
+  *x1 = values[0];
+  *y1 = values[1];
+  *x2 = values[2];
+  *y2 = values[3];
+  return true;
+}
+
 }  // namespace
 
 bool SignoffModel::LoadPayload(const std::string& payload) {
@@ -110,14 +152,29 @@ bool SignoffModel::LoadPayload(const std::string& payload) {
   if (line.substr(0, space) != "signoff") return false;
   std::map<std::string, std::string> header;
   if (!LineFields(line.substr(space + 1), &header) ||
-      !OnlyKeys(header,
-                {"drc", "lvs", "antenna", "stale", "drc_categories",
-                 "drc_violations", "antenna_net_violations",
-                 "antenna_pin_violations", "pv_report", "lvs_report",
-                 "fingerprint"})) {
+      !HasKeys(header,
+               {"drc", "lvs", "antenna", "stale", "drc_categories",
+                "drc_violations", "antenna_net_violations",
+                "antenna_pin_violations", "pv_report", "lvs_report",
+                "fingerprint"})) {
     return false;
   }
+  // drc_source is optional (older payloads omit it): when
+  // present it must be the only extra key, "intree" or
+  // "report". An omitted key reads as "report".
+  if (header.size() != 11 && header.size() != 12) {
+    return false;
+  }
+  std::string drc_source = "report";
+  if (header.size() == 12) {
+    if (header.find("drc_source") == header.end()) return false;
+    drc_source = header["drc_source"];
+    if (drc_source != "intree" && drc_source != "report") {
+      return false;
+    }
+  }
   SignoffModel next;
+  next.drc_source_ = drc_source;
   if (!ParseVerdict(header["drc"], &next.drc_pass_) ||
       !ParseVerdict(header["lvs"], &next.lvs_pass_) ||
       !ParseVerdict(header["antenna"], &next.antenna_pass_) ||
@@ -173,6 +230,41 @@ bool SignoffModel::LoadPayload(const std::string& payload) {
       family_categories += family.categories;
       family_violations += family.violations;
       next.drc_families_.push_back(std::move(family));
+    } else if (kind == "drc_violation") {
+      // A located violation, in-tree DRC only, after the
+      // family lines: the check must name a family already
+      // parsed, and the bbox is four comma-separated
+      // integers. Duplicate violation lines are malformed.
+      if (next.drc_source_ != "intree") return false;
+      if (!OnlyKeys(fields, {"check", "layer", "net", "detail",
+                             "bbox"})) {
+        return false;
+      }
+      if (family_names.find(fields["check"]) ==
+          family_names.end()) {
+        return false;
+      }
+      SignoffDrcViolation violation;
+      violation.check = fields["check"];
+      violation.layer = fields["layer"];
+      violation.net = fields["net"];
+      violation.detail = fields["detail"];
+      if (!ParseBbox(fields["bbox"], &violation.x1, &violation.y1,
+                     &violation.x2, &violation.y2)) {
+        return false;
+      }
+      for (const SignoffDrcViolation& seen :
+           next.drc_violation_list_) {
+        if (seen.check == violation.check &&
+            seen.layer == violation.layer &&
+            seen.net == violation.net &&
+            seen.detail == violation.detail &&
+            seen.x1 == violation.x1 && seen.y1 == violation.y1 &&
+            seen.x2 == violation.x2 && seen.y2 == violation.y2) {
+          return false;
+        }
+      }
+      next.drc_violation_list_.push_back(std::move(violation));
     } else if (kind == "lvs" && fields.count("classes_compared") != 0) {
       // A path row: klayout first, then magic, exactly one each.
       // The klayout row carries no finger totals; the magic row
@@ -268,6 +360,22 @@ bool SignoffModel::LoadPayload(const std::string& payload) {
       family_violations != next.drc_violations_) {
     return false;
   }
+  if (next.drc_source_ == "intree") {
+    // The violation lines per check must match the family
+    // violation counts.
+    std::map<std::string, std::size_t> per_check;
+    for (const SignoffDrcViolation& violation :
+         next.drc_violation_list_) {
+      ++per_check[violation.check];
+    }
+    for (const SignoffDrcFamily& family : next.drc_families_) {
+      std::size_t count = 0;
+      std::map<std::string, std::size_t>::const_iterator found =
+          per_check.find(family.family);
+      if (found != per_check.end()) count = found->second;
+      if (count != family.violations) return false;
+    }
+  }
   bool paths_pass = true;
   for (const SignoffLvsPath& lvs_path : next.lvs_paths_) {
     if (!lvs_path.pass) paths_pass = false;
@@ -291,7 +399,9 @@ void SignoffModel::Clear() {
   pv_report_.clear();
   lvs_report_.clear();
   fingerprint_.clear();
+  drc_source_ = "report";
   drc_families_.clear();
+  drc_violation_list_.clear();
   lvs_paths_.clear();
   lvs_issues_.clear();
   residual_.reset();

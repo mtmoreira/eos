@@ -44,6 +44,7 @@
 #include "eos/db/scenarios.h"
 #include "eos/foundation/errors.h"
 #include "eos/foundation/ids.h"
+#include "eos/pv/drc.h"
 #include "eos/session/ledger.h"
 #include "eos/session/project.h"
 #include "eos/session/reports.h"
@@ -409,6 +410,25 @@ struct CommandContext {
     std::string lvs_hash;
   };
   SignoffSession signoff;
+
+  // DRC session state (full-flow GUI unit F13, DRC engine): the
+  // record of the most recent successful eos::drc_run, plus the
+  // design fingerprint it was run against, so signoff_summary
+  // can report the in-tree verdicts and flag them stale when
+  // the design changes. Like the timing, synth, and signoff
+  // sessions, this is interface session state, not project
+  // state: it names a physical database the project checkpoint
+  // does not hold, it is cleared when the design closes, and a
+  // checkpoint restore does not bring it back. Only a
+  // successful drc_run updates it; a failed run leaves the
+  // previous record untouched, exactly like a failed run_timing
+  // leaves last_results.
+  struct DrcSession {
+    bool has_record = false;
+    pv::DrcRecord record;
+    std::string fingerprint;
+  };
+  DrcSession drc;
 
   // Wire-RC overrides (R1 step 2, Q6): per-layer (r_ohm_per_m,
   // c_f_per_m) values recorded by eos::set_wire_rc, consulted by

@@ -23,6 +23,20 @@ struct SignoffDrcFamily {
   std::size_t violations = 0;
 };
 
+// One located DRC violation from the signoff payload (in-tree
+// DRC only): the check that fired, the layer, the net, a
+// single-token detail, and the bounding box in DBU.
+struct SignoffDrcViolation {
+  std::string check;
+  std::string layer;
+  std::string net;
+  std::string detail;
+  int x1 = 0;
+  int y1 = 0;
+  int x2 = 0;
+  int y2 = 0;
+};
+
 // One LVS comparison path from the signoff payload:
 // "klayout" (KLayout extraction plus Netgen) or "magic"
 // (Magic extraction plus Netgen). The finger totals exist
@@ -64,18 +78,24 @@ class SignoffModel {
  public:
   // Parses a signoff_summary payload: a "signoff" header line
   // with the DRC, LVS, and antenna verdicts, the stale flag,
-  // the DRC and antenna counts, the two report paths, and the
-  // design fingerprint; then one "drc" line per rule family,
-  // one "lvs" line per comparison path (klayout, then magic),
-  // one "lvs" line per named discrepancy, and at most one
-  // "lvs_residual" line. The header's DRC verdict must agree
+  // the DRC source ("intree" when the DRC verdicts come from a
+  // drc_run record, "report" otherwise; older payloads omit
+  // it and read as "report"), the DRC and antenna counts, the
+  // two report paths, and the design fingerprint; then one
+  // "drc" line per rule family, one "drc_violation" line per
+  // located violation (in-tree DRC only, after the family
+  // lines), one "lvs" line per comparison path (klayout, then
+  // magic), one "lvs" line per named discrepancy, and at most
+  // one "lvs_residual" line. The header's DRC verdict must agree
   // with its violation count, the antenna verdict with its net
   // and pin counts, and the LVS verdict with the two path
   // verdicts; the family categories must sum to no more than
   // the header total and the family violations must sum to the
-  // header total. Returns false (signoff unchanged) on any
-  // malformed line, unknown key, unknown verdict, kind, or
-  // cause, duplicate family or discrepancy, missing path row,
+  // header total; in-tree, the violation lines per check must
+  // match the family violation counts. Returns false (signoff
+  // unchanged) on any malformed line, unknown key, unknown
+  // verdict, kind, or cause, duplicate family or discrepancy
+  // or violation, missing path row, unknown violation check,
   // or count or verdict mismatch. A successful load replaces
   // the previous signoff.
   bool LoadPayload(const std::string& payload);
@@ -98,8 +118,17 @@ class SignoffModel {
   const std::string& PvReport() const { return pv_report_; }
   const std::string& LvsReport() const { return lvs_report_; }
   const std::string& Fingerprint() const { return fingerprint_; }
+  // The DRC source: "intree" when the verdicts come from a
+  // drc_run record, "report" when they come from the external
+  // report. Older payloads omit the key and read as "report".
+  const std::string& DrcSource() const { return drc_source_; }
   const std::vector<SignoffDrcFamily>& DrcFamilies() const {
     return drc_families_;
+  }
+  // The located violations, in-tree DRC only; empty for a
+  // report source or a clean in-tree run.
+  const std::vector<SignoffDrcViolation>& DrcViolationList() const {
+    return drc_violation_list_;
   }
   const std::vector<SignoffLvsPath>& LvsPaths() const {
     return lvs_paths_;
@@ -123,7 +152,9 @@ class SignoffModel {
   std::string pv_report_;
   std::string lvs_report_;
   std::string fingerprint_;
+  std::string drc_source_ = "report";
   std::vector<SignoffDrcFamily> drc_families_;
+  std::vector<SignoffDrcViolation> drc_violation_list_;
   std::vector<SignoffLvsPath> lvs_paths_;
   std::vector<SignoffLvsIssue> lvs_issues_;
   std::optional<SignoffLvsResidual> residual_;
