@@ -17,7 +17,7 @@ bottleneck report requires before the first timing update.
 
 ```text
 report_qor [-scene <name>] [-file <path>]
-report_bottleneck [-delay_type max|min] [-max_cells <n>] [-scene <name>] [-file <path>]
+report_bottleneck [-delay_type max|min] [-max_cells <n>] [-scene <name>] [-file <path>] [-paths <collection>]
 set_bottleneck_capture on|off
 ```
 
@@ -36,7 +36,12 @@ so the ranking is the design as of that update. It needs a
 `run_timing` to have run with the capture on; see
 `set_bottleneck_capture` below. One report binding is
 registered per call, named `bottleneck_report_<scene>`, or
-`bottleneck_report_all` when no `-scene` is given.
+`bottleneck_report_all` when no `-scene` is given. The one
+exception is `-paths <collection>` (Immediate unit 12): it
+reads a path collection from `get_timing_paths` instead of
+the capture, so no `run_timing` is needed; `-scene` then
+resolves against the collection's scenes. Without `-paths`
+the capture precondition stands unchanged.
 
 ## The path-group tables
 

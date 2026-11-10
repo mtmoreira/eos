@@ -123,17 +123,28 @@ struct VerilogDesign {
 // One timing path report request: the check kind (setup for the
 // max-delay analysis, hold for the min-delay analysis), an optional
 // endpoint pin (empty selects the worst endpoints), the maximum
-// number of paths (across endpoints, worst first; at least 1),
-// and an optional slack ceiling: only endpoints with slack
-// strictly below it are reported. Per-endpoint path enumeration
-// (several paths to one endpoint) is not part of this request:
-// with an endpoint named, exactly that endpoint's worst path is
-// reported.
+// number of paths in total when no endpoint is named (across
+// endpoints, worst first; at least 1), and an optional slack
+// ceiling: only endpoints with slack strictly below it are
+// reported. nworst is the paths per endpoint (at least 1): with
+// an endpoint named, that endpoint's worst nworst paths, and
+// max_paths does not cap them; without one, every endpoint's
+// worst nworst paths are collected, sorted worst first, and
+// capped at max_paths. from and through select paths by
+// startpoint and by intermediate object (each a pin, net, or
+// instance name; a from name may also be a clock name); a value
+// naming an object with no timing path yields no paths, while a
+// value naming no object at all fails. group restricts the
+// endpoints to one named path group.
 struct PathReportRequest {
   CheckKind kind = CheckKind::kSetup;
   std::string endpoint;
   std::size_t max_paths = 1;
   std::optional<double> slack_lesser_than;
+  std::size_t nworst = 1;
+  std::vector<std::string> from;
+  std::vector<std::string> through;
+  std::string group;
 };
 
 // One scene's analysis coverage: the scenario and its coverage

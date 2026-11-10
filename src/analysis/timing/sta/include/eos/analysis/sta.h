@@ -158,7 +158,11 @@ struct PathPoint {
 // One worst path as a report: the endpoint pin, the startpoint pin
 // (the first point's pin), the endpoint slack, the data arrival at
 // the endpoint and the data required time (arrival plus slack),
-// all in nanoseconds, plus the enriched points.
+// all in nanoseconds, plus the enriched points. group is the path
+// group the endpoint belongs to, as named by the query that
+// produced the report (empty when the query does not assign one:
+// WorstPathReport never assigns a group, while the findPathEnds
+// queries carry the end's group).
 struct PathReport {
   std::string endpoint;
   std::string startpoint;
@@ -166,6 +170,18 @@ struct PathReport {
   double arrival_ns = 0.0;
   double required_ns = 0.0;
   std::vector<PathPoint> points;
+  std::string group;
+};
+
+// One path-selection filter for the findPathEnds queries: the
+// -from and -through objects by name, each a pin, net, or instance
+// path name (a from name may also be a clock name). Names are
+// resolved against the loaded network at query time; a name
+// resolving to nothing fails the query. Empty lists mean no
+// filter on that side.
+struct PathFilter {
+  std::vector<std::string> from;
+  std::vector<std::string> through;
 };
 
 // One path group: its name and every constrained endpoint in it
@@ -323,6 +339,32 @@ class StaEngine {
   // for that check kind.
   Result<PathReport> WorstPathReport(CheckKind kind,
                                      const std::string& endpoint_pin);
+  // The worst paths to one endpoint for one check kind, worst
+  // first, up to nworst of them: the per-endpoint enumeration the
+  // single-path query above cannot express. Built on the upstream
+  // reporting enumeration with endpoint_path_count = nworst, so
+  // two paths to one endpoint differ in their pin sequences
+  // (unique pins, no rise/fall variants). Every returned path
+  // carries the group its end belongs to. nworst = 1 returns
+  // exactly WorstPathReport's result. Fails with kInvalidState
+  // under the same conditions as WorstSlackNs, and with
+  // kInvalidArgument when no endpoint pin has the given path
+  // name, when the named endpoint has no constrained path end
+  // for that check kind, or when a filter name resolves to no
+  // object. A filter that matches no path to the endpoint
+  // returns an empty list, never an error.
+  Result<std::vector<PathReport>> WorstPaths(CheckKind kind,
+                                             const std::string& endpoint_pin,
+                                             std::size_t nworst);
+  // The filtered form: the same enumeration with the -from and
+  // -through selection applied (paths must start at a from
+  // object and pass through every through object, PrimeTime
+  // semantics). The unfiltered form above delegates to this one
+  // with an empty filter.
+  Result<std::vector<PathReport>> WorstPaths(CheckKind kind,
+                                             const std::string& endpoint_pin,
+                                             std::size_t nworst,
+                                             const PathFilter& filter);
   // The path groups for one check kind: every constrained
   // endpoint bucketed by the group it belongs to, worst slack
   // first within each group, groups sorted by name so the order

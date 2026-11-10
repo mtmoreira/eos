@@ -1051,6 +1051,218 @@ struct StaEngine::Impl {
     }
   }
 
+  // Resolves one -from/-through name against the loaded network:
+  // a pin by path name, a net (every pin on it), an instance
+  // (every pin of it), or, for -from only, a clock by name.
+  // Returns false with error naming the value when it resolves
+  // to nothing. A name resolving to a clock under -through is
+  // not "no such object": it fails naming the clock, so the
+  // caller can say -through takes no clocks.
+  bool ResolveFilterName(const std::string& name, bool allow_clock,
+                         sta::PinSet* pins, sta::ClockSet* clocks,
+                         std::string& error) {
+    const sta::Network* network = sta->network();
+    sta::Pin* pin = network->findPin(name);
+    if (pin != nullptr) {
+      pins->insert(pin);
+      return true;
+    }
+    sta::Net* net = network->findNet(name);
+    if (net != nullptr) {
+      sta::NetPinIterator* iter = network->pinIterator(net);
+      while (iter->hasNext()) pins->insert(iter->next());
+      delete iter;
+      return true;
+    }
+    sta::Instance* inst = network->findInstance(name);
+    if (inst != nullptr) {
+      sta::InstancePinIterator* iter = network->pinIterator(inst);
+      while (iter->hasNext()) pins->insert(iter->next());
+      delete iter;
+      return true;
+    }
+    const sta::Sdc* sdc = ModeSdc();
+    if (sdc != nullptr) {
+      sta::Clock* clock = sdc->findClock(name);
+      if (clock != nullptr) {
+        if (!allow_clock) {
+          error = "clock " + name +
+                  " cannot be a -through object: -through takes "
+                  "pins, nets, and instances";
+          return false;
+        }
+        clocks->insert(clock);
+        return true;
+      }
+    }
+    error = "no such object: " + name;
+    return false;
+  }
+
+  // The SDC of the first mode: the constraints the exception
+  // builders and the clock lookup read. Null when the session
+  // has no mode, which Ready() already excludes in practice.
+  const sta::Sdc* ModeSdc() const {
+    const sta::ModeSeq& modes = sta->modes();
+    if (modes.empty()) return nullptr;
+    return (*modes.begin())->sdc();
+  }
+
+  // The worst paths to one endpoint, through the upstream
+  // reporting enumeration: findPathEnds with a -to filter on the
+  // endpoint and endpoint_path_count = nworst, unique pins and
+  // no rise/fall variants, the same predicate set PathGroupSlacks
+  // uses. The ends are owned by the upstream search and die on
+  // the next findPathEnds call, so every end's path is walked
+  // into points and copied out before this returns. An endpoint
+  // in several groups yields one end per group for the same
+  // path, so ends are deduped by their pin sequence, keeping
+  // the first group in name order as the report's group. The
+  // -from/-through exceptions are built here and owned by the
+  // search once passed to findPathEnds; they are only built
+  // after every name resolves, so a resolution failure leaves
+  // nothing to free.
+  Result<std::vector<PathReport>> WorstPaths(bool hold,
+                                             const std::string& endpoint_pin,
+                                             std::size_t nworst,
+                                             const PathFilter& filter) {
+    const Status ready = Ready();
+    if (!ready.ok()) return ready;
+    try {
+      const sta::MinMax* min_max =
+          hold ? sta::MinMax::min() : sta::MinMax::max();
+      sta::Vertex* target = FindEndpoint(endpoint_pin);
+      if (target == nullptr) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "no endpoint pin named " + endpoint_pin);
+      }
+      const sta::Sdc* sdc = ModeSdc();
+      if (sdc == nullptr) {
+        return Status::Error(ErrorCode::kInvalidState,
+                             "the timing session has no scenario");
+      }
+      // PinSets must be built with the network: the default
+      // constructor leaves a null network in the PinIdLess
+      // comparator, and the first contains() during findPathEnds
+      // segfaults dereferencing it.
+      sta::PinSet* from_pins = new sta::PinSet(sta->network());
+      sta::ClockSet* from_clocks = new sta::ClockSet;
+      sta::PinSet* thru_pins = new sta::PinSet(sta->network());
+      std::string error;
+      for (const std::string& name : filter.from) {
+        if (!ResolveFilterName(name, true, from_pins, from_clocks,
+                               error)) {
+          delete from_pins;
+          delete from_clocks;
+          delete thru_pins;
+          return Status::Error(ErrorCode::kInvalidArgument, error);
+        }
+      }
+      for (const std::string& name : filter.through) {
+        if (!ResolveFilterName(name, false, thru_pins, nullptr,
+                               error)) {
+          delete from_pins;
+          delete from_clocks;
+          delete thru_pins;
+          return Status::Error(ErrorCode::kInvalidArgument, error);
+        }
+      }
+      sta::ExceptionFrom* from = sta->makeExceptionFrom(
+          from_pins, from_clocks, nullptr,
+          sta::RiseFallBoth::riseFall(), sdc);
+      if (from == nullptr) {
+        delete from_pins;
+        delete from_clocks;
+      }
+      sta::ExceptionThruSeq* thrus = nullptr;
+      sta::ExceptionThru* thru = nullptr;
+      if (!thru_pins->empty()) {
+        thru = sta->makeExceptionThru(thru_pins, nullptr, nullptr,
+                                      sta::RiseFallBoth::riseFall(), sdc);
+      }
+      if (thru != nullptr) {
+        thrus = new sta::ExceptionThruSeq;
+        thrus->push_back(thru);
+      } else {
+        // The exception was not built, so the pin set is still
+        // owned here; a built exception owns its sets.
+        delete thru_pins;
+      }
+      sta::PinSet* to_pins = new sta::PinSet(sta->network());
+      to_pins->insert(target->pin());
+      sta::ExceptionTo* to = sta->makeExceptionTo(
+          to_pins, nullptr, nullptr, sta::RiseFallBoth::riseFall(),
+          sta::RiseFallBoth::riseFall(), sdc);
+      if (to == nullptr) {
+        delete to_pins;
+        if (from != nullptr) sta->deleteExceptionFrom(from);
+        if (thru != nullptr) sta->deleteExceptionThru(thru);
+        delete thrus;
+        return Status::Error(
+            ErrorCode::kInvalidState,
+            "could not build the -to filter for endpoint " +
+                endpoint_pin);
+      }
+      const int count =
+          nworst > static_cast<std::size_t>(
+                        std::numeric_limits<int>::max())
+              ? std::numeric_limits<int>::max()
+              : static_cast<int>(nworst);
+      sta::StringSeq group_names;
+      const sta::PathEndSeq ends = sta->findPathEnds(
+          from, thrus, to, false, sta->scenes(),
+          hold ? sta::MinMaxAll::min() : sta::MinMaxAll::max(),
+          std::numeric_limits<int>::max(), count, true, false,
+          -sta::INF, sta::INF, true, group_names, !hold, hold,
+          !hold, hold, !hold, hold);
+      if (ends.empty()) {
+        if (filter.from.empty() && filter.through.empty()) {
+          return Status::Error(
+              ErrorCode::kInvalidArgument,
+              "endpoint " + endpoint_pin +
+                  " has no constrained path end for this check kind");
+        }
+        return std::vector<PathReport>{};
+      }
+      std::vector<PathReport> reports;
+      std::map<std::vector<std::string>, std::size_t> seen;
+      for (const sta::PathEnd* end : ends) {
+        if (end == nullptr || end->path() == nullptr) continue;
+        std::vector<PathPoint> points = WalkPoints(end->path());
+        if (points.empty()) continue;
+        std::vector<std::string> key;
+        key.reserve(points.size());
+        for (const PathPoint& point : points) key.push_back(point.pin);
+        const std::string group =
+            end->pathGroup() == nullptr
+                ? std::string("")
+                : end->pathGroup()->name();
+        const auto dup = seen.find(key);
+        if (dup != seen.end()) {
+          PathReport& kept = reports[dup->second];
+          if (!group.empty() &&
+              (kept.group.empty() || group < kept.group)) {
+            kept.group = group;
+          }
+          continue;
+        }
+        PathReport report;
+        report.endpoint = endpoint_pin;
+        report.startpoint = points.front().pin;
+        report.slack_ns = ToNs(end->slack(sta));
+        report.arrival_ns = points.back().arrival_ns;
+        report.required_ns = report.arrival_ns + report.slack_ns;
+        report.points = std::move(points);
+        report.group = group;
+        seen.emplace(std::move(key), reports.size());
+        reports.push_back(std::move(report));
+      }
+      return reports;
+    } catch (const std::exception& ex) {
+      return Status::Error(ErrorCode::kIoError, ex.what());
+    }
+  }
+
   // The path groups for one check kind, through the upstream
   // reporting enumeration: findPathEnds builds the groups (named
   // group_path groups, one group per clock, the async, gated-clock
@@ -1317,6 +1529,19 @@ Result<std::vector<PathPoint>> StaEngine::WorstPath(
 Result<PathReport> StaEngine::WorstPathReport(
     CheckKind kind, const std::string& endpoint_pin) {
   return impl_->WorstPathReport(kind == CheckKind::kHold, endpoint_pin);
+}
+
+Result<std::vector<PathReport>> StaEngine::WorstPaths(
+    CheckKind kind, const std::string& endpoint_pin, std::size_t nworst) {
+  return impl_->WorstPaths(kind == CheckKind::kHold, endpoint_pin, nworst,
+                           PathFilter{});
+}
+
+Result<std::vector<PathReport>> StaEngine::WorstPaths(
+    CheckKind kind, const std::string& endpoint_pin, std::size_t nworst,
+    const PathFilter& filter) {
+  return impl_->WorstPaths(kind == CheckKind::kHold, endpoint_pin, nworst,
+                           filter);
 }
 
 Result<std::vector<PathGroupSlack>> StaEngine::PathGroupSlacks(

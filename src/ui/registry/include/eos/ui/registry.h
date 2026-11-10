@@ -77,18 +77,56 @@ struct CommandResult {
   static CommandResult Fail(Diag diag, std::string message);
 };
 
-// One member of a collection: either a design object (by persistent
-// ObjectId) or a clock (by constraint name). Clocks are not design
-// objects (no ObjectKind exists for them, and the kind values are a
-// written format), so a clock member is carried by name and
-// re-resolved against the constraint set at use time; a clock whose
+// One member of a collection that is a timing path: the selection
+// record (scene, check kind as "max" or "min", endpoint, 1-based
+// rank within the endpoint, path group) plus the full stored
+// PathReport (points in path order). A path member owns its data,
+// so it never reads as <deleted> and follows the snapshot rule by
+// construction: a later timing run does not refresh it. Identity
+// is (scene, kind, endpoint, rank): two members with the same
+// identity are the same path, whatever run produced the report.
+struct PathMember {
+  std::string scene;
+  std::string kind;  // "max" (setup) or "min" (hold)
+  std::string endpoint;
+  std::size_t rank = 1;
+  std::string group;
+  analysis::PathReport report;
+
+  std::string DisplayName() const {
+    return scene + ":" + endpoint + "#" + std::to_string(rank);
+  }
+  std::string Key() const {
+    return "path:" + scene + ":" + kind + ":" + endpoint + "#" +
+           std::to_string(rank);
+  }
+
+  friend bool operator==(const PathMember& a, const PathMember& b) {
+    return a.scene == b.scene && a.kind == b.kind &&
+           a.endpoint == b.endpoint && a.rank == b.rank;
+  }
+  friend bool operator!=(const PathMember& a, const PathMember& b) {
+    return !(a == b);
+  }
+};
+
+// One member of a collection: a design object (by persistent
+// ObjectId), a clock (by constraint name), or a timing path
+// (owning its PathReport). Clocks are not design objects (no
+// ObjectKind exists for them, and the kind values are a written
+// format), so a clock member is carried by name and re-resolved
+// against the constraint set at use time; a clock whose
 // constraint is gone reads as <deleted>, like a deleted design
-// object. Members compare by kind then identity.
+// object. A path is neither a design object (it has no ObjectId)
+// nor a clock (it has no constraint row), so it is carried by
+// value. Members compare by kind then identity.
 struct CollectionMember {
-  ObjectId object;    // null when this member is a clock
+  ObjectId object;    // null when this member is a clock or a path
   std::string clock;  // non-empty exactly when this member is a clock
+  std::optional<PathMember> path;  // set exactly when this member is a path
 
   bool IsClock() const { return !clock.empty(); }
+  bool IsPath() const { return path.has_value(); }
 
   static CollectionMember Design(ObjectId id) {
     CollectionMember m;
@@ -100,10 +138,16 @@ struct CollectionMember {
     m.clock = name;
     return m;
   }
+  static CollectionMember Path(PathMember member) {
+    CollectionMember m;
+    m.path = std::move(member);
+    return m;
+  }
 
   friend bool operator==(const CollectionMember& a,
                          const CollectionMember& b) {
-    return a.object == b.object && a.clock == b.clock;
+    return a.object == b.object && a.clock == b.clock &&
+           a.path == b.path;
   }
   friend bool operator!=(const CollectionMember& a,
                          const CollectionMember& b) {

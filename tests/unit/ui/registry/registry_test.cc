@@ -91,7 +91,7 @@ TEST(Registry, CoreSetIsComplete) {
   // foreach_in_collection). get_objects is the generic alias and
   // exists already, so it adds no pin. F3 adds floorplan_summary.
   // F4 adds place_summary. F13 adds signoff_summary.
-  EXPECT_EQ(shell.registry.Names().size(), 113u);
+  EXPECT_EQ(shell.registry.Names().size(), 114u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -517,6 +517,144 @@ endmodule
 
 const char kTimingSdc[] =
     "create_clock -name clk -period 10 [get_ports clk]\n";
+
+// The two-path fixture library for get_timing_paths: the base
+// fixture cells plus a MUX whose A input is the slow arc
+// (0.4 ns) and whose B input is the fast one (0.1 ns).
+const char kTimingLibertyTwoPath[] = R"LIB(library (eos_fixture) {
+  delay_model : "table_lookup";
+  time_unit : "1ns";
+  voltage_unit : "1v";
+  capacitive_load_unit (1,pF);
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1pW";
+  input_threshold_pct_rise : 50;
+  input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 30;
+  slew_lower_threshold_pct_fall : 30;
+  slew_upper_threshold_pct_rise : 70;
+  slew_upper_threshold_pct_fall : 70;
+  slew_derate_from_library : 1.0;
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 1.0;
+  cell (DFF) {
+    area : 10.0;
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) {
+      direction : input;
+      capacitance : 0.001;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (scalar) { values ("0.05"); }
+        fall_constraint (scalar) { values ("0.05"); }
+      }
+    }
+    pin (CK) {
+      direction : input;
+      capacitance : 0.001;
+      clock : true;
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("0.2"); }
+        cell_fall (scalar) { values ("0.2"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (BUF) {
+    area : 2.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.3"); }
+        cell_fall (scalar) { values ("0.3"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+  cell (MUX) {
+    area : 3.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (B) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (S) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "(A*S)+(B*!S)";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.4"); }
+        cell_fall (scalar) { values ("0.4"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : positive_unate;
+        cell_rise (scalar) { values ("0.1"); }
+        cell_fall (scalar) { values ("0.1"); }
+        rise_transition (scalar) { values ("0.05"); }
+        fall_transition (scalar) { values ("0.05"); }
+      }
+    }
+  }
+}
+)LIB";
+
+// The two-path fixture netlist: two flops drive r2/D through a
+// mux, so two distinct paths reach one endpoint. The slow path
+// (via r1, u1, m1/A) arrives at 0.2 + 0.3 + 0.4 = 0.9 ns and
+// slacks 9.0 ns; the fast path (via r3, u2, m1/B) arrives at
+// 0.2 + 0.3 + 0.1 = 0.6 ns and slacks 9.3 ns.
+const char kTimingVerilogTwoPath[] = R"V(module top (clk, d, d2, sel, q);
+  input clk, d, d2, sel;
+  output q;
+  wire n1, n2, n3, n4, n5;
+  DFF r1 (.D(d), .CK(clk), .Q(n1));
+  BUF u1 (.A(n1), .Y(n2));
+  DFF r3 (.D(d2), .CK(clk), .Q(n3));
+  BUF u2 (.A(n3), .Y(n4));
+  MUX m1 (.A(n2), .B(n4), .S(sel), .Y(n5));
+  DFF r2 (.D(n5), .CK(clk), .Q(q));
+endmodule
+)V";
 
 // The placement-query Liberty (full-flow GUI unit F4): the
 // single cell the floorplan fixture uses, BUFX2, with a scalar
@@ -4694,11 +4832,11 @@ TEST(CoreCommands, HelpWildcardPatterns) {
   // registry order, one "name usage" line each.
   const CommandResult tim = shell.Run("help", {"*tim*"});
   ASSERT_TRUE(tim.ok) << tim.message;
-  EXPECT_EQ(lines(tim.payload), 8u);
+  EXPECT_EQ(lines(tim.payload), 9u);
   for (const char* name :
        {"check_timing", "close_timing", "report_timing", "run_timing",
         "set_max_time_borrow", "repair_timing",
-        "report_global_timing", "timing_summary"}) {
+        "report_global_timing", "timing_summary", "get_timing_paths"}) {
     EXPECT_NE(tim.payload.find(name), std::string::npos) << name;
   }
   EXPECT_EQ(tim.payload.find("create_clock"), std::string::npos);
@@ -9099,6 +9237,532 @@ TEST(Collections, BusBracketEscaping) {
   ASSERT_TRUE(escaped.ok);
   EXPECT_NE(escaped.payload.find("count=1"), std::string::npos);
   EXPECT_EQ(shell.Run("list_collection", {"eos_coll_3"}).payload, "star*");
+}
+
+// get_timing_paths (Immediate unit 12): the command, its
+// options, and the collection operations over path members.
+void BuildTimingPathsDesign(Shell& shell, const TimingTempDir& dir,
+                            const char* liberty = kTimingLiberty,
+                            const char* verilog = kTimingVerilog,
+                            const char* sdc = kTimingSdc) {
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", liberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", verilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", sdc)}).ok);
+}
+
+// A project design mirroring the timing fixture's pins, so
+// traversal over a path collection resolves: r1/Q, u1/A, u1/Y
+// and r2/D exist as pins, n1 and n2 as their nets, and clk as a
+// clock (the path's group name). The timing session design is a
+// separate store, so both designs coexist.
+void BuildPathMirrorDesign(Shell& shell) {
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_cell", {"DFF"}).ok);
+  ASSERT_TRUE(shell.Run("create_cell", {"BUF"}).ok);
+  ASSERT_TRUE(shell.Run("create_instance", {"r1", "DFF"}).ok);
+  ASSERT_TRUE(shell.Run("create_instance", {"u1", "BUF"}).ok);
+  ASSERT_TRUE(shell.Run("create_instance", {"r2", "DFF"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"d", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"q", "out"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"n1"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"n2"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"r1", "Q", "n1"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u1", "A", "n1"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u1", "Y", "n2"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"r2", "D", "n2"}).ok);
+  ASSERT_TRUE(shell.Run("create_clock",
+                        {"-period", "10", "-name", "clk", "clk"})
+                  .ok);
+}
+
+TEST(GetTimingPaths, ReturnsCollectionWithSceneLineAndDisplayName) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildTimingPathsDesign(shell, dir);
+  const CommandResult result = shell.Run("get_timing_paths", {});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("collection=eos_coll_1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("count=1"), std::string::npos);
+  EXPECT_NE(result.payload.find("scene=func_tt paths=1"),
+            std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_1"}).payload,
+            "func_tt:r2/D#1");
+  // The path attributes read off the stored report.
+  const CommandResult slack =
+      shell.Run("get_attribute", {"func_tt:r2/D#1", "slack"});
+  ASSERT_TRUE(slack.ok) << slack.message;
+  EXPECT_EQ(slack.payload,
+            "object=func_tt:r2/D#1 attribute=slack value=9.4");
+  const CommandResult startpoint =
+      shell.Run("get_attribute", {"func_tt:r2/D#1", "startpoint"});
+  ASSERT_TRUE(startpoint.ok) << startpoint.message;
+  EXPECT_NE(startpoint.payload.find("value=r1/Q"), std::string::npos);
+  const CommandResult group =
+      shell.Run("get_attribute", {"func_tt:r2/D#1", "group"});
+  ASSERT_TRUE(group.ok) << group.message;
+  EXPECT_NE(group.payload.find("value=clk"), std::string::npos);
+  const CommandResult points =
+      shell.Run("get_attribute", {"func_tt:r2/D#1", "points"});
+  ASSERT_TRUE(points.ok) << points.message;
+  EXPECT_NE(points.payload.find("value=4"), std::string::npos);
+  const CommandResult rank =
+      shell.Run("get_attribute", {"func_tt:r2/D#1", "rank"});
+  ASSERT_TRUE(rank.ok) << rank.message;
+  EXPECT_NE(rank.payload.find("value=1"), std::string::npos);
+  // Intrinsic path attributes are read-only.
+  const CommandResult read_only =
+      shell.Run("set_attribute", {"func_tt:r2/D#1", "slack", "0"});
+  ASSERT_FALSE(read_only.ok);
+  EXPECT_EQ(read_only.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(read_only.message.find("read-only"), std::string::npos);
+}
+
+TEST(GetTimingPaths, DelayTypeMinReturnsHoldPaths) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildTimingPathsDesign(shell, dir);
+  const CommandResult result =
+      shell.Run("get_timing_paths", {"-delay_type", "min"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_1"}).payload,
+            "func_tt:r2/D#1");
+  const CommandResult slack =
+      shell.Run("get_attribute", {"func_tt:r2/D#1", "slack"});
+  ASSERT_TRUE(slack.ok) << slack.message;
+  EXPECT_NE(slack.payload.find("value=0.45"), std::string::npos);
+  const CommandResult delay_type =
+      shell.Run("get_attribute", {"func_tt:r2/D#1", "delay_type"});
+  ASSERT_TRUE(delay_type.ok) << delay_type.message;
+  EXPECT_NE(delay_type.payload.find("value=min"), std::string::npos);
+}
+
+TEST(GetTimingPaths, FilterSlackLessThanOnTightFixture) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildTimingPathsDesign(shell, dir, kTimingLiberty, kTimingVerilog,
+                         kTimingSdcTight);
+  // The tight clock violates setup: slack -0.1 ns, so the
+  // filter keeps the one path.
+  const CommandResult result = shell.Run(
+      "get_timing_paths", {"-filter", "slack < 0"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_1"}).payload,
+            "func_tt:r2/D#1");
+
+  // On the clean clock nothing violates, so the same filter
+  // yields an empty collection, never an error.
+  TimingTempDir clean_dir;
+  Shell clean;
+  BuildTimingPathsDesign(clean, clean_dir);
+  const CommandResult empty = clean.Run(
+      "get_timing_paths", {"-filter", "slack < 0"});
+  ASSERT_TRUE(empty.ok) << empty.message;
+  EXPECT_NE(empty.payload.find("count=0"), std::string::npos);
+  EXPECT_EQ(clean.Run("list_collection", {"eos_coll_1"}).payload, "");
+}
+
+TEST(GetTimingPaths, ToAndNworstTwoOnTwoPathFixture) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildTimingPathsDesign(shell, dir, kTimingLibertyTwoPath,
+                         kTimingVerilogTwoPath, kTimingSdc);
+  const CommandResult result = shell.Run(
+      "get_timing_paths", {"-to", "r2/D", "-nworst", "2"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("count=2"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_1"}).payload,
+            "func_tt:r2/D#1\nfunc_tt:r2/D#2");
+  // Worst first: the slow path through m1/A slacks 9.0 ns.
+  const CommandResult slow_slack =
+      shell.Run("get_attribute", {"func_tt:r2/D#1", "slack"});
+  ASSERT_TRUE(slow_slack.ok) << slow_slack.message;
+  EXPECT_NE(slow_slack.payload.find("value=9"), std::string::npos);
+}
+
+TEST(GetTimingPaths, GroupSelectionAndUnknownGroup) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildTimingPathsDesign(shell, dir);
+  const CommandResult result =
+      shell.Run("get_timing_paths", {"-group", "clk"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_1"}).payload,
+            "func_tt:r2/D#1");
+
+  const CommandResult unknown =
+      shell.Run("get_timing_paths", {"-group", "nope"});
+  ASSERT_FALSE(unknown.ok);
+  EXPECT_EQ(unknown.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(unknown.message.find("nope"), std::string::npos);
+  EXPECT_NE(unknown.message.find("clk"), std::string::npos);
+}
+
+TEST(GetTimingPaths, SceneSelectsOneScenario) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_ss", "func", "ss", "estimate"})
+          .ok);
+  const std::string liberty = dir.Write("cells.lib", kTimingLiberty);
+  ASSERT_TRUE(shell.Run("read_liberty", {"tt", liberty}).ok);
+  ASSERT_TRUE(shell.Run("read_liberty", {"ss", liberty}).ok);
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("top.v", kTimingVerilog), "top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kTimingSdc)}).ok);
+  const CommandResult one =
+      shell.Run("get_timing_paths", {"-scene", "func_ss"});
+  ASSERT_TRUE(one.ok) << one.message;
+  EXPECT_NE(one.payload.find("count=1"), std::string::npos);
+  EXPECT_NE(one.payload.find("scene=func_ss paths=1"),
+            std::string::npos);
+  EXPECT_EQ(one.payload.find("scene=func_tt"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_1"}).payload,
+            "func_ss:r2/D#1");
+
+  const CommandResult both = shell.Run("get_timing_paths", {});
+  ASSERT_TRUE(both.ok) << both.message;
+  EXPECT_NE(both.payload.find("count=2"), std::string::npos);
+  EXPECT_NE(both.payload.find("scene=func_ss paths=1"),
+            std::string::npos);
+  EXPECT_NE(both.payload.find("scene=func_tt paths=1"),
+            std::string::npos);
+}
+
+TEST(GetTimingPaths, UnknownSceneEndpointAndFromFailFast) {
+  TimingTempDir dir;
+  Shell shell;
+  // The project design comes first: create_design resets the
+  // timing session, so building it after the timing design
+  // would wipe the scenarios, Liberty, and SDC.
+  // A session clock named "sys" on the clk port, for the
+  // -through clock check below.
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_clock",
+                        {"-period", "10", "-name", "sys", "clk"})
+                    .ok);
+  BuildTimingPathsDesign(shell, dir);
+  const CommandResult scene =
+      shell.Run("get_timing_paths", {"-scene", "func_xx"});
+  ASSERT_FALSE(scene.ok);
+  EXPECT_EQ(scene.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(scene.message.find("func_xx"), std::string::npos);
+
+  const CommandResult endpoint =
+      shell.Run("get_timing_paths", {"-to", "r9/D"});
+  ASSERT_FALSE(endpoint.ok);
+  EXPECT_EQ(endpoint.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(endpoint.message.find("r9/D"), std::string::npos);
+
+  const CommandResult from =
+      shell.Run("get_timing_paths", {"-from", "nope"});
+  ASSERT_FALSE(from.ok);
+  EXPECT_EQ(from.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(from.message.find("nope"), std::string::npos);
+
+  // A clock under -through fails naming it as a clock. The
+  // clock must be named differently from any pin: "clk" names
+  // the top-level port pin first, so the test clock is "sys".
+  const CommandResult through =
+      shell.Run("get_timing_paths", {"-through", "sys"});
+  ASSERT_FALSE(through.ok);
+  EXPECT_EQ(through.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(through.message.find("sys"), std::string::npos);
+  EXPECT_NE(through.message.find("cannot be a -through object"),
+            std::string::npos);
+
+  // Bad options fail fast, as with the other commands.
+  EXPECT_FALSE(shell.Run("get_timing_paths", {"-bogus"}).ok);
+  EXPECT_FALSE(shell.Run("get_timing_paths", {"top"}).ok);
+  EXPECT_FALSE(shell.Run("get_timing_paths", {"-nworst", "0"}).ok);
+  EXPECT_FALSE(shell.Run("get_timing_paths", {"-max_paths", "0"}).ok);
+  EXPECT_FALSE(
+      shell.Run("get_timing_paths", {"-delay_type", "ave"}).ok);
+}
+
+TEST(GetTimingPaths, EmptyResultIsAnEmptyCollection) {
+  // -from names a real object (the primary input d) with no
+  // clocked path to any endpoint: an empty collection, never an
+  // error.
+  TimingTempDir dir;
+  Shell shell;
+  BuildTimingPathsDesign(shell, dir);
+  const CommandResult result =
+      shell.Run("get_timing_paths", {"-from", "d"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("collection=eos_coll_1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("count=0"), std::string::npos);
+  EXPECT_EQ(result.payload.find("scene="), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_1"}).payload, "");
+}
+
+TEST(GetTimingPaths, CollectionTraversalOverPaths) {
+  TimingTempDir dir;
+  Shell shell;
+  // Mirror first: create_design resets the timing session, so
+  // the project design must exist before the timing design
+  // is loaded.
+  BuildPathMirrorDesign(shell);
+  BuildTimingPathsDesign(shell, dir);
+  ASSERT_TRUE(shell.Run("get_timing_paths", {}).ok);
+
+  // Every point pin of the path.
+  const CommandResult pins = shell.Run(
+      "get_pins", {"-of_objects", "eos_coll_1"});
+  ASSERT_TRUE(pins.ok) << pins.message;
+  EXPECT_NE(pins.payload.find("count=4"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_2"}).payload,
+            "r1/Q\nr2/D\nu1/A\nu1/Y");
+
+  // Nets of the path's pins.
+  const CommandResult nets = shell.Run(
+      "get_nets", {"-of_objects", "eos_coll_1"});
+  ASSERT_TRUE(nets.ok) << nets.message;
+  EXPECT_NE(nets.payload.find("count=2"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_3"}).payload,
+            "n1\nn2");
+
+  // Owning instances of the path's pins.
+  const CommandResult cells = shell.Run(
+      "get_cells", {"-of_objects", "eos_coll_1"});
+  ASSERT_TRUE(cells.ok) << cells.message;
+  EXPECT_NE(cells.payload.find("count=3"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_4"}).payload,
+            "r1\nr2\nu1");
+
+  // The clock named by the path's group.
+  const CommandResult clocks = shell.Run(
+      "get_clocks", {"-of_objects", "eos_coll_1"});
+  ASSERT_TRUE(clocks.ok) << clocks.message;
+  EXPECT_NE(clocks.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_5"}).payload,
+            "clk");
+
+  // Ports do not traverse from a path.
+  const CommandResult ports_fail = shell.Run(
+      "get_ports", {"-of_objects", "eos_coll_1"});
+  ASSERT_FALSE(ports_fail.ok);
+  EXPECT_EQ(ports_fail.diag, Diag::kInvalidConfiguration);
+
+  // "cell" is not a path attribute.
+  const CommandResult unknown_attr =
+      shell.Run("get_attribute", {"func_tt:r2/D#1", "cell"});
+  ASSERT_FALSE(unknown_attr.ok);
+  EXPECT_EQ(unknown_attr.diag, Diag::kInvalidConfiguration);
+
+  // A path is not an SDC target: passing its handle where a
+  // design object is needed fails fast naming the reason.
+  const CommandResult sdc_fail = shell.Run(
+      "create_clock",
+      {"-period", "8", "-name", "path_clk", "eos_coll_1"});
+  ASSERT_FALSE(sdc_fail.ok);
+  EXPECT_EQ(sdc_fail.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(sdc_fail.message.find("no SDC target"), std::string::npos);
+}
+
+TEST(GetTimingPaths, CollectionOpsOverPaths) {
+  TimingTempDir dir;
+  Shell shell;
+  // Mirror first: create_design resets the timing session, so
+  // the project design must exist before the timing design
+  // is loaded.
+  BuildPathMirrorDesign(shell);
+  BuildTimingPathsDesign(shell, dir, kTimingLibertyTwoPath,
+                         kTimingVerilogTwoPath, kTimingSdc);
+  ASSERT_TRUE(
+      shell.Run("get_timing_paths", {"-to", "r2/D", "-nworst", "2"})
+          .ok);
+
+  // Sort by slack, worst first; descending reverses it.
+  const CommandResult sorted =
+      shell.Run("sort_collection", {"eos_coll_1", "slack"});
+  ASSERT_TRUE(sorted.ok) << sorted.message;
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_2"}).payload,
+            "func_tt:r2/D#1\nfunc_tt:r2/D#2");
+  const CommandResult down = shell.Run(
+      "sort_collection", {"eos_coll_1", "slack", "-descending"});
+  ASSERT_TRUE(down.ok) << down.message;
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_3"}).payload,
+            "func_tt:r2/D#2\nfunc_tt:r2/D#1");
+
+  // Filter by slack keeps only the slow path.
+  const CommandResult filtered = shell.Run(
+      "filter_collection", {"eos_coll_1", "slack < 9.2"});
+  ASSERT_TRUE(filtered.ok) << filtered.message;
+  EXPECT_NE(filtered.payload.find("count=1"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_4"}).payload,
+            "func_tt:r2/D#1");
+
+  // Index to a singleton, then read its attributes through the
+  // handle.
+  ASSERT_TRUE(
+      shell.Run("index_collection", {"eos_coll_2", "0"}).ok);
+  const CommandResult slack =
+      shell.Run("get_attribute", {"eos_coll_5", "slack"});
+  ASSERT_TRUE(slack.ok) << slack.message;
+  EXPECT_NE(slack.payload.find("value=9"), std::string::npos);
+  const CommandResult startpoint =
+      shell.Run("get_attribute", {"eos_coll_5", "startpoint"});
+  ASSERT_TRUE(startpoint.ok) << startpoint.message;
+  EXPECT_NE(startpoint.payload.find("value=r1/Q"), std::string::npos);
+
+  // foreach binds the loop variable to the path display name;
+  // the attribute is read off that name afterwards.
+  std::vector<std::string> seen;
+  shell.ctx.eval_script = [&seen](const std::string& var,
+                                   const std::string& value,
+                                   const std::string& body,
+                                   std::string& error) {
+    EXPECT_EQ(var, "path");
+    seen.push_back(value);
+    return true;
+  };
+  const CommandResult done = shell.Run(
+      "foreach_in_collection", {"eos_coll_1", "path", "puts $path"});
+  ASSERT_TRUE(done.ok) << done.message;
+  EXPECT_EQ(done.payload, "iterations=2");
+  ASSERT_EQ(seen.size(), 2u);
+  EXPECT_EQ(seen[0], "func_tt:r2/D#1");
+  EXPECT_EQ(seen[1], "func_tt:r2/D#2");
+  const CommandResult loop_slack =
+      shell.Run("get_attribute", {seen[0], "slack"});
+  ASSERT_TRUE(loop_slack.ok) << loop_slack.message;
+  EXPECT_NE(loop_slack.payload.find("value=9"), std::string::npos);
+
+  // A user attribute round-trips on the path member.
+  const CommandResult set = shell.Run(
+      "set_attribute", {"func_tt:r2/D#1", "reviewed", "yes"});
+  ASSERT_TRUE(set.ok) << set.message;
+  EXPECT_EQ(set.payload,
+            "object=func_tt:r2/D#1 attribute=reviewed value=yes");
+  const CommandResult get = shell.Run(
+      "get_attribute", {"func_tt:r2/D#1", "reviewed"});
+  ASSERT_TRUE(get.ok) << get.message;
+  EXPECT_EQ(get.payload,
+            "object=func_tt:r2/D#1 attribute=reviewed value=yes");
+
+  // Restore clears the path collections (and the tag with them).
+  const std::string path = "registry_test_timing_paths.eosproj";
+  std::remove(path.c_str());
+  ASSERT_TRUE(shell.Run("checkpoint", {path}).ok);
+  ASSERT_TRUE(shell.Run("restore", {path}).ok);
+  EXPECT_EQ(shell.Run("sizeof_collection", {"eos_coll_1"}).diag,
+            Diag::kInvalidConfiguration);
+  const CommandResult gone = shell.Run(
+      "get_attribute", {"func_tt:r2/D#1", "reviewed"});
+  ASSERT_FALSE(gone.ok);
+  EXPECT_EQ(gone.diag, Diag::kInvalidConfiguration);
+  std::remove(path.c_str());
+}
+
+TEST(GetTimingPaths, SetupAndHoldMergeKeepsBothDistinct) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildTimingPathsDesign(shell, dir);
+  ASSERT_TRUE(shell.Run("get_timing_paths", {}).ok);
+  ASSERT_TRUE(
+      shell.Run("get_timing_paths", {"-delay_type", "min"}).ok);
+  // The two paths share a display name (same scene, endpoint
+  // and rank) but differ in kind, so the merge keeps both.
+  const CommandResult merged = shell.Run(
+      "add_to_collection", {"eos_coll_1", "eos_coll_2"});
+  ASSERT_TRUE(merged.ok) << merged.message;
+  EXPECT_NE(merged.payload.find("count=2"), std::string::npos);
+  EXPECT_EQ(shell.Run("list_collection", {"eos_coll_3"}).payload,
+            "func_tt:r2/D#1\nfunc_tt:r2/D#1");
+  // Sorted by slack the hold path (0.45 ns) comes first; the
+  // singletons prove the two members are the two kinds.
+  ASSERT_TRUE(
+      shell.Run("sort_collection", {"eos_coll_3", "slack"}).ok);
+  ASSERT_TRUE(
+      shell.Run("index_collection", {"eos_coll_4", "0"}).ok);
+  const CommandResult hold_type =
+      shell.Run("get_attribute", {"eos_coll_5", "delay_type"});
+  ASSERT_TRUE(hold_type.ok) << hold_type.message;
+  EXPECT_NE(hold_type.payload.find("value=min"), std::string::npos);
+  const CommandResult hold_slack =
+      shell.Run("get_attribute", {"eos_coll_5", "slack"});
+  ASSERT_TRUE(hold_slack.ok) << hold_slack.message;
+  EXPECT_NE(hold_slack.payload.find("value=0.45"), std::string::npos);
+  ASSERT_TRUE(
+      shell.Run("index_collection", {"eos_coll_4", "1"}).ok);
+  const CommandResult setup_type =
+      shell.Run("get_attribute", {"eos_coll_6", "delay_type"});
+  ASSERT_TRUE(setup_type.ok) << setup_type.message;
+  EXPECT_NE(setup_type.payload.find("value=max"), std::string::npos);
+  const CommandResult setup_slack =
+      shell.Run("get_attribute", {"eos_coll_6", "slack"});
+  ASSERT_TRUE(setup_slack.ok) << setup_slack.message;
+  EXPECT_NE(setup_slack.payload.find("value=9.4"), std::string::npos);
+}
+
+TEST(ReportBottleneck, ReadsPathsFromCollection) {
+  TimingTempDir dir;
+  Shell shell;
+  // Mirror first: create_design resets the timing session, so
+  // the project design must exist before the timing design
+  // is loaded.
+  BuildPathMirrorDesign(shell);
+  BuildTimingPathsDesign(shell, dir, kTimingLiberty, kTimingVerilog,
+                         kTimingSdcTight);
+  // No run_timing, no capture: without -paths this fails (see
+  // RequiresTimingRun). With -paths it ranks from the
+  // collection instead.
+  ASSERT_TRUE(shell.Run("get_timing_paths", {}).ok);
+  const CommandResult report =
+      shell.Run("report_bottleneck", {"-paths", "eos_coll_1"});
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("scene=all delay_type=max paths=1 "
+                                "cells=3 report=bottleneck_report_all"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("scene=all rank=1 cell=r1 type=DFF "
+                                "paths=1 worst_slack=-0.1"),
+            std::string::npos);
+  EXPECT_NE(report.payload.find("Ranking from the path collection "
+                                "eos_coll_1."),
+            std::string::npos);
+
+  // -scene resolves against the collection's scenes.
+  const CommandResult scoped = shell.Run(
+      "report_bottleneck", {"-paths", "eos_coll_1", "-scene", "func_tt"});
+  ASSERT_TRUE(scoped.ok) << scoped.message;
+  EXPECT_NE(scoped.payload.find("scene=func_tt"), std::string::npos);
+  const CommandResult unknown_scene = shell.Run(
+      "report_bottleneck",
+      {"-paths", "eos_coll_1", "-scene", "func_xx"});
+  ASSERT_FALSE(unknown_scene.ok);
+  EXPECT_NE(unknown_scene.message.find("func_xx"), std::string::npos);
+
+  // An unknown handle, or a collection that holds no paths,
+  // fails fast.
+  const CommandResult unknown_handle =
+      shell.Run("report_bottleneck", {"-paths", "eos_coll_99"});
+  ASSERT_FALSE(unknown_handle.ok);
+  EXPECT_NE(unknown_handle.message.find("eos_coll_99"),
+            std::string::npos);
+  ASSERT_TRUE(shell.Run("get_cells", {"r1"}).ok);
+  const CommandResult wrong_kind = shell.Run(
+      "report_bottleneck", {"-paths", "eos_coll_2"});
+  ASSERT_FALSE(wrong_kind.ok);
+  EXPECT_NE(wrong_kind.message.find("path collection"),
+            std::string::npos);
 }
 
 }  // namespace
