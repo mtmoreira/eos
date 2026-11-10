@@ -1,0 +1,5 @@
+create_clock -name clk -period 5 -waveform {0 2.5} [get_ports clk]
+create_generated_clock -name clk_div -divide_by 2 -source [get_ports clk] [get_pins u_div/q]
+set_input_delay -clock clk 0.5 [all_inputs]
+set_output_delay -clock clk 0.5 [all_outputs]
+set_clock_uncertainty -setup 0.1 [all_clocks]
