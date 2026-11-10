@@ -15,6 +15,7 @@
 #include "eos/pv/extract.h"
 #include "eos/pv/signoff.h"
 #include "eos/db/odb.h"
+#include "eos/db/waivers.h"
 #include "odb/db.h"
 #include "eos/session/flow.h"
 #include "eos/synth/abc.h"
@@ -3113,6 +3114,92 @@ bool WriteSdcWriteFile(const std::string& path, const std::string& text,
   return true;
 }
 
+// ---- waivers (waiver-model unit) -------------------------------------
+// The reporting-disposition helpers every waived report shares.
+// A waiver never changes what the engine checks: these helpers
+// only match already-computed violations against the project's
+// waiver set, at report time. Matching is exact on kind, class,
+// target, and scene; a waiver whose scene is empty matches every
+// scene. The "today" every helper takes is the system date in
+// UTC, read once per command.
+
+// The waiver matching one violation, or null when none does.
+const db::Waiver* WaiverFor(const db::WaiverSet& waivers,
+                            db::WaiverKind kind, const std::string& klass,
+                            const std::string& target,
+                            const std::string& scene,
+                            const std::string& today) {
+  return waivers.Match(
+      db::WaiverViolation{kind, klass, target, scene}, today);
+}
+
+// One endpoint-slack violation split into its unwaived and
+// waived halves. waived_names maps each waived pin to the waiver
+// that covers it, in violator order.
+void SplitTimingViolators(
+    const db::WaiverSet& waivers, const std::string& klass,
+    const std::vector<analysis::EndpointSlack>& violators,
+    const std::string& scene, const std::string& today,
+    std::vector<analysis::EndpointSlack>& unwaived,
+    std::vector<std::pair<analysis::EndpointSlack, std::string>>&
+        waived) {
+  for (const analysis::EndpointSlack& endpoint : violators) {
+    const db::Waiver* waiver = WaiverFor(
+        waivers, db::WaiverKind::kTiming, klass, endpoint.pin, scene,
+        today);
+    if (waiver == nullptr) {
+      unwaived.push_back(endpoint);
+    } else {
+      waived.push_back({endpoint, waiver->name});
+    }
+  }
+}
+
+// The same split for an electrical (DRC) violator list.
+void SplitDrcViolators(
+    const db::WaiverSet& waivers, const std::string& klass,
+    const std::vector<analysis::ElectricalViolation>& violators,
+    const std::string& scene, const std::string& today,
+    std::vector<analysis::ElectricalViolation>& unwaived,
+    std::vector<std::pair<analysis::ElectricalViolation, std::string>>&
+        waived) {
+  for (const analysis::ElectricalViolation& violation : violators) {
+    const db::Waiver* waiver = WaiverFor(
+        waivers, db::WaiverKind::kTiming, klass, violation.pin, scene,
+        today);
+    if (waiver == nullptr) {
+      unwaived.push_back(violation);
+    } else {
+      waived.push_back({violation, waiver->name});
+    }
+  }
+}
+
+// The footer a waived report carries: the names of the waivers of
+// the given kind that matched nothing in this report and are not
+// expired, in creation order, or "none". matched holds the names
+// that did match, collected while the report split its
+// violations. A waiver that matched nothing is not an error: it
+// names a violation that is not present right now, and the footer
+// says so instead of dropping it silently.
+std::string WaiverUnmatchedNames(const db::WaiverSet& waivers,
+                                 db::WaiverKind kind,
+                                 const std::set<std::string>& matched,
+                                 const std::string& today) {
+  std::string out;
+  for (const db::Waiver& waiver : waivers.all()) {
+    if (waiver.kind != kind) continue;
+    if (matched.count(waiver.name) != 0) continue;
+    if (db::WaiverSet::StatusOf(waiver, 0, today) ==
+        db::WaiverStatus::kExpired) {
+      continue;
+    }
+    if (!out.empty()) out += ", ";
+    out += waiver.name;
+  }
+  return out.empty() ? "none" : out;
+}
+
 // ---- check_timing (Immediate unit 4, review item I1) -----------------
 // The constraint-completeness gate: the check the guides put
 // before trusting any violation report. It runs FROM-SCRATCH over
@@ -3412,6 +3499,145 @@ CheckTimingOutcome CheckTimingNotRun(const CheckTimingCheck& check) {
   outcome.status = "not_run";
   outcome.reason = check.not_run_reason;
   return outcome;
+}
+
+// ---- waiver evaluation (waiver-model unit) -----------------------
+// What list_waivers and waiver_coverage report: each waiver's
+// match count against the current violations, whether its kind's
+// inputs were evaluated at all, and its derived status. The
+// violation inputs are the same ones the reports use, rebuilt
+// here so the two commands never depend on a report having run:
+// timing violations come from the most recent run_timing (none
+// when no run has happened), check violations come from running
+// the check runners fresh over the current design and
+// constraints (pure, cheap, deterministic), and coverage
+// violations come from running AnalyzeCoverage fresh, but only
+// when at least one coverage waiver exists, because that is a
+// full analysis per scene. A kind whose inputs did not run
+// reports evaluated=false and matches=0, never an error.
+
+// The object a check_timing finding is about: the first token
+// of the finding string. Every runner writes "<object>
+// <reason...>", so the object is the port, pin, or constraint
+// name the finding names, and a check waiver's target matches
+// exactly that.
+std::string CheckTimingFindingObject(const std::string& finding) {
+  const std::size_t space = finding.find(' ');
+  return space == std::string::npos ? finding
+                                    : finding.substr(0, space);
+}
+
+// One waiver's evaluation, in the set's creation order.
+struct WaiverEvaluation {
+  std::size_t matches = 0;
+  bool evaluated = false;
+  db::WaiverStatus status = db::WaiverStatus::kUnmatched;
+};
+
+struct WaiverEvaluations {
+  std::vector<WaiverEvaluation> per_waiver;
+  std::size_t active = 0;
+  std::size_t unmatched = 0;
+  std::size_t expired = 0;
+};
+
+WaiverEvaluations EvaluateWaivers(CommandContext& ctx) {
+  const std::string today = db::TodayUtc();
+  const db::WaiverSet& waivers = ctx.project.waivers;
+  std::vector<db::WaiverViolation> violations;
+  const bool timing_evaluated = !ctx.timing.last_results.empty();
+  if (timing_evaluated) {
+    for (const analysis::SceneResult& result : ctx.timing.last_results) {
+      const std::string& scene = result.scenario.name;
+      for (const analysis::EndpointSlack& endpoint :
+           result.setup_violating_endpoints) {
+        violations.push_back(db::WaiverViolation{
+            db::WaiverKind::kTiming, "max_delay", endpoint.pin, scene});
+      }
+      for (const analysis::EndpointSlack& endpoint :
+           result.hold_violating_endpoints) {
+        violations.push_back(db::WaiverViolation{
+            db::WaiverKind::kTiming, "min_delay", endpoint.pin, scene});
+      }
+      const auto drc_violations =
+          [&](const char* klass,
+              const std::vector<analysis::ElectricalViolation>& list) {
+            for (const analysis::ElectricalViolation& violation : list) {
+              violations.push_back(db::WaiverViolation{
+                  db::WaiverKind::kTiming, klass, violation.pin, scene});
+            }
+          };
+      drc_violations("max_transition", result.max_transition_violators);
+      drc_violations("max_capacitance", result.max_capacitance_violators);
+      drc_violations("max_fanout", result.max_fanout_violators);
+    }
+  }
+  const bool check_evaluated = ctx.HasDesign();
+  if (check_evaluated) {
+    for (const CheckTimingCheck& check : kCheckTimingChecks) {
+      if (check.run == nullptr) continue;
+      const CheckTimingOutcome outcome =
+          check.run(*ctx.project.design, ctx.project.constraints);
+      for (const std::string& finding : outcome.findings) {
+        violations.push_back(db::WaiverViolation{
+            db::WaiverKind::kCheck, check.name,
+            CheckTimingFindingObject(finding), ""});
+      }
+    }
+  }
+  bool coverage_evaluated = false;
+  const bool has_coverage =
+      std::any_of(waivers.all().begin(), waivers.all().end(),
+                  [](const db::Waiver& waiver) {
+                    return waiver.kind == db::WaiverKind::kCoverage;
+                  });
+  if (has_coverage) {
+    bool from_odb = false;
+    std::vector<analysis::SceneAnalysis> scenes;
+    if (!BuildTimingScenes(ctx, from_odb, scenes)) {
+      analysis::TimingService service;
+      const Result<std::vector<analysis::CoverageResult>> analyzed =
+          from_odb
+              ? service.AnalyzeCoverage(*ctx.timing.odb, ctx.timing.sdc_path,
+                                        scenes)
+              : service.AnalyzeCoverage(
+                    analysis::VerilogDesign{ctx.timing.verilog_path,
+                                            ctx.timing.top_cell,
+                                            ctx.timing.sdc_path},
+                    scenes);
+      if (analyzed.ok()) {
+        coverage_evaluated = true;
+        for (const analysis::CoverageResult& result : analyzed.value()) {
+          for (const analysis::CoveragePin& pin : result.pins) {
+            if (pin.tested) continue;
+            violations.push_back(db::WaiverViolation{
+                db::WaiverKind::kCoverage, pin.check_type, pin.pin,
+                result.scenario.name});
+          }
+        }
+      }
+    }
+  }
+  WaiverEvaluations out;
+  for (const db::Waiver& waiver : waivers.all()) {
+    WaiverEvaluation evaluation;
+    evaluation.evaluated =
+        waiver.kind == db::WaiverKind::kTiming
+            ? timing_evaluated
+            : (waiver.kind == db::WaiverKind::kCheck
+                   ? check_evaluated
+                   : coverage_evaluated);
+    evaluation.matches = waivers.MatchesFor(waiver, violations, today);
+    evaluation.status =
+        db::WaiverSet::StatusOf(waiver, evaluation.matches, today);
+    switch (evaluation.status) {
+      case db::WaiverStatus::kActive: ++out.active; break;
+      case db::WaiverStatus::kUnmatched: ++out.unmatched; break;
+      case db::WaiverStatus::kExpired: ++out.expired; break;
+    }
+    out.per_waiver.push_back(evaluation);
+  }
+  return out;
 }
 
 // ---- report_clock (Immediate unit 5, review item I2) ----------------
@@ -5194,6 +5420,162 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(out);
       });
 
+  // ---- waivers (waiver-model unit) ---------------------------------
+  // The waiver commands: set_waiver records a named approval for
+  // a named violation, list_waivers shows the set with its derived
+  // status, remove_waiver drops one by name, waiver_coverage
+  // counts the set by status. A waiver is a reporting disposition
+  // only: nothing here changes what the engine checks, and
+  // matching is exact on kind, class, target, and scene, with no
+  // wildcards in v1. See docs/waiver-model.md.
+  add("set_waiver",
+      "set_waiver -kind <timing|check|coverage> -class <class> "
+      "-target <endpoint|pin> [-scene <name>] "
+      "[-expires <YYYY-MM-DD>] -reason <text> -approved_by <name> "
+      "-name <name>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        SdcOptions opts;
+        if (auto bad = SdcOptions::Parse(
+                args,
+                {{"-kind", 1, false},
+                 {"-class", 1, false},
+                 {"-target", 1, false},
+                 {"-scene", 1, false},
+                 {"-expires", 1, false},
+                 {"-reason", 1, false},
+                 {"-approved_by", 1, false},
+                 {"-name", 1, false}},
+                "set_waiver", opts)) {
+          return *bad;
+        }
+        if (!opts.Positionals().empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_waiver: unexpected positional argument: " +
+                  opts.Positionals()[0]);
+        }
+        if (auto bad = NeedDesign(ctx)) return *bad;
+        for (const char* required :
+             {"-kind", "-class", "-target", "-reason", "-approved_by",
+              "-name"}) {
+          if (!opts.Seen(required)) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                std::string("set_waiver: option ") + required +
+                    " is required");
+          }
+        }
+        const std::string kind_word = *opts.Value("-kind");
+        if (kind_word == "path") {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_waiver: path waivers arrive after get_timing_paths "
+              "lands (kind path is not in v1)");
+        }
+        const std::optional<db::WaiverKind> kind =
+            db::ParseWaiverKind(kind_word);
+        if (!kind.has_value()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "set_waiver: unknown waiver kind: " + kind_word +
+                  " (timing, check, coverage)");
+        }
+        std::vector<std::string> known_scenes;
+        for (const db::Scenario& scenario :
+             ctx.project.scenarios.all()) {
+          known_scenes.push_back(scenario.name);
+        }
+        const Result<db::WaiverId> added = ctx.project.waivers.Add(
+            *kind, *opts.Value("-name"), *opts.Value("-class"),
+            *opts.Value("-target"),
+            opts.Seen("-scene") ? *opts.Value("-scene") : "",
+            *opts.Value("-reason"), *opts.Value("-approved_by"),
+            opts.Seen("-expires") ? *opts.Value("-expires") : "",
+            ctx.project.ledger.current_revision(), known_scenes);
+        if (!added.ok()) return FromStatus(added.status());
+        return CommandResult::Ok(
+            "waiver=" + std::to_string(added.value()) +
+            " name=" + *opts.Value("-name") +
+            " status=unmatched matches=0");
+      });
+
+  add("list_waivers", "list_waivers",
+      [](CommandContext& ctx,
+         const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "list_waivers")) {
+          return *bad;
+        }
+        if (ctx.project.waivers.all().empty()) {
+          return CommandResult::Ok("waivers=0");
+        }
+        const WaiverEvaluations evaluated = EvaluateWaivers(ctx);
+        std::string out;
+        for (std::size_t i = 0; i < ctx.project.waivers.all().size();
+             ++i) {
+          const db::Waiver& waiver = ctx.project.waivers.all()[i];
+          const WaiverEvaluation& evaluation = evaluated.per_waiver[i];
+          if (!out.empty()) out += "\n";
+          out += "waiver=" + std::to_string(waiver.id) +
+                 " name=" + waiver.name +
+                 " kind=" + db::WaiverKindWord(waiver.kind) +
+                 " class=" + waiver.klass + " target=" + waiver.target +
+                 " scene=" + (waiver.scene.empty() ? "all" : waiver.scene) +
+                 " status=" + db::WaiverStatusWord(evaluation.status) +
+                 " matches=" + std::to_string(evaluation.matches) +
+                 " reason=" + waiver.reason +
+                 " approved_by=" + waiver.approved_by +
+                 " expires=" +
+                 (waiver.expires.empty() ? "-" : waiver.expires) +
+                 " created_revision=" +
+                 std::to_string(waiver.created_revision) +
+                 " evaluated=" + (evaluation.evaluated ? "run" : "none");
+        }
+        return CommandResult::Ok(out);
+      });
+
+  add("remove_waiver", "remove_waiver <name>",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad =
+                ExpectCount(args, 1, "remove_waiver <name>")) {
+          return *bad;
+        }
+        if (!ctx.project.waivers.Remove(args[0])) {
+          std::string known;
+          for (const db::Waiver& waiver :
+               ctx.project.waivers.all()) {
+            if (!known.empty()) known += ", ";
+            known += waiver.name;
+          }
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "remove_waiver: unknown waiver: " + args[0] +
+                  (known.empty() ? " (no waivers)"
+                                 : " (known waivers: " + known + ")"));
+        }
+        return CommandResult::Ok(
+            "removed=" + args[0] +
+            " waivers=" +
+            std::to_string(ctx.project.waivers.all().size()));
+      });
+
+  add("waiver_coverage", "waiver_coverage",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "waiver_coverage")) {
+          return *bad;
+        }
+        const WaiverEvaluations evaluated = EvaluateWaivers(ctx);
+        return CommandResult::Ok(
+            "total=" +
+            std::to_string(ctx.project.waivers.all().size()) +
+            " active=" + std::to_string(evaluated.active) +
+            " unmatched=" + std::to_string(evaluated.unmatched) +
+            " expired=" + std::to_string(evaluated.expired));
+      });
+
   // ---- SDC command family (Immediate unit 3) -----------------------
   // Each command stores real constraints in the session's constraint
   // set, with its semantics as parameters, so list_constraints,
@@ -6211,28 +6593,69 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                 check->run(*ctx.project.design, ctx.project.constraints));
           }
         }
+        // Waivers (waiver-model unit): a finding a check waiver
+        // covers is still listed, marked with its waiver name,
+        // and no longer fails the gate. The verdict follows
+        // option (b): pass with the waived count named when every
+        // finding is waived. Per-check status stays raw (fail
+        // iff findings non-empty); findings= stays the total
+        // count; waived= is the covered count.
+        const std::string today = db::TodayUtc();
+        std::vector<std::size_t> waived_counts(outcomes.size(), 0);
+        std::vector<std::vector<std::string>> waived_names(
+            outcomes.size());
+        std::set<std::string> matched_waivers;
+        std::size_t total_waived = 0;
+        for (std::size_t i = 0; i < outcomes.size(); ++i) {
+          for (const std::string& finding : outcomes[i].findings) {
+            const db::Waiver* waiver = WaiverFor(
+                ctx.project.waivers, db::WaiverKind::kCheck,
+                outcomes[i].name, CheckTimingFindingObject(finding),
+                "", today);
+            if (waiver == nullptr) {
+              waived_names[i].push_back("-");
+            } else {
+              ++waived_counts[i];
+              ++total_waived;
+              waived_names[i].push_back(waiver->name);
+              matched_waivers.insert(waiver->name);
+            }
+          }
+        }
         bool any_fail = false;
         bool any_not_run = false;
-        for (const CheckTimingOutcome& outcome : outcomes) {
-          if (outcome.status == "fail") any_fail = true;
-          if (outcome.status == "not_run") any_not_run = true;
+        for (std::size_t i = 0; i < outcomes.size(); ++i) {
+          if (outcomes[i].status == "fail" &&
+              waived_counts[i] < outcomes[i].findings.size()) {
+            any_fail = true;
+          }
+          if (outcomes[i].status == "not_run") any_not_run = true;
         }
         const std::string verdict =
             any_fail ? "fail" : (any_not_run ? "incomplete" : "pass");
-        std::string payload = "verdict=" + verdict;
-        for (const CheckTimingOutcome& outcome : outcomes) {
+        std::string payload = "verdict=" + verdict +
+                              " waived=" + std::to_string(total_waived);
+        for (std::size_t i = 0; i < outcomes.size(); ++i) {
+          const CheckTimingOutcome& outcome = outcomes[i];
           payload += "\ncheck=" + outcome.name +
                      " status=" + outcome.status + " findings=" +
                      std::to_string(outcome.findings.size());
           if (outcome.status == "not_run") {
             payload += " reason=" + outcome.reason;
           }
+          payload += " waived=" + std::to_string(waived_counts[i]);
           if (opts.Has("-verbose")) {
-            for (const std::string& finding : outcome.findings) {
-              payload += "\nfinding=" + outcome.name + " " + finding;
+            for (std::size_t k = 0; k < outcome.findings.size(); ++k) {
+              payload += "\nfinding=" + outcome.name + " " +
+                         outcome.findings[k] +
+                         " waived=" + waived_names[i][k];
             }
           }
         }
+        payload += "\nwaivers_unmatched=" +
+                   WaiverUnmatchedNames(ctx.project.waivers,
+                                        db::WaiverKind::kCheck,
+                                        matched_waivers, today);
         return CommandResult::Ok(payload);
       });
 
@@ -7374,7 +7797,9 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             " bindings_restored=" +
             std::to_string(info.value().bindings_restored) +
             " bindings_dropped=" +
-            std::to_string(info.value().bindings_dropped));
+            std::to_string(info.value().bindings_dropped) +
+            " waivers_restored=" +
+            std::to_string(info.value().waivers_restored));
       });
 
   add("import_odb", "import_odb <path>",
@@ -10994,12 +11419,18 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         // as display text, the violating-pin count, and whether
         // the class carries a limit at all (a DRC class with no
         // limit is reported as "no limit", never as clean).
+        // Waivers (waiver-model unit): violator, slack, cost, and
+        // violations are the UNWAIVED numbers; waived is the count
+        // of violations a waiver covers, and waived_cost is their
+        // cost, so the totals always show both numbers.
         struct ClassRow {
           std::string name;
           std::string violator;
           std::string slack;
           std::string cost;
           std::size_t violations = 0;
+          std::size_t waived = 0;
+          std::string waived_cost = "-";
           bool has_limit = true;
         };
         const auto slack_text = [](double slack) {
@@ -11009,26 +11440,40 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const auto timing_row =
             [&slack_text](
                 const char* name,
-                const std::vector<analysis::EndpointSlack>& violators,
+                const std::vector<analysis::EndpointSlack>& unwaived,
+                const std::vector<
+                    std::pair<analysis::EndpointSlack, std::string>>&
+                    waived,
                 const std::optional<double>& worst_slack,
                 const std::optional<double>& total_negative_slack) {
               ClassRow row;
               row.name = name;
-              row.violations = violators.size();
-              row.violator = violators.empty() ? "-" : violators[0].pin;
-              row.slack = violators.empty()
-                              ? (worst_slack.has_value()
+              row.violations = unwaived.size();
+              row.waived = waived.size();
+              row.violator = unwaived.empty() ? "-" : unwaived[0].pin;
+              row.slack = !unwaived.empty()
+                              ? FormatNum(unwaived[0].slack_ns)
+                              : (waived.empty() && worst_slack.has_value()
                                      ? slack_text(*worst_slack)
-                                     : std::string("-"))
-                              : FormatNum(violators[0].slack_ns);
-              // -TNS is the cost and is non-negative, but negating
-              // a zero TNS gives -0.0, which FormatNum renders as
-              // "-0": normalize it to positive zero.
-              double cost = 0.0;
-              if (total_negative_slack.has_value()) {
-                cost = -*total_negative_slack;
-                if (cost == 0.0) cost = 0.0;
+                                     : std::string("-"));
+              // The costs are sums over the violator lists, so an
+              // all-waived class costs exactly zero, never a
+              // floating-point residue of a subtraction. The
+              // metric only says whether a cost exists at all: no
+              // total-negative-slack metric means no constrained
+              // endpoints, so the cost is "-", as before.
+              double waived_sum = 0.0;
+              for (const auto& entry : waived) {
+                waived_sum += -entry.first.slack_ns;
               }
+              double cost = 0.0;
+              for (const analysis::EndpointSlack& endpoint : unwaived) {
+                cost += -endpoint.slack_ns;
+              }
+              row.waived_cost =
+                  total_negative_slack.has_value()
+                      ? FormatNum(waived_sum)
+                      : std::string("-");
               row.cost = total_negative_slack.has_value()
                              ? FormatNum(cost)
                              : std::string("-");
@@ -11037,28 +11482,39 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const auto drc_row =
             [](const char* name,
                const analysis::ElectricalCheck& check,
-               const std::vector<analysis::ElectricalViolation>&
-                   violators) {
+               const std::vector<analysis::ElectricalViolation>& unwaived,
+               const std::vector<
+                   std::pair<analysis::ElectricalViolation, std::string>>&
+                   waived) {
               ClassRow row;
               row.name = name;
               row.has_limit = check.has_limit;
-              row.violations = violators.size();
+              row.violations = unwaived.size();
+              row.waived = waived.size();
               if (!check.has_limit) {
                 row.violator = "-";
                 row.slack = "-";
                 row.cost = "-";
+                row.waived_cost = "-";
                 return row;
               }
-              row.violator = violators.empty() ? "-" : violators[0].pin;
-              row.slack = violators.empty()
-                              ? FormatNum(check.worst_slack)
-                              : FormatNum(violators[0].slack);
+              row.violator = unwaived.empty() ? "-" : unwaived[0].pin;
+              row.slack = !unwaived.empty()
+                              ? FormatNum(unwaived[0].slack)
+                              : (waived.empty()
+                                     ? FormatNum(check.worst_slack)
+                                     : std::string("-"));
               double cost = 0.0;
               for (const analysis::ElectricalViolation& violation :
-                   violators) {
+                   unwaived) {
                 cost += -violation.slack;
               }
               row.cost = FormatNum(cost);
+              double waived_sum = 0.0;
+              for (const auto& entry : waived) {
+                waived_sum += -entry.first.slack;
+              }
+              row.waived_cost = FormatNum(waived_sum);
               return row;
             };
         // One report binding per scene, registered through
@@ -11073,11 +11529,13 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                               std::to_string(
                                   ctx.project.ledger.current_revision());
         std::string text;
+        const std::string today = db::TodayUtc();
         for (std::size_t i = 0; i < analyzed.value().size(); ++i) {
           const analysis::SceneAnalysis& scene = scenes[i];
           const analysis::SceneResult& result = analyzed.value()[i];
+          const std::string& scene_name = result.scenario.name;
           const std::string report =
-              "constraint_report_" + result.scenario.name;
+              "constraint_report_" + scene_name;
           const Result<session::ArtifactId> artifact =
               ctx.reports.RegisterReport(ctx.project, report,
                                          session::ProofStatus::kPass,
@@ -11097,38 +11555,90 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               metric("worst_hold_slack_ns");
           const std::optional<double> hold_tns =
               metric("total_negative_hold_slack_ns");
+          // Waivers (waiver-model unit): split every class's
+          // violators into unwaived and waived halves. The rows,
+          // the worst violator, the costs, and the critical-range
+          // tables all run on the unwaived half; the waived half
+          // is listed in its own section, never dropped.
+          std::vector<analysis::EndpointSlack> setup_unwaived;
+          std::vector<std::pair<analysis::EndpointSlack, std::string>>
+              setup_waived;
+          SplitTimingViolators(ctx.project.waivers, "max_delay",
+                               result.setup_violating_endpoints,
+                               scene_name, today, setup_unwaived,
+                               setup_waived);
+          std::vector<analysis::EndpointSlack> hold_unwaived;
+          std::vector<std::pair<analysis::EndpointSlack, std::string>>
+              hold_waived;
+          SplitTimingViolators(ctx.project.waivers, "min_delay",
+                               result.hold_violating_endpoints, scene_name,
+                               today, hold_unwaived, hold_waived);
+          std::vector<analysis::ElectricalViolation> trans_unwaived;
+          std::vector<
+              std::pair<analysis::ElectricalViolation, std::string>>
+              trans_waived;
+          SplitDrcViolators(ctx.project.waivers, "max_transition",
+                            result.max_transition_violators, scene_name,
+                            today, trans_unwaived, trans_waived);
+          std::vector<analysis::ElectricalViolation> cap_unwaived;
+          std::vector<
+              std::pair<analysis::ElectricalViolation, std::string>>
+              cap_waived;
+          SplitDrcViolators(ctx.project.waivers, "max_capacitance",
+                            result.max_capacitance_violators, scene_name,
+                            today, cap_unwaived, cap_waived);
+          std::vector<analysis::ElectricalViolation> fanout_unwaived;
+          std::vector<
+              std::pair<analysis::ElectricalViolation, std::string>>
+              fanout_waived;
+          SplitDrcViolators(ctx.project.waivers, "max_fanout",
+                            result.max_fanout_violators, scene_name, today,
+                            fanout_unwaived, fanout_waived);
+          std::set<std::string> matched_waivers;
+          const auto collect_matched =
+              [&matched_waivers](const auto& waived) {
+                for (const auto& entry : waived) {
+                  matched_waivers.insert(entry.second);
+                }
+              };
+          collect_matched(setup_waived);
+          collect_matched(hold_waived);
+          collect_matched(trans_waived);
+          collect_matched(cap_waived);
+          collect_matched(fanout_waived);
           std::vector<ClassRow> rows;
-          rows.push_back(timing_row("max_delay",
-                                    result.setup_violating_endpoints,
-                                    setup_worst, setup_tns));
-          rows.push_back(timing_row("min_delay",
-                                    result.hold_violating_endpoints,
-                                    hold_worst, hold_tns));
+          rows.push_back(timing_row("max_delay", setup_unwaived,
+                                    setup_waived, setup_worst, setup_tns));
+          rows.push_back(timing_row("min_delay", hold_unwaived,
+                                    hold_waived, hold_worst, hold_tns));
           rows.push_back(drc_row("max_transition",
                                  result.max_transition_check,
-                                 result.max_transition_violators));
+                                 trans_unwaived, trans_waived));
           rows.push_back(drc_row("max_capacitance",
-                                 result.max_capacitance_check,
-                                 result.max_capacitance_violators));
+                                 result.max_capacitance_check, cap_unwaived,
+                                 cap_waived));
           rows.push_back(drc_row("max_fanout", result.max_fanout_check,
-                                 result.max_fanout_violators));
+                                 fanout_unwaived, fanout_waived));
           const std::size_t total_violations =
-              result.setup_violating_endpoints.size() +
-              result.hold_violating_endpoints.size() +
-              result.max_transition_violators.size() +
-              result.max_capacitance_violators.size() +
-              result.max_fanout_violators.size();
-          payload += "\nscene=" + result.scenario.name +
+              setup_unwaived.size() + hold_unwaived.size() +
+              trans_unwaived.size() + cap_unwaived.size() +
+              fanout_unwaived.size();
+          const std::size_t total_waived =
+              setup_waived.size() + hold_waived.size() +
+              trans_waived.size() + cap_waived.size() +
+              fanout_waived.size();
+          payload += "\nscene=" + scene_name +
                      " violations=" + std::to_string(total_violations) +
                      " worst_slack_ns=" +
                      (setup_worst.has_value() &&
                               std::isfinite(*setup_worst)
                           ? FormatNum(*setup_worst)
                           : std::string("none")) +
+                     " waived=" + std::to_string(total_waived) +
                      " report=" + report + " artifact=" +
                      std::to_string(artifact.value());
           for (const ClassRow& row : rows) {
-            payload += "\nscene=" + result.scenario.name +
+            payload += "\nscene=" + scene_name +
                        " class=" + row.name +
                        " violator=" + row.violator;
             if (row.has_limit) {
@@ -11140,7 +11650,9 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               payload += " limit=none";
             }
             payload += " weight=1 violations=" +
-                       std::to_string(row.violations);
+                       std::to_string(row.violations) +
+                       " waived=" + std::to_string(row.waived) +
+                       " waived_cost=" + row.waived_cost;
           }
           text += "\nScene: " + result.scenario.name + "\n";
           std::vector<std::vector<std::string>> summary;
@@ -11187,8 +11699,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                 }
                 text += ReportClockRenderTable(std::move(table));
               };
-          timing_range("max_delay", result.setup_violating_endpoints);
-          timing_range("min_delay", result.hold_violating_endpoints);
+          timing_range("max_delay", setup_unwaived);
+          timing_range("min_delay", hold_unwaived);
           const auto drc_range =
               [&text, verbose](
                   const char* name, const char* unit,
@@ -11221,11 +11733,57 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                 }
                 text += ReportClockRenderTable(std::move(table));
               };
-          drc_range("max_transition", "ns",
-                    result.max_transition_violators);
-          drc_range("max_capacitance", "pF",
-                    result.max_capacitance_violators);
-          drc_range("max_fanout", "fanout", result.max_fanout_violators);
+          drc_range("max_transition", "ns", trans_unwaived);
+          drc_range("max_capacitance", "pF", cap_unwaived);
+          drc_range("max_fanout", "fanout", fanout_unwaived);
+          // The waived violations, one section per class that has
+          // any: still listed, with slack and waiver name, never
+          // dropped.
+          const auto waived_timing =
+              [&text](const char* name,
+                      const std::vector<std::pair<
+                          analysis::EndpointSlack, std::string>>& waived) {
+                if (waived.empty()) return;
+                text += "\nWaived violations (" + std::string(name) +
+                        "): endpoints covered by a waiver:\n";
+                std::vector<std::vector<std::string>> table;
+                table.push_back({"Endpoint", "Slack (ns)", "Waiver"});
+                for (const auto& entry : waived) {
+                  table.push_back({entry.first.pin,
+                                   FormatNum(entry.first.slack_ns),
+                                   entry.second});
+                }
+                text += ReportClockRenderTable(std::move(table));
+              };
+          waived_timing("max_delay", setup_waived);
+          waived_timing("min_delay", hold_waived);
+          const auto waived_drc =
+              [&text](const char* name, const char* unit,
+                      const std::vector<std::pair<
+                          analysis::ElectricalViolation, std::string>>&
+                          waived) {
+                if (waived.empty()) return;
+                text += "\nWaived violations (" + std::string(name) +
+                        "): pins covered by a waiver:\n";
+                std::vector<std::vector<std::string>> table;
+                table.push_back({"Pin", std::string("Slack (") + unit +
+                                          ")",
+                                 "Waiver"});
+                for (const auto& entry : waived) {
+                  table.push_back({entry.first.pin,
+                                   FormatNum(entry.first.slack),
+                                   entry.second});
+                }
+                text += ReportClockRenderTable(std::move(table));
+              };
+          waived_drc("max_transition", "ns", trans_waived);
+          waived_drc("max_capacitance", "pF", cap_waived);
+          waived_drc("max_fanout", "fanout", fanout_waived);
+          text += "waivers unmatched: " +
+                  WaiverUnmatchedNames(ctx.project.waivers,
+                                       db::WaiverKind::kTiming,
+                                       matched_waivers, today) +
+                  "\n";
           if (verbose) {
             const auto render_worst_path =
                 [&](analysis::CheckKind kind,
@@ -11263,12 +11821,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             };
             if (auto bad = render_worst_path(
                     analysis::CheckKind::kSetup,
-                    result.setup_violating_endpoints, "max_delay")) {
+                    setup_unwaived, "max_delay")) {
               return *bad;
             }
             if (auto bad = render_worst_path(
                     analysis::CheckKind::kHold,
-                    result.hold_violating_endpoints, "min_delay")) {
+                    hold_unwaived, "min_delay")) {
               return *bad;
             }
           }
@@ -11434,15 +11992,25 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           // Per-type counts in the fixed type order. The detail
           // rows arrive sorted by (pin, check type), so a row's
           // type index is found by a linear scan of ten names.
+          // Waivers (waiver-model unit): an untested row a coverage
+          // waiver covers is still untested; the type row carries
+          // the waived count, and the detail row carries the
+          // waiver name.
+          const std::string today = db::TodayUtc();
           struct TypeCounts {
             std::size_t tested = 0;
             std::size_t untested = 0;
+            std::size_t waived = 0;
           };
           std::vector<TypeCounts> counts(
               sizeof(kCheckTypes) / sizeof(kCheckTypes[0]));
           std::size_t total_tested = 0;
           std::size_t total_untested = 0;
-          for (const analysis::CoveragePin& pin : result.pins) {
+          std::size_t total_waived = 0;
+          std::vector<std::string> pin_waivers(result.pins.size(), "-");
+          std::set<std::string> matched_waivers;
+          for (std::size_t p = 0; p < result.pins.size(); ++p) {
+            const analysis::CoveragePin& pin = result.pins[p];
             for (std::size_t t = 0; t < counts.size(); ++t) {
               if (pin.check_type == kCheckTypes[t]) {
                 if (pin.tested) {
@@ -11451,6 +12019,16 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                 } else {
                   ++counts[t].untested;
                   ++total_untested;
+                  const db::Waiver* waiver = WaiverFor(
+                      ctx.project.waivers, db::WaiverKind::kCoverage,
+                      pin.check_type, pin.pin, result.scenario.name,
+                      today);
+                  if (waiver != nullptr) {
+                    ++counts[t].waived;
+                    ++total_waived;
+                    pin_waivers[p] = waiver->name;
+                    matched_waivers.insert(waiver->name);
+                  }
                 }
                 break;
               }
@@ -11462,7 +12040,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                      " tested=" + std::to_string(total_tested) +
                      " untested=" + std::to_string(total_untested) +
                      " report=" + report + " artifact=" +
-                     std::to_string(artifact.value());
+                     std::to_string(artifact.value()) +
+                     " waived=" + std::to_string(total_waived);
           for (std::size_t t = 0; t < counts.size(); ++t) {
             const std::size_t total =
                 counts[t].tested + counts[t].untested;
@@ -11475,11 +12054,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                        " tested=" + std::to_string(counts[t].tested) +
                        " untested=" +
                        std::to_string(counts[t].untested) +
-                       " percent=" + FormatFixed(percent, 1);
+                       " percent=" + FormatFixed(percent, 1) +
+                       " waived=" + std::to_string(counts[t].waived);
           }
           text += "\nScene: " + result.scenario.name + "\n";
           std::vector<std::vector<std::string>> summary;
-          summary.push_back({"Check Type", "Tested", "Untested",
+          summary.push_back({"Check Type", "Tested", "Untested", "Waived",
                              "Tested %"});
           for (std::size_t t = 0; t < counts.size(); ++t) {
             const std::size_t total =
@@ -11491,6 +12071,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             summary.push_back({kCheckTypes[t],
                                std::to_string(counts[t].tested),
                                std::to_string(counts[t].untested),
+                               std::to_string(counts[t].waived),
                                FormatFixed(percent, 1)});
           }
           text += ReportClockRenderTable(std::move(summary));
@@ -11522,22 +12103,30 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               };
           std::vector<std::vector<std::string>> detail;
           detail.push_back({"Constrained Pin", "Related Pin",
-                            "Check Type", "Untested Reason"});
-          for (const analysis::CoveragePin& pin : result.pins) {
+                            "Check Type", "Untested Reason", "Waived"});
+          for (std::size_t p = 0; p < result.pins.size(); ++p) {
+            const analysis::CoveragePin& pin = result.pins[p];
             if (!detail_shown(pin)) continue;
             detail.push_back({pin.pin, pin.related_pin,
                               pin.check_type,
                               pin.tested ? "-"
-                                         : pin.untested_reason});
+                                         : pin.untested_reason,
+                              pin_waivers[p]});
             payload += "\nscene=" + result.scenario.name +
                        " pin=" + pin.pin +
                        " related=" + pin.related_pin +
                        " type=" + pin.check_type +
                        " status=" + (pin.tested ? "tested" : "untested") +
                        " reason=" +
-                       (pin.tested ? "-" : pin.untested_reason);
+                       (pin.tested ? "-" : pin.untested_reason) +
+                       " waived=" + pin_waivers[p];
           }
           text += ReportClockRenderTable(std::move(detail));
+          text += "waivers unmatched: " +
+                  WaiverUnmatchedNames(ctx.project.waivers,
+                                       db::WaiverKind::kCoverage,
+                                       matched_waivers, today) +
+                  "\n";
         }
         if (opts.Seen("-file")) {
           const std::string file = *opts.Value("-file");
@@ -11649,37 +12238,80 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           const Result<session::ArtifactId> artifact = ctx.reports.RegisterReport(
               ctx.project, report, session::ProofStatus::kPass, "NLDM");
           if (!artifact.ok()) return FromStatus(artifact.status());
-          // Per-group WNS/TNS and violating-path count: WNS is the
-          // worst slack over every endpoint in the group, TNS the
-          // sum of the negative ones.
-          const auto group_tns = [](const analysis::PathGroupResult& group) {
-            double wns = 0.0;
+          // Per-group WNS/TNS and violating-path count, waiver
+          // aware (waiver-model unit): WNS is the worst slack over
+          // every UNWAIVED endpoint in the group, TNS the sum of
+          // the negative unwaived ones, violating the unwaived
+          // count, waived the count of violating endpoints a
+          // waiver covers. A waiver only covers a violation: an
+          // endpoint with non-negative slack is never waived and
+          // stays in the WNS pool. WNS is empty when the group
+          // has no unwaived endpoint at all.
+          const std::string today = db::TodayUtc();
+          const std::string scene_name = result.scenario.name;
+          // The waivers that matched a violation in this scene,
+          // for the footer.
+          std::set<std::string> matched_waivers;
+          struct GroupWaivedTns {
+            std::optional<double> wns;
             double tns = 0.0;
             std::size_t violating = 0;
-            bool first = true;
-            for (const analysis::EndpointSlack& endpoint :
-                 group.endpoints) {
-              if (first || endpoint.slack_ns < wns) {
-                wns = endpoint.slack_ns;
-                first = false;
-              }
-              if (endpoint.slack_ns < 0.0) {
-                tns += endpoint.slack_ns;
-                ++violating;
-              }
-            }
-            return std::make_tuple(wns, tns, violating);
+            std::size_t waived = 0;
           };
+          const auto group_waived_tns =
+              [&](const analysis::PathGroupResult& group,
+                  const char* klass) {
+                GroupWaivedTns out;
+                bool first = true;
+                for (const analysis::EndpointSlack& endpoint :
+                     group.endpoints) {
+                  const db::Waiver* waiver = nullptr;
+                  if (endpoint.slack_ns < 0.0) {
+                    waiver = WaiverFor(ctx.project.waivers,
+                                       db::WaiverKind::kTiming, klass,
+                                       endpoint.pin, scene_name, today);
+                  }
+                  if (waiver != nullptr) {
+                    ++out.waived;
+                    matched_waivers.insert(waiver->name);
+                    continue;
+                  }
+                  if (first || endpoint.slack_ns < *out.wns) {
+                    out.wns = endpoint.slack_ns;
+                    first = false;
+                  }
+                  if (endpoint.slack_ns < 0.0) {
+                    out.tns += endpoint.slack_ns;
+                    ++out.violating;
+                  }
+                }
+                return out;
+              };
           // The union TNS counts each violating endpoint once,
           // however many groups it belongs to; the slack is a
           // property of the endpoint, so it is the same in every
           // group, and the minimum guards against any drift.
-          const auto union_tns =
-              [](const std::vector<analysis::PathGroupResult>& groups) {
+          // Waived endpoints are excluded from the union the same
+          // way, and counted once per pin.
+          const auto union_waived_tns =
+              [&](const std::vector<analysis::PathGroupResult>& groups,
+                  const char* klass) {
                 std::map<std::string, double> by_pin;
+                std::set<std::string> waived_pins;
                 for (const analysis::PathGroupResult& group : groups) {
                   for (const analysis::EndpointSlack& endpoint :
                        group.endpoints) {
+                    const db::Waiver* waiver = nullptr;
+                    if (endpoint.slack_ns < 0.0) {
+                      waiver = WaiverFor(ctx.project.waivers,
+                                         db::WaiverKind::kTiming, klass,
+                                         endpoint.pin, scene_name, today);
+                    }
+                    if (waiver != nullptr) {
+                      waived_pins.insert(endpoint.pin);
+                      matched_waivers.insert(waiver->name);
+                      continue;
+                    }
                     const auto [it, inserted] = by_pin.try_emplace(
                         endpoint.pin, endpoint.slack_ns);
                     if (!inserted) {
@@ -11697,26 +12329,36 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                     ++violating;
                   }
                 }
-                return std::make_pair(tns, violating);
+                return std::make_tuple(tns, violating,
+                                       waived_pins.size());
               };
-          const auto [setup_union_tns, setup_union_violating] =
-              union_tns(result.setup_groups);
-          const auto [hold_union_tns, hold_union_violating] =
-              union_tns(result.hold_groups);
+          const auto [setup_union_tns, setup_union_violating,
+                      setup_union_waived] =
+              union_waived_tns(result.setup_groups, "max_delay");
+          const auto [hold_union_tns, hold_union_violating,
+                      hold_union_waived] =
+              union_waived_tns(result.hold_groups, "min_delay");
           double setup_every_tns = 0.0;
           std::size_t setup_every_violating = 0;
+          std::size_t setup_every_waived = 0;
           for (const analysis::PathGroupResult& group :
                result.setup_groups) {
-            const auto [wns, tns, violating] = group_tns(group);
-            setup_every_tns += tns;
-            setup_every_violating += violating;
+            const GroupWaivedTns stats =
+                group_waived_tns(group, "max_delay");
+            setup_every_tns += stats.tns;
+            setup_every_violating += stats.violating;
+            setup_every_waived += stats.waived;
           }
           double hold_every_tns = 0.0;
           std::size_t hold_every_violating = 0;
-          for (const analysis::PathGroupResult& group : result.hold_groups) {
-            const auto [wns, tns, violating] = group_tns(group);
-            hold_every_tns += tns;
-            hold_every_violating += violating;
+          std::size_t hold_every_waived = 0;
+          for (const analysis::PathGroupResult& group :
+               result.hold_groups) {
+            const GroupWaivedTns stats =
+                group_waived_tns(group, "min_delay");
+            hold_every_tns += stats.tns;
+            hold_every_violating += stats.violating;
+            hold_every_waived += stats.waived;
           }
           const double compile_cpu =
               (ctx.synth.mapped_cpu_s >= 0.0 ? ctx.synth.mapped_cpu_s
@@ -11724,7 +12366,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               (ctx.synth.opt_cpu_s >= 0.0 ? ctx.synth.opt_cpu_s : 0.0);
           const bool compile_recorded =
               ctx.synth.mapped_cpu_s >= 0.0 || ctx.synth.opt_cpu_s >= 0.0;
-          payload += "\nscene=" + result.scenario.name +
+          payload += "\nscene=" + scene_name +
                      " setup_groups=" +
                      std::to_string(result.setup_groups.size()) +
                      " hold_groups=" +
@@ -11747,77 +12389,144 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                      " compile_cpu_s=" +
                      (compile_recorded ? FormatNum(compile_cpu) : "n/a") +
                      " report=" + report +
-                     " artifact=" + std::to_string(artifact.value());
+                     " artifact=" + std::to_string(artifact.value()) +
+                     " union_waived=" +
+                     std::to_string(setup_union_waived) +
+                     " every_group_waived=" +
+                     std::to_string(setup_every_waived) +
+                     " hold_union_waived=" +
+                     std::to_string(hold_union_waived) +
+                     " hold_every_group_waived=" +
+                     std::to_string(hold_every_waived);
           for (const analysis::PathGroupResult& group :
                result.setup_groups) {
-            const auto [wns, tns, violating] = group_tns(group);
-            payload += "\nscene=" + result.scenario.name +
+            const GroupWaivedTns stats =
+                group_waived_tns(group, "max_delay");
+            payload += "\nscene=" + scene_name +
                        " group=" + group.name +
-                       " check=setup wns=" + FormatNum(wns) +
-                       " tns=" + FormatNum(tns) +
-                       " violating_paths=" + std::to_string(violating);
+                       " check=setup wns=" +
+                       (stats.wns.has_value() ? FormatNum(*stats.wns)
+                                              : "none") +
+                       " tns=" + FormatNum(stats.tns) +
+                       " violating_paths=" +
+                       std::to_string(stats.violating) +
+                       " waived=" + std::to_string(stats.waived);
           }
           for (const analysis::PathGroupResult& group : result.hold_groups) {
-            const auto [wns, tns, violating] = group_tns(group);
-            payload += "\nscene=" + result.scenario.name +
+            const GroupWaivedTns stats =
+                group_waived_tns(group, "min_delay");
+            payload += "\nscene=" + scene_name +
                        " group=" + group.name +
-                       " check=hold wns=" + FormatNum(wns) +
-                       " tns=" + FormatNum(tns) +
-                       " violating_paths=" + std::to_string(violating);
+                       " check=hold wns=" +
+                       (stats.wns.has_value() ? FormatNum(*stats.wns)
+                                              : "none") +
+                       " tns=" + FormatNum(stats.tns) +
+                       " violating_paths=" +
+                       std::to_string(stats.violating) +
+                       " waived=" + std::to_string(stats.waived);
           }
           for (const analysis::CellTypeRow& row : result.cells) {
-            payload += "\nscene=" + result.scenario.name +
+            payload += "\nscene=" + scene_name +
                        " cell=" + row.cell +
                        " count=" + std::to_string(row.count) +
                        " area=" + FormatNum(row.area);
           }
+          // The DRC violator split, per check: violations and
+          // worst slack are the unwaived numbers; a check with no
+          // unwaived violation reports worst_slack=none (a check
+          // with no limit at all still reports no limit).
           const auto drc_row = [&](const char* name,
-                                   const analysis::ElectricalCheck& check) {
-            payload += "\nscene=" + result.scenario.name +
+                                   const analysis::ElectricalCheck& check,
+                                   const std::vector<
+                                       analysis::ElectricalViolation>&
+                                       violators) {
+            std::vector<analysis::ElectricalViolation> unwaived;
+            std::vector<
+                std::pair<analysis::ElectricalViolation, std::string>>
+                waived;
+            SplitDrcViolators(ctx.project.waivers, name, violators,
+                              scene_name, today, unwaived, waived);
+            for (const auto& entry : waived) {
+              matched_waivers.insert(entry.second);
+            }
+            std::string worst;
+            if (!check.has_limit) {
+              worst = "no limit";
+            } else if (unwaived.empty()) {
+              worst = waived.empty()
+                          ? FormatNum(check.worst_slack)
+                          : "none";
+            } else {
+              worst = FormatNum(unwaived[0].slack);
+            }
+            payload += "\nscene=" + scene_name +
                        " drc=" + name +
                        " violations=" +
-                       std::to_string(check.violation_count) +
-                       " worst_slack=" +
-                       (check.has_limit ? FormatNum(check.worst_slack)
-                                        : "no limit");
+                       std::to_string(unwaived.size()) +
+                       " worst_slack=" + worst +
+                       " waived=" + std::to_string(waived.size());
           };
-          drc_row("max_transition", result.max_transition_check);
-          drc_row("max_capacitance", result.max_capacitance_check);
-          drc_row("max_fanout", result.max_fanout_check);
-          text += "\nScene: " + result.scenario.name + "\n";
+          drc_row("max_transition", result.max_transition_check,
+                  result.max_transition_violators);
+          drc_row("max_capacitance", result.max_capacitance_check,
+                  result.max_capacitance_violators);
+          drc_row("max_fanout", result.max_fanout_check,
+                  result.max_fanout_violators);
+          text += "\nScene: " + scene_name + "\n";
           const auto group_table = [&](const char* title,
                                        const std::vector<
                                            analysis::PathGroupResult>& groups,
+                                       const char* klass,
                                        double union_tns_value,
                                        std::size_t union_violating,
+                                       std::size_t union_waived,
                                        double every_tns_value,
-                                       std::size_t every_violating) {
+                                       std::size_t every_violating,
+                                       std::size_t every_waived) {
             text += title;
             std::vector<std::vector<std::string>> table;
-            table.push_back(
-                {"Group", "WNS (ns)", "TNS (ns)", "Violating paths"});
+            table.push_back({"Group", "WNS (ns)", "TNS (ns)",
+                             "Violating paths", "Waived"});
             for (const analysis::PathGroupResult& group : groups) {
-              const auto [wns, tns, violating] = group_tns(group);
-              table.push_back({group.name, FormatNum(wns), FormatNum(tns),
-                               std::to_string(violating)});
+              const GroupWaivedTns stats =
+                  group_waived_tns(group, klass);
+              table.push_back({group.name,
+                               stats.wns.has_value()
+                                   ? FormatNum(*stats.wns)
+                                   : "-",
+                               FormatNum(stats.tns),
+                               std::to_string(stats.violating),
+                               std::to_string(stats.waived)});
             }
             if (groups.empty()) {
-              table.push_back({"(no path groups)", "-", "-", "-"});
+              table.push_back({"(no path groups)", "-", "-", "-", "-"});
             }
             text += ReportClockRenderTable(std::move(table));
             text += "TNS (union over " +
                     std::to_string(union_violating) +
-                    " endpoints): " + FormatNum(union_tns_value) + "\n";
+                    " endpoints): " + FormatNum(union_tns_value) +
+                    (union_waived == 0
+                         ? ""
+                         : " (" + std::to_string(union_waived) +
+                               " waived)") +
+                    "\n";
             text += "TNS (every group, " +
                     std::to_string(every_violating) +
-                    " endpoints): " + FormatNum(every_tns_value) + "\n";
+                    " endpoints): " + FormatNum(every_tns_value) +
+                    (every_waived == 0
+                         ? ""
+                         : " (" + std::to_string(every_waived) +
+                               " waived)") +
+                    "\n";
           };
           group_table("Path groups (setup):\n", result.setup_groups,
-                      setup_union_tns, setup_union_violating,
-                      setup_every_tns, setup_every_violating);
+                      "max_delay", setup_union_tns, setup_union_violating,
+                      setup_union_waived, setup_every_tns,
+                      setup_every_violating, setup_every_waived);
           group_table("Path groups (hold):\n", result.hold_groups,
-                      hold_union_tns, hold_union_violating,
-                      hold_every_tns, hold_every_violating);
+                      "min_delay", hold_union_tns, hold_union_violating,
+                      hold_union_waived, hold_every_tns,
+                      hold_every_violating, hold_every_waived);
           text += "Cells: " + std::to_string(result.total_cells) +
                   ", total area " + FormatNum(result.total_area) +
                   " (Liberty area units)\n";
@@ -11833,18 +12542,44 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           text += ReportClockRenderTable(std::move(cells));
           text += "DRC summary:\n";
           std::vector<std::vector<std::string>> drc;
-          drc.push_back({"Check", "Violations", "Worst Slack"});
+          drc.push_back({"Check", "Violations", "Waived", "Worst Slack"});
           const auto drc_text_row = [&](const char* name,
                                         const analysis::ElectricalCheck&
-                                            check) {
-            drc.push_back({name, std::to_string(check.violation_count),
-                           check.has_limit ? FormatNum(check.worst_slack)
-                                           : "no limit"});
+                                            check,
+                                        const std::vector<
+                                            analysis::ElectricalViolation>&
+                                            violators) {
+            std::vector<analysis::ElectricalViolation> unwaived;
+            std::vector<
+                std::pair<analysis::ElectricalViolation, std::string>>
+                waived;
+            SplitDrcViolators(ctx.project.waivers, name, violators,
+                              scene_name, today, unwaived, waived);
+            std::string worst;
+            if (!check.has_limit) {
+              worst = "no limit";
+            } else if (unwaived.empty()) {
+              worst = waived.empty()
+                          ? FormatNum(check.worst_slack)
+                          : "none";
+            } else {
+              worst = FormatNum(unwaived[0].slack);
+            }
+            drc.push_back({name, std::to_string(unwaived.size()),
+                           std::to_string(waived.size()), worst});
           };
-          drc_text_row("max_transition", result.max_transition_check);
-          drc_text_row("max_capacitance", result.max_capacitance_check);
-          drc_text_row("max_fanout", result.max_fanout_check);
+          drc_text_row("max_transition", result.max_transition_check,
+                       result.max_transition_violators);
+          drc_text_row("max_capacitance", result.max_capacitance_check,
+                       result.max_capacitance_violators);
+          drc_text_row("max_fanout", result.max_fanout_check,
+                       result.max_fanout_violators);
           text += ReportClockRenderTable(std::move(drc));
+          text += "waivers unmatched: " +
+                  WaiverUnmatchedNames(ctx.project.waivers,
+                                       db::WaiverKind::kTiming,
+                                       matched_waivers, today) +
+                  "\n";
           if (compile_recorded) {
             text += "Compile CPU: " + FormatNum(compile_cpu) +
                     " s (synth_map plus synth_opt)\n";
@@ -13082,21 +13817,25 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         // report_constraint's worst-violator tier: the worst
         // violator, its slack, the exact cost, weight 1, and
         // the violating-pin count. A DRC class with no limit
-        // at all reports limit=none, never clean.
+        // at all reports limit=none, never clean. Waivers
+        // (waiver-model unit): violator, slack, cost, and
+        // violations are the unwaived numbers; waived= is the
+        // count a waiver covers.
         const auto timing_row = [](
             const char* name,
-            const std::vector<analysis::EndpointSlack>& violators,
+            const std::vector<analysis::EndpointSlack>& unwaived,
+            std::size_t waived_count,
             const std::optional<double>& worst_slack,
             const std::optional<double>& total_negative_slack,
             std::string& out) {
           out += " class=";
           out += name;
           out += " violator=";
-          out += violators.empty() ? "-" : violators[0].pin;
+          out += unwaived.empty() ? "-" : unwaived[0].pin;
           out += " slack=";
-          if (!violators.empty()) {
-            out += FormatNum(violators[0].slack_ns);
-          } else if (worst_slack.has_value() &&
+          if (!unwaived.empty()) {
+            out += FormatNum(unwaived[0].slack_ns);
+          } else if (waived_count == 0 && worst_slack.has_value() &&
                      std::isfinite(*worst_slack)) {
             out += FormatNum(*worst_slack);
           } else {
@@ -13104,39 +13843,54 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           }
           out += " cost=";
           if (total_negative_slack.has_value()) {
-            double cost = -*total_negative_slack;
-            if (cost == 0.0) cost = 0.0;
+            // The cost is the sum over the unwaived violators,
+            // so an all-waived class costs exactly zero, never a
+            // floating-point residue of a subtraction. The metric
+            // only says whether a cost exists at all.
+            double cost = 0.0;
+            for (const analysis::EndpointSlack& endpoint : unwaived) {
+              cost += -endpoint.slack_ns;
+            }
             out += FormatNum(cost);
           } else {
             out += "none";
           }
           out += " weight=1 violations=" +
-                 std::to_string(violators.size());
+                 std::to_string(unwaived.size()) +
+                 " waived=" + std::to_string(waived_count);
         };
         const auto drc_row = [](
             const char* name, const analysis::ElectricalCheck& check,
-            const std::vector<analysis::ElectricalViolation>& violators,
+            const std::vector<analysis::ElectricalViolation>& unwaived,
+            std::size_t waived_count,
             std::string& out) {
           out += " class=";
           out += name;
           if (!check.has_limit) {
             out += " violator=- limit=none weight=1 violations=" +
-                   std::to_string(violators.size());
+                   std::to_string(unwaived.size()) +
+                   " waived=" + std::to_string(waived_count);
             return;
           }
           out += " violator=";
-          out += violators.empty() ? "-" : violators[0].pin;
+          out += unwaived.empty() ? "-" : unwaived[0].pin;
           out += " slack=";
-          out += FormatNum(violators.empty() ? check.worst_slack
-                                             : violators[0].slack);
+          if (!unwaived.empty()) {
+            out += FormatNum(unwaived[0].slack);
+          } else if (waived_count == 0) {
+            out += FormatNum(check.worst_slack);
+          } else {
+            out += "none";
+          }
           double cost = 0.0;
           for (const analysis::ElectricalViolation& violation :
-               violators) {
+               unwaived) {
             cost += -violation.slack;
           }
           out += " cost=" + FormatNum(cost);
           out += " weight=1 violations=" +
-                 std::to_string(violators.size());
+                 std::to_string(unwaived.size()) +
+                 " waived=" + std::to_string(waived_count);
         };
         // The per-group WNS/TNS helpers mirror report_qor's:
         // WNS is the worst slack over every endpoint in the
@@ -13188,8 +13942,57 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             "clock_gating_setup", "clock_gating_hold",
             "no-change",       "min_pulse_width",
         };
+        const std::string today = db::TodayUtc();
         for (const analysis::SceneResult* result : reported) {
           const std::string& scene = result->scenario.name;
+          // Waivers (waiver-model unit): split every class's
+          // violators; the rows carry the unwaived numbers plus
+          // the waived count.
+          std::vector<analysis::EndpointSlack> setup_unwaived;
+          std::vector<std::pair<analysis::EndpointSlack, std::string>>
+              setup_waived;
+          SplitTimingViolators(ctx.project.waivers, "max_delay",
+                               result->setup_violating_endpoints, scene,
+                               today, setup_unwaived, setup_waived);
+          std::vector<analysis::EndpointSlack> hold_unwaived;
+          std::vector<std::pair<analysis::EndpointSlack, std::string>>
+              hold_waived;
+          SplitTimingViolators(ctx.project.waivers, "min_delay",
+                               result->hold_violating_endpoints, scene,
+                               today, hold_unwaived, hold_waived);
+          std::vector<analysis::ElectricalViolation> trans_unwaived;
+          std::vector<
+              std::pair<analysis::ElectricalViolation, std::string>>
+              trans_waived;
+          SplitDrcViolators(ctx.project.waivers, "max_transition",
+                            result->max_transition_violators, scene,
+                            today, trans_unwaived, trans_waived);
+          std::vector<analysis::ElectricalViolation> cap_unwaived;
+          std::vector<
+              std::pair<analysis::ElectricalViolation, std::string>>
+              cap_waived;
+          SplitDrcViolators(ctx.project.waivers, "max_capacitance",
+                            result->max_capacitance_violators, scene,
+                            today, cap_unwaived, cap_waived);
+          std::vector<analysis::ElectricalViolation> fanout_unwaived;
+          std::vector<
+              std::pair<analysis::ElectricalViolation, std::string>>
+              fanout_waived;
+          SplitDrcViolators(ctx.project.waivers, "max_fanout",
+                            result->max_fanout_violators, scene, today,
+                            fanout_unwaived, fanout_waived);
+          std::set<std::string> matched_waivers;
+          const auto collect_matched =
+              [&matched_waivers](const auto& waived) {
+                for (const auto& entry : waived) {
+                  matched_waivers.insert(entry.second);
+                }
+              };
+          collect_matched(setup_waived);
+          collect_matched(hold_waived);
+          collect_matched(trans_waived);
+          collect_matched(cap_waived);
+          collect_matched(fanout_waived);
           const auto metric = [&result](const char* name) {
             const auto it = result->metrics.find(name);
             return it == result->metrics.end()
@@ -13229,26 +14032,26 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                      " max_fanout_violations=" +
                      MetricText(result->metrics, "max_fanout_violations");
           std::string violators = "\nscene=" + scene;
-          timing_row("max_delay", result->setup_violating_endpoints,
+          timing_row("max_delay", setup_unwaived, setup_waived.size(),
                      metric("worst_slack_ns"),
                      metric("total_negative_slack_ns"), violators);
           payload += violators;
           violators = "\nscene=" + scene;
-          timing_row("min_delay", result->hold_violating_endpoints,
+          timing_row("min_delay", hold_unwaived, hold_waived.size(),
                      metric("worst_hold_slack_ns"),
                      metric("total_negative_hold_slack_ns"), violators);
           payload += violators;
           violators = "\nscene=" + scene;
           drc_row("max_transition", result->max_transition_check,
-                  result->max_transition_violators, violators);
+                  trans_unwaived, trans_waived.size(), violators);
           payload += violators;
           violators = "\nscene=" + scene;
           drc_row("max_capacitance", result->max_capacitance_check,
-                  result->max_capacitance_violators, violators);
+                  cap_unwaived, cap_waived.size(), violators);
           payload += violators;
           violators = "\nscene=" + scene;
           drc_row("max_fanout", result->max_fanout_check,
-                  result->max_fanout_violators, violators);
+                  fanout_unwaived, fanout_waived.size(), violators);
           payload += violators;
           const auto emit_paths = [&](const char* check,
                                       const std::vector<
@@ -13256,13 +14059,26 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             const std::vector<analysis::PathReport>* paths =
                 find_paths(all, scene);
             if (paths == nullptr) return;
+            const std::string klass =
+                std::string(check) == "setup" ? "max_delay" : "min_delay";
             for (const analysis::PathReport& path : *paths) {
+              std::string waived = "-";
+              if (path.slack_ns < 0.0) {
+                const db::Waiver* waiver = WaiverFor(
+                    ctx.project.waivers, db::WaiverKind::kTiming, klass,
+                    path.endpoint, scene, today);
+                if (waiver != nullptr) {
+                  waived = waiver->name;
+                  matched_waivers.insert(waiver->name);
+                }
+              }
               payload += "\npath scene=" + scene + " check=" + check +
                          " endpoint=" + path.endpoint +
                          " startpoint=" + path.startpoint +
                          " slack=" + FormatNum(path.slack_ns) +
                          " arrival=" + FormatNum(path.arrival_ns) +
-                         " required=" + FormatNum(path.required_ns);
+                         " required=" + FormatNum(path.required_ns) +
+                         " waived=" + waived;
             }
           };
           emit_paths("setup", setup_paths.value());
@@ -13395,6 +14211,10 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             qor_drc("max_capacitance", scene_qor->max_capacitance_check);
             qor_drc("max_fanout", scene_qor->max_fanout_check);
           }
+          payload += "\nscene=" + scene + " waivers_unmatched=" +
+                     WaiverUnmatchedNames(ctx.project.waivers,
+                                          db::WaiverKind::kTiming,
+                                          matched_waivers, today);
         }
         return CommandResult::Ok(payload);
       });

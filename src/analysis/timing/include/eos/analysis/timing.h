@@ -244,6 +244,10 @@ struct CellTypeRow {
 // per-group endpoint slacks for setup and hold, the cell census,
 // and the scalar metrics plus the three electrical checks, so the
 // report is one service call per scene and needs no second run.
+// The violator lists (waiver-model unit) mirror SceneResult's:
+// every violating pin per check, worst slack first, so report_qor
+// can count waived DRC violations per pin instead of only
+// reporting the check totals.
 struct QorResult {
   db::Scenario scenario;
   TimingMetricMap metrics;
@@ -255,6 +259,9 @@ struct QorResult {
   ElectricalCheck max_transition_check;
   ElectricalCheck max_capacitance_check;
   ElectricalCheck max_fanout_check;
+  std::vector<ElectricalViolation> max_transition_violators;
+  std::vector<ElectricalViolation> max_capacitance_violators;
+  std::vector<ElectricalViolation> max_fanout_violators;
 };
 
 class TimingService {

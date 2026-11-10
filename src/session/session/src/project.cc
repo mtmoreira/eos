@@ -270,16 +270,136 @@ Result<std::vector<ReportBinding>> BindingsFromText(
 }
 
 // ------------------------------------------------------------------
+// The waiver text, format version 1: the same line-oriented text
+// shape as the bindings text, with the same percent-escaping and
+// a trailing FNV-1a 64 checksum line covering every preceding
+// byte. One "waiver" line per waiver, in creation order. Parsing
+// is strict: bad magic, unsupported version, checksum mismatch,
+// truncation, or a malformed record are all errors. The record
+// itself is validated by WaiverSet::FromState (unique ids and
+// names, known kinds and classes, valid expiry dates, next_id
+// ahead of every id), so the text layer only parses syntax.
+// ------------------------------------------------------------------
+
+std::string WaiversToText(const db::WaiverState& state) {
+  std::string out = "EOSWAIVERS 1\n";
+  for (const db::Waiver& waiver : state.waivers) {
+    out += "waiver " + std::to_string(waiver.id) + " " +
+           db::WaiverKindWord(waiver.kind) + " " + Escape(waiver.name) +
+           " " + Escape(waiver.klass) + " " + Escape(waiver.target) + " " +
+           Escape(waiver.scene) + " " + Escape(waiver.reason) + " " +
+           Escape(waiver.approved_by) + " " + Escape(waiver.expires) +
+           " " + std::to_string(waiver.created_revision) + "\n";
+  }
+  return out + "end " + Hex64(Fnv1a(out.data(), out.size())) + "\n";
+}
+
+Result<db::WaiverState> WaiversFromText(const std::string& text) {
+  // The checksum line is the last line; it covers every byte before
+  // it, exactly as the bindings text does.
+  if (text.empty() || text.back() != '\n') {
+    return BadFormat("waivers text is truncated");
+  }
+  const std::size_t end_pos = text.rfind("\nend ");
+  if (end_pos == std::string::npos) {
+    return BadFormat("waivers text has no checksum line");
+  }
+  const std::string body = text.substr(0, end_pos + 1);
+  const std::string tail =
+      text.substr(end_pos + 1, text.size() - end_pos - 2);
+  const std::vector<std::string> tail_tokens = SplitTokens(tail);
+  if (tail_tokens.size() != 2 || tail_tokens[0] != "end" ||
+      tail_tokens[1].size() != 16) {
+    return BadFormat("malformed waivers checksum line");
+  }
+  std::uint64_t stored = 0;
+  for (const char c : tail_tokens[1]) {
+    const int digit = HexDigit(c);
+    if (digit < 0) {
+      return BadFormat("malformed waivers checksum line");
+    }
+    stored = stored * 16 + static_cast<std::uint64_t>(digit);
+  }
+  if (Fnv1a(body.data(), body.size()) != stored) {
+    return BadFormat("waivers checksum mismatch: text is corrupt");
+  }
+
+  db::WaiverState state;
+  std::istringstream lines(body);
+  std::string line;
+  if (!std::getline(lines, line) || line != "EOSWAIVERS 1") {
+    if (line.rfind("EOSWAIVERS ", 0) == 0) {
+      return Status::Error(ErrorCode::kUnsupported,
+                           "unsupported waivers format version");
+    }
+    return BadFormat("not a waivers text");
+  }
+  while (std::getline(lines, line)) {
+    const std::vector<std::string> t = SplitTokens(line);
+    if (t.empty()) {
+      return BadFormat("empty line in waivers text");
+    }
+    if (t[0] != "waiver" || t.size() != 11) {
+      return BadFormat("malformed waiver line in waivers text");
+    }
+    db::Waiver waiver;
+    std::uint64_t created_revision = 0;
+    if (!ParseNum(t[1], waiver.id) ||
+        !ParseNum(t[10], created_revision)) {
+      return BadFormat("malformed waiver line in waivers text");
+    }
+    const std::optional<db::WaiverKind> kind =
+        db::ParseWaiverKind(t[2]);
+    if (!kind.has_value()) {
+      return BadFormat("unknown waiver kind in waivers text: " + t[2]);
+    }
+    waiver.kind = *kind;
+    const Result<std::string> name = Unescape(t[3]);
+    const Result<std::string> klass = Unescape(t[4]);
+    const Result<std::string> target = Unescape(t[5]);
+    const Result<std::string> scene = Unescape(t[6]);
+    const Result<std::string> reason = Unescape(t[7]);
+    const Result<std::string> approved_by = Unescape(t[8]);
+    const Result<std::string> expires = Unescape(t[9]);
+    if (!name.ok() || !klass.ok() || !target.ok() || !scene.ok() ||
+        !reason.ok() || !approved_by.ok() || !expires.ok()) {
+      return BadFormat("bad string in waivers text");
+    }
+    waiver.name = name.value();
+    waiver.klass = klass.value();
+    waiver.target = target.value();
+    waiver.scene = scene.value();
+    waiver.reason = reason.value();
+    waiver.approved_by = approved_by.value();
+    waiver.expires = expires.value();
+    waiver.created_revision = created_revision;
+    state.waivers.push_back(std::move(waiver));
+  }
+  // next_id is the head of the written set: one past the largest
+  // id, or 1 when the set is empty.
+  db::WaiverId max_id = 0;
+  for (const db::Waiver& waiver : state.waivers) {
+    if (waiver.id > max_id) max_id = waiver.id;
+  }
+  state.next_id = max_id + 1;
+  return state;
+}
+
+// ------------------------------------------------------------------
 // The project file envelope: a magic line, then length-prefixed
-// sections in order (checkpoint, ledger, reports). The reports
-// section is absent in project files written before bindings became
-// project state; those load with an empty binding set.
+// sections in order (checkpoint, ledger, reports, waivers). The
+// reports section is absent in project files written before
+// bindings became project state; those load with an empty binding
+// set. The waivers section is absent in project files written
+// before waivers became project state; those load with an empty
+// waiver set.
 // ------------------------------------------------------------------
 
 struct ProjectSections {
   std::string checkpoint_text;
   std::string ledger_text;
   std::optional<std::string> reports_text;
+  std::optional<std::string> waivers_text;
 };
 
 std::string BuildProjectText(const ProjectSections& sections) {
@@ -293,6 +413,11 @@ std::string BuildProjectText(const ProjectSections& sections) {
     out += "reports " + std::to_string(sections.reports_text->size()) +
            "\n";
     out += *sections.reports_text;
+  }
+  if (sections.waivers_text.has_value()) {
+    out += "waivers " + std::to_string(sections.waivers_text->size()) +
+           "\n";
+    out += *sections.waivers_text;
   }
   return out;
 }
@@ -360,15 +485,40 @@ Result<ProjectSections> SplitProjectText(const std::string& content) {
     return ledger_text.status();
   }
   sections.ledger_text = ledger_text.value();
-  if (pos != content.size()) {
-    // Anything after the ledger section must be the reports section,
-    // and it must run exactly to the end of the file.
-    const Result<std::string> reports_text = section("reports");
-    if (!reports_text.ok()) {
-      return reports_text.status();
+  // Anything after the ledger section must be the reports section
+  // and then the waivers section, each at most once, running
+  // exactly to the end of the file. Either may be absent (the
+  // pre-bindings and pre-waiver carve-outs); anything else is
+  // trailing content and the file is rejected.
+  bool seen_reports = false;
+  bool seen_waivers = false;
+  while (pos != content.size()) {
+    const std::size_t nl = content.find('\n', pos);
+    if (nl == std::string::npos) {
+      return BadFormat("project file is truncated");
     }
-    sections.reports_text = reports_text.value();
-    if (pos != content.size()) {
+    const std::string header = content.substr(pos, nl - pos);
+    if (header.rfind("reports ", 0) == 0) {
+      if (seen_reports) {
+        return BadFormat("duplicate reports section in project file");
+      }
+      seen_reports = true;
+      const Result<std::string> reports_text = section("reports");
+      if (!reports_text.ok()) {
+        return reports_text.status();
+      }
+      sections.reports_text = reports_text.value();
+    } else if (header.rfind("waivers ", 0) == 0) {
+      if (seen_waivers) {
+        return BadFormat("duplicate waivers section in project file");
+      }
+      seen_waivers = true;
+      const Result<std::string> waivers_text = section("waivers");
+      if (!waivers_text.ok()) {
+        return waivers_text.status();
+      }
+      sections.waivers_text = waivers_text.value();
+    } else {
       return BadFormat("trailing content after the project file sections");
     }
   }
@@ -381,6 +531,7 @@ void Project::Reset() {
   design.reset();
   scenarios = db::ScenarioSet();
   constraints = db::ConstraintSet();
+  waivers = db::WaiverSet();
   ledger = Ledger();
   report_bindings.clear();
 }
@@ -406,6 +557,7 @@ Status Project::SaveProject(const std::string& path) const {
   sections.checkpoint_text = checkpoint_text.value();
   sections.ledger_text = ledger_text.value();
   sections.reports_text = BindingsToText(report_bindings);
+  sections.waivers_text = WaiversToText(waivers.ExportState());
   const std::string content = BuildProjectText(sections);
   const std::string tmp_path = path + ".tmp";
   {
@@ -463,6 +615,15 @@ Result<ProjectRestoreInfo> Project::LoadProject(const std::string& path) {
     }
     parsed_bindings = parsed.value();
   }
+  db::WaiverState parsed_waivers;
+  if (sections.value().waivers_text.has_value()) {
+    const Result<db::WaiverState> parsed =
+        WaiversFromText(*sections.value().waivers_text);
+    if (!parsed.ok()) {
+      return parsed.status();
+    }
+    parsed_waivers = parsed.value();
+  }
   Result<db::Design> new_design = db::Design::FromState(data.value().design);
   if (!new_design.ok()) {
     return new_design.status();
@@ -476,6 +637,11 @@ Result<ProjectRestoreInfo> Project::LoadProject(const std::string& path) {
       db::ConstraintSet::FromState(data.value().constraints);
   if (!new_constraints.ok()) {
     return new_constraints.status();
+  }
+  Result<db::WaiverSet> new_waivers =
+      db::WaiverSet::FromState(parsed_waivers);
+  if (!new_waivers.ok()) {
+    return new_waivers.status();
   }
   Ledger new_ledger;
   const Status restored = new_ledger.Restore(snapshot.value());
@@ -494,10 +660,12 @@ Result<ProjectRestoreInfo> Project::LoadProject(const std::string& path) {
   }
   info.bindings_restored = new_bindings.size();
   info.bindings_dropped = parsed_bindings.size() - new_bindings.size();
+  info.waivers_restored = new_waivers.value().all().size();
   // Everything validated: adopt in one step.
   design = std::move(new_design).value();
   scenarios = std::move(new_scenarios).value();
   constraints = std::move(new_constraints).value();
+  waivers = std::move(new_waivers).value();
   ledger = std::move(new_ledger);
   report_bindings = std::move(new_bindings);
   return info;

@@ -384,6 +384,29 @@ Result<QorResult> QorScene(const VerilogDesign& design,
                           out.max_fanout_check,
                           &StaEngine::MaxFanoutCheck);
   if (!status.ok()) return status;
+  // The electrical violators (waiver-model unit): every violating
+  // pin per check, worst slack first, exactly as AnalyzeScene
+  // fills SceneResult's, so report_qor can count waived DRC
+  // violations per pin.
+  const auto add_violators =
+      [&engine, &scene](
+          std::vector<ElectricalViolation>& violators_out,
+          Result<std::vector<ElectricalViolation>> (StaEngine::*query)())
+      -> Status {
+    Result<std::vector<ElectricalViolation>> value = (engine.*query)();
+    if (!value.ok()) return SceneError(scene, value.status());
+    violators_out = value.value();
+    return Status::Ok();
+  };
+  status = add_violators(out.max_transition_violators,
+                         &StaEngine::MaxTransitionViolators);
+  if (!status.ok()) return status;
+  status = add_violators(out.max_capacitance_violators,
+                         &StaEngine::MaxCapacitanceViolators);
+  if (!status.ok()) return status;
+  status = add_violators(out.max_fanout_violators,
+                         &StaEngine::MaxFanoutViolators);
+  if (!status.ok()) return status;
   const auto add_groups =
       [&out, &engine, &scene](
           std::vector<PathGroupResult>& groups_out, CheckKind kind)

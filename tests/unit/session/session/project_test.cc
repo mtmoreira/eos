@@ -332,6 +332,140 @@ TEST(Project, ProjectFileWithoutAReportsSectionLoadsWithNoBindings) {
   Remove(path);
 }
 
+TEST(Project, WaiversRoundTripWithTheProject) {
+  Fixture f;
+  const std::vector<std::string> scenes = {"func_tt", "func_ss"};
+  const std::uint64_t revision = f.project.ledger.current_revision();
+  const auto added = f.project.waivers.Add(
+      db::WaiverKind::kTiming, "slow-r2", "max_delay", "r2/D", "func_tt",
+      "known slow path", "mtmoreira", "2027-01-31", revision, scenes);
+  ASSERT_TRUE(added.ok()) << added.status().message();
+  const auto added2 = f.project.waivers.Add(
+      db::WaiverKind::kCoverage, "uncov-r1", "setup", "r1/D", "",
+      "untested by design", "mtmoreira", "", revision, scenes);
+  ASSERT_TRUE(added2.ok()) << added2.status().message();
+
+  const std::string path = TempPath("waivers");
+  Remove(path);
+  ASSERT_TRUE(f.project.SaveProject(path).ok());
+
+  Project restored;
+  const Result<ProjectRestoreInfo> info = restored.LoadProject(path);
+  ASSERT_TRUE(info.ok());
+  EXPECT_EQ(info.value().waivers_restored, 2u);
+  ASSERT_EQ(restored.waivers.all().size(), 2u);
+  const db::Waiver* first = restored.waivers.Find("slow-r2");
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(first->id, added.value());
+  EXPECT_EQ(first->kind, db::WaiverKind::kTiming);
+  EXPECT_EQ(first->klass, "max_delay");
+  EXPECT_EQ(first->target, "r2/D");
+  EXPECT_EQ(first->scene, "func_tt");
+  EXPECT_EQ(first->reason, "known slow path");
+  EXPECT_EQ(first->approved_by, "mtmoreira");
+  EXPECT_EQ(first->expires, "2027-01-31");
+  EXPECT_EQ(first->created_revision, revision);
+  const db::Waiver* second = restored.waivers.Find("uncov-r1");
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(second->kind, db::WaiverKind::kCoverage);
+  EXPECT_EQ(second->scene, "");
+  EXPECT_EQ(second->expires, "");
+  // Ids are never reused across the round trip.
+  const auto third = restored.waivers.Add(
+      db::WaiverKind::kTiming, "third", "min_delay", "r2/D", "", "accepted",
+      "mtmoreira", "", revision, scenes);
+  ASSERT_TRUE(third.ok());
+  EXPECT_EQ(third.value(), 3u);
+  Remove(path);
+}
+
+TEST(Project, ProjectFileWithoutAWaiversSectionLoadsWithNoWaivers) {
+  Fixture f;
+  const std::vector<std::string> scenes = {"func_tt", "func_ss"};
+  ASSERT_TRUE(f.project.waivers
+                  .Add(db::WaiverKind::kTiming, "slow-r2", "max_delay",
+                       "r2/D", "func_tt", "known slow path", "mtmoreira",
+                       "", f.project.ledger.current_revision(), scenes)
+                  .ok());
+  const std::string path = TempPath("legacy_waivers");
+  Remove(path);
+  ASSERT_TRUE(f.project.SaveProject(path).ok());
+  // Strip the waivers section, leaving a pre-waiver file form:
+  // checkpoint, ledger, and reports sections only.
+  std::string content = ReadAll(path);
+  const std::size_t at = content.find("\nwaivers ");
+  ASSERT_NE(at, std::string::npos);
+  content.resize(at + 1);
+  WriteAll(path, content);
+
+  Project restored;
+  const Result<ProjectRestoreInfo> info = restored.LoadProject(path);
+  ASSERT_TRUE(info.ok());
+  EXPECT_EQ(info.value().waivers_restored, 0u);
+  EXPECT_TRUE(restored.waivers.all().empty());
+  EXPECT_TRUE(restored.HasDesign());
+  Remove(path);
+}
+
+TEST(Project, CorruptWaiversSectionIsRejectedAndLiveStateUntouched) {
+  Fixture f;
+  const std::vector<std::string> scenes = {"func_tt", "func_ss"};
+  ASSERT_TRUE(f.project.waivers
+                  .Add(db::WaiverKind::kTiming, "slow-r2", "max_delay",
+                       "r2/D", "func_tt", "known slow path", "mtmoreira",
+                       "", f.project.ledger.current_revision(), scenes)
+                  .ok());
+  const std::string path = TempPath("corrupt_waivers");
+  Remove(path);
+  ASSERT_TRUE(f.project.SaveProject(path).ok());
+  std::string content = ReadAll(path);
+  const std::size_t at = content.find("EOSWAIVERS");
+  ASSERT_NE(at, std::string::npos);
+  content[at + 20] = content[at + 20] == 'a' ? 'b' : 'a';
+  WriteAll(path, content);
+
+  Project target;
+  target.design.emplace("live");
+  ASSERT_TRUE(target.waivers
+                  .Add(db::WaiverKind::kCheck, "keep", "no_input_delay",
+                       "b", "", "accepted", "mtmoreira", "",
+                       target.ledger.current_revision(), scenes)
+                  .ok());
+
+  EXPECT_FALSE(target.LoadProject(path).ok());
+  ASSERT_TRUE(target.HasDesign());
+  EXPECT_EQ(target.design->name(), "live");
+  ASSERT_EQ(target.waivers.all().size(), 1u);
+  EXPECT_NE(target.waivers.Find("keep"), nullptr);
+  Remove(path);
+}
+
+TEST(Project, WaiverSurvivesRestoreToDesignWithoutItsTarget) {
+  Fixture f;
+  // The fixture design has no r2/D: the waiver names a target
+  // the restored design does not hold, and it still survives
+  // the round trip. It reports unmatched at the registry level;
+  // the envelope never drops it.
+  const std::vector<std::string> scenes = {"func_tt", "func_ss"};
+  ASSERT_TRUE(f.project.waivers
+                  .Add(db::WaiverKind::kTiming, "slow-r2", "max_delay",
+                       "r2/D", "func_tt", "known slow path", "mtmoreira",
+                       "", f.project.ledger.current_revision(), scenes)
+                  .ok());
+  const std::string path = TempPath("waiver_ghost");
+  Remove(path);
+  ASSERT_TRUE(f.project.SaveProject(path).ok());
+
+  Project restored;
+  const Result<ProjectRestoreInfo> info = restored.LoadProject(path);
+  ASSERT_TRUE(info.ok());
+  EXPECT_EQ(info.value().waivers_restored, 1u);
+  const db::Waiver* waiver = restored.waivers.Find("slow-r2");
+  ASSERT_NE(waiver, nullptr);
+  EXPECT_EQ(waiver->target, "r2/D");
+  Remove(path);
+}
+
 TEST(Project, CorruptBindingsSectionIsRejectedAndLiveStateUntouched) {
   Fixture f;
   f.project.report_bindings.push_back(

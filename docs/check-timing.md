@@ -86,6 +86,18 @@ slack: the verdict is the gate, and a script that must stop on
 a failed gate tests `verdict=`. Findings never make the command
 fail, so the per-check payload stays available to scripts.
 
+Waivers (waiver-model unit, see `docs/waiver-model.md`): a
+finding a check waiver covers is still listed, marked with
+its waiver name, and no longer fails the gate. Per-check
+`status=` stays raw (fail iff findings non-empty) and
+`findings=` stays the total count; each `check=` line gains
+`waived=<n>`, each `-verbose` finding gains
+`waived=<name or ->`, and the verdict line gains
+`waived=<n>`. The verdict is `pass` with the waived count
+named when every finding is waived, `fail` when any finding
+is unwaived. There is no fourth verdict: a script that
+accepts only `pass` sees `pass` with the waived count named.
+
 ## Output
 
 The payload is the summary form: `verdict=` first, then one
