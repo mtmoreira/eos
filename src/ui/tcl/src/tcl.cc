@@ -47,6 +47,38 @@ struct Binding {
   std::string name;
 };
 
+// Maps a Diag back to the L0 code Eval reports for it. The five new
+// codes plus kIoError, kUnsupported, and kInvalidConfiguration map
+// 1:1; kUnclosedDesign is a state failure. The codes with no L0
+// meaning (kInvalidCommand, kProofUnknown, kToolCrash,
+// kVerifiedPass, and kOk) fall back to kInvalidArgument.
+foundation::ErrorCode DiagToErrorCode(Diag diag) {
+  switch (diag) {
+    case Diag::kInvalidArgument: return foundation::ErrorCode::kInvalidArgument;
+    case Diag::kNotFound: return foundation::ErrorCode::kNotFound;
+    case Diag::kInvalidState: return foundation::ErrorCode::kInvalidState;
+    case Diag::kStaleRevision: return foundation::ErrorCode::kStaleRevision;
+    case Diag::kOutOfRange: return foundation::ErrorCode::kOutOfRange;
+    case Diag::kIoError: return foundation::ErrorCode::kIoError;
+    case Diag::kUnsupportedFeature: return foundation::ErrorCode::kUnsupported;
+    case Diag::kInvalidConfiguration:
+      return foundation::ErrorCode::kInvalidConfiguration;
+    case Diag::kUnclosedDesign: return foundation::ErrorCode::kInvalidState;
+    default: return foundation::ErrorCode::kInvalidArgument;
+  }
+}
+
+// Parses the "EOS <diag>: <message>" prefix CommandProc produces.
+// Returns the Diag when the result carries a known diag name, and
+// nullopt otherwise (a non-EOS Tcl error, or an unknown name).
+std::optional<Diag> DiagFromResult(const std::string& result) {
+  static const std::string kPrefix = "EOS ";
+  if (result.rfind(kPrefix, 0) != 0) return std::nullopt;
+  const std::size_t colon = result.find(": ", kPrefix.size());
+  if (colon == std::string::npos) return std::nullopt;
+  return DiagFromName(result.substr(kPrefix.size(), colon - kPrefix.size()));
+}
+
 int CommandProc(ClientData client_data, Tcl_Interp* interp, int objc,
                 Tcl_Obj* const objv[]) {
   const auto* binding = static_cast<const Binding*>(client_data);
@@ -182,7 +214,23 @@ std::size_t SyncHistoryFromFile() {
 struct TclShell::Impl {
   Tcl_Interp* interp = nullptr;
   const CommandRegistry* registry = nullptr;
+  CommandContext* context = nullptr;
   std::vector<std::unique_ptr<Binding>> bindings;
+  // Engine log lines the last failed Eval drained, in order.
+  std::vector<std::string> last_failed_engine_log_;
+
+  // Captures the engine log lines appended since mark: the lines
+  // the failed command drained into the context's log. The log is
+  // append-only within a command, so [mark, end) is exactly the
+  // failed command's lines.
+  void CaptureFailedEngineLog(std::size_t mark) {
+    last_failed_engine_log_.clear();
+    if (context == nullptr) return;
+    for (std::size_t i = mark; i < context->engine_log_lines.size(); ++i) {
+      last_failed_engine_log_.push_back(context->engine_log_lines[i]);
+    }
+  }
+
   ~Impl() {
     if (interp != nullptr) {
       Tcl_DeleteInterp(interp);
@@ -195,6 +243,7 @@ foundation::Result<std::unique_ptr<TclShell>> TclShell::Create(
   std::unique_ptr<TclShell> shell(new TclShell());
   shell->impl_ = std::make_unique<Impl>();
   shell->impl_->registry = &registry;
+  shell->impl_->context = &context;
   shell->impl_->interp = Tcl_CreateInterp();
   if (shell->impl_->interp == nullptr) {
     return foundation::Status::Error(foundation::ErrorCode::kIoError,
@@ -244,19 +293,36 @@ foundation::Result<std::unique_ptr<TclShell>> TclShell::Create(
 TclShell::~TclShell() = default;
 
 foundation::Result<std::string> TclShell::Eval(const std::string& script) {
+  const std::size_t mark = impl_->context == nullptr
+                               ? 0
+                               : impl_->context->engine_log_lines.size();
   if (Tcl_Eval(impl_->interp, script.c_str()) != TCL_OK) {
+    const std::string message = Tcl_GetStringResult(impl_->interp);
+    impl_->CaptureFailedEngineLog(mark);
+    const std::optional<Diag> diag = DiagFromResult(message);
     return foundation::Status::Error(
-        foundation::ErrorCode::kInvalidArgument,
-        Tcl_GetStringResult(impl_->interp));
+        DiagToErrorCode(diag.value_or(Diag::kInvalidArgument)), message);
   }
+  impl_->last_failed_engine_log_.clear();
   return std::string(Tcl_GetStringResult(impl_->interp));
+}
+
+const std::vector<std::string>& TclShell::LastFailedEngineLog() const {
+  return impl_->last_failed_engine_log_;
 }
 
 int TclShell::RunFiles(const std::vector<std::string>& files) {
   for (const std::string& file : files) {
+    const std::size_t mark = impl_->context == nullptr
+                                 ? 0
+                                 : impl_->context->engine_log_lines.size();
     if (Tcl_EvalFile(impl_->interp, file.c_str()) != TCL_OK) {
       std::fprintf(stderr, "%s: %s\n", file.c_str(),
                    Tcl_GetStringResult(impl_->interp));
+      impl_->CaptureFailedEngineLog(mark);
+      for (const std::string& line : impl_->last_failed_engine_log_) {
+        std::fprintf(stderr, "%s\n", line.c_str());
+      }
       return 1;
     }
     const char* result = Tcl_GetStringResult(impl_->interp);
@@ -286,6 +352,9 @@ int TclShell::RunInteractive() {
     const foundation::Result<std::string> result = Eval(*line);
     if (!result.ok()) {
       std::fprintf(stderr, "error: %s\n", result.status().message().c_str());
+      for (const std::string& log_line : LastFailedEngineLog()) {
+        std::fprintf(stderr, "%s\n", log_line.c_str());
+      }
     } else if (!result.value().empty()) {
       std::printf("%s\n", result.value().c_str());
     }
@@ -436,6 +505,11 @@ TclShell::~TclShell() = default;
 foundation::Result<std::string> TclShell::Eval(const std::string&) {
   return foundation::Status::Error(foundation::ErrorCode::kUnsupported,
                                    "this build has no Tcl");
+}
+
+const std::vector<std::string>& TclShell::LastFailedEngineLog() const {
+  static const std::vector<std::string> kEmpty;
+  return kEmpty;
 }
 
 int TclShell::RunFiles(const std::vector<std::string>&) { return 1; }

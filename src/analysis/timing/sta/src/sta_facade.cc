@@ -991,7 +991,7 @@ struct StaEngine::Impl {
           hold ? sta::MinMax::min() : sta::MinMax::max();
       sta::Vertex* target = FindEndpoint(endpoint_pin);
       if (target == nullptr) {
-        return Status::Error(ErrorCode::kInvalidArgument,
+        return Status::Error(ErrorCode::kNotFound,
                              "no endpoint pin named " + endpoint_pin);
       }
       const WorstEndVisitor visitor = VisitWorstEnd(target, min_max);
@@ -1022,7 +1022,7 @@ struct StaEngine::Impl {
           hold ? sta::MinMax::min() : sta::MinMax::max();
       sta::Vertex* target = FindEndpoint(endpoint_pin);
       if (target == nullptr) {
-        return Status::Error(ErrorCode::kInvalidArgument,
+        return Status::Error(ErrorCode::kNotFound,
                              "no endpoint pin named " + endpoint_pin);
       }
       const WorstEndVisitor visitor = VisitWorstEnd(target, min_max);
@@ -1054,13 +1054,15 @@ struct StaEngine::Impl {
   // Resolves one -from/-through name against the loaded network:
   // a pin by path name, a net (every pin on it), an instance
   // (every pin of it), or, for -from only, a clock by name.
-  // Returns false with error naming the value when it resolves
-  // to nothing. A name resolving to a clock under -through is
-  // not "no such object": it fails naming the clock, so the
-  // caller can say -through takes no clocks.
+  // On failure returns false with the error text and its code:
+  // kNotFound when the name resolves to nothing, kInvalidArgument
+  // when a clock is used as a -through object (a clock is not
+  // "no such object": it fails naming the clock, so the caller
+  // can say -through takes no clocks). The caller propagates the
+  // code with the error.
   bool ResolveFilterName(const std::string& name, bool allow_clock,
                          sta::PinSet* pins, sta::ClockSet* clocks,
-                         std::string& error) {
+                         std::string& error, ErrorCode& code) {
     const sta::Network* network = sta->network();
     sta::Pin* pin = network->findPin(name);
     if (pin != nullptr) {
@@ -1089,6 +1091,7 @@ struct StaEngine::Impl {
           error = "clock " + name +
                   " cannot be a -through object: -through takes "
                   "pins, nets, and instances";
+          code = ErrorCode::kInvalidArgument;
           return false;
         }
         clocks->insert(clock);
@@ -1096,6 +1099,7 @@ struct StaEngine::Impl {
       }
     }
     error = "no such object: " + name;
+    code = ErrorCode::kNotFound;
     return false;
   }
 
@@ -1133,7 +1137,7 @@ struct StaEngine::Impl {
           hold ? sta::MinMax::min() : sta::MinMax::max();
       sta::Vertex* target = FindEndpoint(endpoint_pin);
       if (target == nullptr) {
-        return Status::Error(ErrorCode::kInvalidArgument,
+        return Status::Error(ErrorCode::kNotFound,
                              "no endpoint pin named " + endpoint_pin);
       }
       const sta::Sdc* sdc = ModeSdc();
@@ -1149,22 +1153,23 @@ struct StaEngine::Impl {
       sta::ClockSet* from_clocks = new sta::ClockSet;
       sta::PinSet* thru_pins = new sta::PinSet(sta->network());
       std::string error;
+      ErrorCode code = ErrorCode::kInvalidArgument;
       for (const std::string& name : filter.from) {
         if (!ResolveFilterName(name, true, from_pins, from_clocks,
-                               error)) {
+                               error, code)) {
           delete from_pins;
           delete from_clocks;
           delete thru_pins;
-          return Status::Error(ErrorCode::kInvalidArgument, error);
+          return Status::Error(code, error);
         }
       }
       for (const std::string& name : filter.through) {
         if (!ResolveFilterName(name, false, thru_pins, nullptr,
-                               error)) {
+                               error, code)) {
           delete from_pins;
           delete from_clocks;
           delete thru_pins;
-          return Status::Error(ErrorCode::kInvalidArgument, error);
+          return Status::Error(code, error);
         }
       }
       sta::ExceptionFrom* from = sta->makeExceptionFrom(

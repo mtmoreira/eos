@@ -166,6 +166,36 @@ std::string TimingKey(const CommandContext& context) {
   return key;
 }
 
+// Records a failed refresh in the Messages tab. The model keeps its
+// last good state (the caller does not clear it): a failed refresh
+// never blanks a panel. A failed query logs "<command>: EOS <diag>:
+// <message>"; a malformed payload logs "<command>: refresh failed:
+// malformed payload". The guarded form is for refreshes whose stage
+// guard already passed: the model can exist, so the failure is
+// never the not-run-yet state and always logs.
+void NoteRefreshFailure(std::vector<std::string>& messages,
+                        const std::string& command,
+                        const CommandResult& result) {
+  if (!result.ok) {
+    messages.push_back(command + ": EOS " + DiagName(result.diag) +
+                       ": " + result.message);
+    return;
+  }
+  messages.push_back(command + ": refresh failed: malformed payload");
+}
+
+// The unguarded form, for refreshes with no stage gate (floorplan,
+// placement, signoff, mapped synthesis): a failed query on an
+// empty model is the not-run-yet state and stays silent, while a
+// failed query on a populated model and any malformed payload log.
+void NoteUnguardedRefreshFailure(std::vector<std::string>& messages,
+                                 const std::string& command,
+                                 const CommandResult& result,
+                                 bool model_empty) {
+  if (!result.ok && model_empty) return;
+  NoteRefreshFailure(messages, command, result);
+}
+
 }  // namespace
 
 std::string SessionView::EchoLine(const std::string& name,
@@ -246,10 +276,22 @@ CommandResult SessionView::Dispatch(const std::string& name,
     pending_navigation_ = NavigationForCommand(name);
     if (name == "checkpoint" || name == "restore") {
       if (args.size() == 1) checkpoint_ = args[0];
+      if (name == "restore") {
+        // restore resets the design: the ODB-backed models hold
+        // the old design, so clear them rather than keep a stale
+        // model the next refresh would fail to replace and log
+        // about on every cycle. The signoff model does not
+        // clear: it renders the recorded verdicts, which need
+        // no live design.
+        floorplan_.Clear();
+        placement_.Clear();
+      }
     } else if (name == "close_design") {
       checkpoint_.clear();
       center_floorplan_ = false;
       center_placement_ = false;
+      floorplan_.Clear();
+      placement_.Clear();
     } else if (name == "floorplan") {
       // A successful floorplan takes the user to the
       // floorplan canvas: the center shows it on the next
@@ -325,7 +367,7 @@ void SessionView::RefreshHierarchy() {
   const CommandResult result =
       registry_.Dispatch(context_, "synth_hierarchy", {});
   if (!result.ok || !hierarchy_.LoadPayload(result.payload)) {
-    hierarchy_.Clear();
+    NoteRefreshFailure(messages_, "synth_hierarchy", result);
   }
 }
 
@@ -347,7 +389,7 @@ void SessionView::RefreshDiagram() {
   const CommandResult result =
       registry_.Dispatch(context_, "synth_blocks", {node->module});
   if (!result.ok || !diagram_.LoadPayload(result.payload)) {
-    diagram_.Clear();
+    NoteRefreshFailure(messages_, "synth_blocks", result);
   }
 }
 
@@ -369,7 +411,7 @@ void SessionView::RefreshSchematic() {
   const CommandResult result =
       registry_.Dispatch(context_, "synth_schematic", {node->module});
   if (!result.ok || !schematic_.LoadPayload(result.payload)) {
-    schematic_.Clear();
+    NoteRefreshFailure(messages_, "synth_schematic", result);
   }
 }
 
@@ -398,17 +440,19 @@ void SessionView::RefreshPanels() {
   const CommandResult result =
       registry_.Dispatch(context_, "synth_stats", {});
   if (!result.ok || !panels_.live_stats.LoadPayload(result.payload)) {
-    panels_.live_stats.Clear();
+    NoteRefreshFailure(messages_, "synth_stats", result);
   }
   // The mapped synthesis record (full-flow GUI unit F1): the
   // query fails fast until synth_map ran, which is the normal
-  // "not run yet" state, so a failed query or a malformed
-  // payload clears the model exactly like live_stats.
+  // "not run yet" state, so a failed query on an empty model
+  // stays silent; a failure on a populated model, or a
+  // malformed payload, is logged like live_stats.
   const CommandResult summary =
       registry_.Dispatch(context_, "synth_summary", {});
   if (!summary.ok ||
       !panels_.mapped_synth.LoadPayload(summary.payload)) {
-    panels_.mapped_synth.Clear();
+    NoteUnguardedRefreshFailure(messages_, "synth_summary", summary,
+                                panels_.mapped_synth.Empty());
   }
 }
 
@@ -425,7 +469,7 @@ void SessionView::RefreshIssues() {
   const CommandResult result =
       registry_.Dispatch(context_, "synth_issues", {});
   if (!result.ok || !issues_.LoadPayload(result.payload)) {
-    issues_.Clear();
+    NoteRefreshFailure(messages_, "synth_issues", result);
   }
   issues_key_ = key;
 }
@@ -441,7 +485,7 @@ void SessionView::RefreshTiming() {
   const CommandResult result =
       registry_.Dispatch(context_, "timing_summary", {});
   if (!result.ok || !timing_.LoadPayload(result.payload)) {
-    timing_.Clear();
+    NoteRefreshFailure(messages_, "timing_summary", result);
   }
   timing_key_ = key;
 }
@@ -450,7 +494,8 @@ void SessionView::RefreshFloorplan() {
   const CommandResult result =
       registry_.Dispatch(context_, "floorplan_summary", {});
   if (!result.ok || !floorplan_.LoadPayload(result.payload)) {
-    floorplan_.Clear();
+    NoteUnguardedRefreshFailure(messages_, "floorplan_summary", result,
+                                floorplan_.Empty());
   }
 }
 
@@ -458,7 +503,8 @@ void SessionView::RefreshPlacement() {
   const CommandResult result =
       registry_.Dispatch(context_, "place_summary", {});
   if (!result.ok || !placement_.LoadPayload(result.payload)) {
-    placement_.Clear();
+    NoteUnguardedRefreshFailure(messages_, "place_summary", result,
+                                placement_.Empty());
   }
 }
 
@@ -466,7 +512,8 @@ void SessionView::RefreshSignoff() {
   const CommandResult result =
       registry_.Dispatch(context_, "signoff_summary", {});
   if (!result.ok || !signoff_.LoadPayload(result.payload)) {
-    signoff_.Clear();
+    NoteUnguardedRefreshFailure(messages_, "signoff_summary", result,
+                                signoff_.Empty());
   }
 }
 

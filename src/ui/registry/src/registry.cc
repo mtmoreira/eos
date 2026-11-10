@@ -17,8 +17,31 @@ const char* DiagName(Diag diag) {
     case Diag::kVerifiedPass: return "verified_pass";
     case Diag::kToolCrash: return "tool_crash";
     case Diag::kIoError: return "io_error";
+    case Diag::kInvalidArgument: return "invalid_argument";
+    case Diag::kNotFound: return "not_found";
+    case Diag::kInvalidState: return "invalid_state";
+    case Diag::kStaleRevision: return "stale_revision";
+    case Diag::kOutOfRange: return "out_of_range";
   }
   return "unknown";
+}
+
+std::optional<Diag> DiagFromName(const std::string& name) {
+  if (name == "ok") return Diag::kOk;
+  if (name == "invalid_command") return Diag::kInvalidCommand;
+  if (name == "invalid_configuration") return Diag::kInvalidConfiguration;
+  if (name == "unsupported_feature") return Diag::kUnsupportedFeature;
+  if (name == "unclosed_design") return Diag::kUnclosedDesign;
+  if (name == "proof_unknown") return Diag::kProofUnknown;
+  if (name == "verified_pass") return Diag::kVerifiedPass;
+  if (name == "tool_crash") return Diag::kToolCrash;
+  if (name == "io_error") return Diag::kIoError;
+  if (name == "invalid_argument") return Diag::kInvalidArgument;
+  if (name == "not_found") return Diag::kNotFound;
+  if (name == "invalid_state") return Diag::kInvalidState;
+  if (name == "stale_revision") return Diag::kStaleRevision;
+  if (name == "out_of_range") return Diag::kOutOfRange;
+  return std::nullopt;
 }
 
 CommandResult CommandResult::Ok(std::string payload) {

@@ -112,8 +112,9 @@ class SessionView {
   // Re-reads the hierarchy from the live session: dispatches
   // synth_hierarchy WITHOUT an echo line (a model refresh is not
   // a user action) and rebuilds the model when elaborated;
-  // clears it otherwise, or when the query or its payload
-  // fails, so a stale tree never lingers.
+  // clears it otherwise. A failed query or a malformed payload
+  // keeps the last good model and logs the error to Messages,
+  // so a failed refresh never blanks the panel.
   void RefreshHierarchy();
 
   // Selection the block diagram (U3) consumes. Only a path in
@@ -146,8 +147,9 @@ class SessionView {
   // Re-reads the block diagram from the live session: dispatches
   // synth_blocks WITHOUT an echo line (a model refresh is not a
   // user action) for the level node's module, and rebuilds the
-  // model; clears it when not elaborated, when the level is
-  // absent, or when the query or its payload fails. A level
+  // model; clears it when not elaborated or when the level is
+  // absent. A failed query or a malformed payload keeps the last
+  // good model and logs the error to Messages. A level
   // that is empty or no longer in the tree falls back to the
   // root, so the diagram never shows a stale level.
   void RefreshDiagram();
@@ -171,12 +173,13 @@ class SessionView {
   // dispatches synth_schematic WITHOUT an echo line (a model
   // refresh is not a user action) for the level node's module,
   // but only when the level is a leaf; clears the model when
-  // not elaborated, when the level is absent, when the level
-  // is not a leaf, or when the query or its payload fails, so
-  // a stale schematic never lingers beside a block diagram. A
-  // level that is empty or no longer in the tree falls back to
-  // the root, exactly as RefreshDiagram does, so a flat design
-  // whose root is a leaf shows its schematic.
+  // not elaborated, when the level is absent, or when the level
+  // is not a leaf. A failed query or a malformed payload keeps
+  // the last good model and logs the error to Messages, so a
+  // failed refresh never blanks the panel. A level that is empty
+  // or no longer in the tree falls back to the root, exactly as
+  // RefreshDiagram does, so a flat design whose root is a leaf
+  // shows its schematic.
   void RefreshSchematic();
 
   // Right panels model, refreshed from the live session (see
@@ -185,23 +188,29 @@ class SessionView {
   // Elaborate step, the generic record from the Generic synth
   // step, the live cell-type breakdown from a synth_stats
   // query, and the mapped synthesis record from a synth_summary
-  // query. The snapshot clears when no design is parsed, and
-  // the live stats and mapped record clear when not elaborated
-  // or mapped, or when the query or its payload fails, so stale
-  // panels never linger.
+  // query. The snapshot clears when no design is parsed. A
+  // failed live-stats query or a malformed payload keeps the
+  // last good record and logs the error to Messages; a failed
+  // mapped-synthesis query on an empty record stays silent
+  // (synth_map has not run yet), and otherwise keeps the
+  // record and logs the same way.
   const PanelsModel& Panels() const { return panels_; }
 
   // Re-reads the right panels from the live session: copies
   // the session record and dispatches synth_stats and
   // synth_summary WITHOUT an echo line (a model refresh is not
-  // a user action). Messages are dispatch history, not a
-  // refresh, so they survive.
+  // a user action). A failed query keeps the last good record
+  // and logs the error to Messages, except a failed
+  // synth_summary on an empty record, which stays silent.
   void RefreshPanels();
 
-  // Dispatch message log: one line per rejected dispatch, in
-  // dispatch order, as "eos::<command> ...: EOS <diag>:
-  // <message>". Successful dispatches record nothing: messages
-  // are diagnostics, and the echo log is the transcript.
+  // Dispatch and refresh message log: one line per rejected
+  // dispatch and per failed refresh, in order, as
+  // "eos::<command> ...: EOS <diag>: <message>" (a malformed
+  // refresh payload reads "<command>: refresh failed:
+  // malformed payload"). Successful dispatches record nothing:
+  // messages are diagnostics, and the echo log is the
+  // transcript.
   const std::vector<std::string>& Messages() const { return messages_; }
 
   // Elaboration issues model, refreshed from the live session
@@ -215,12 +224,15 @@ class SessionView {
   // Re-reads the elaboration issues from the live session:
   // dispatches synth_issues WITHOUT an echo line (a model
   // refresh is not a user action) and rebuilds the model when
-  // elaborated; clears it otherwise, or when the query or its
-  // payload fails, so stale issues never linger. The check
-  // pass runs only when the design changed (a new top, or a
-  // new generic state, or a design-changing dispatch since
-  // the last refresh), so a plain refresh never pays for a
-  // check it already ran.
+  // elaborated; clears it otherwise. A failed query or a
+  // malformed payload keeps the last good model and logs the
+  // error to Messages. The check pass runs only when the design
+  // changed (a new top, or a new generic state, or a
+  // design-changing dispatch since the last refresh), so a plain
+  // refresh never pays for a check it already ran; a failed
+  // refresh is tried once per design state (the key is kept on
+  // failure), so the message does not repeat on every refresh
+  // cycle.
   void RefreshIssues();
 
   // Timing model, refreshed from the live session (see
@@ -233,13 +245,16 @@ class SessionView {
   // Re-reads the timing model from the live session:
   // dispatches timing_summary WITHOUT an echo line (a model
   // refresh is not a user action) and rebuilds the model when
-  // a timing run exists; clears it otherwise, or when the
-  // query or its payload fails, so stale timing never lingers.
-  // The query runs fresh STA sessions for the paths, coverage,
-  // and QoR rows, so it runs only when the timing inputs
-  // changed since the last refresh (a new run, a new SDC, a
-  // new scenario, or a new synthesis record), exactly like the
-  // issues check-pass guard.
+  // a timing run exists; clears it otherwise. A failed query
+  // or a malformed payload keeps the last good model and logs
+  // the error to Messages. The query runs fresh STA sessions for
+  // the paths, coverage, and QoR rows, so it runs only when the
+  // timing inputs changed since the last refresh (a new run, a
+  // new SDC, a new scenario, or a new synthesis record),
+  // exactly like the issues check-pass guard; a failed refresh
+  // is tried once per timing state (the key is kept on
+  // failure), so the message does not repeat on every refresh
+  // cycle.
   void RefreshTiming();
 
   // Floorplan model, refreshed from the live session (see
@@ -252,13 +267,16 @@ class SessionView {
   // Re-reads the floorplan model from the live session:
   // dispatches floorplan_summary WITHOUT an echo line (a model
   // refresh is not a user action) and rebuilds the model when
-  // the database holds a floorplan; clears it otherwise, or
-  // when the query or its payload fails, so a stale floorplan
-  // never lingers. The query fails fast with no technology, no
-  // mapped design, or no floorplan, so the refresh needs no
-  // gate of its own; and the query itself is a cheap database
-  // walk (rows, track grids, block terminals), so it runs on
-  // every refresh, like the hierarchy refresh.
+  // the database holds a floorplan. A failed query or a
+  // malformed payload keeps the last good model and logs the
+  // error to Messages, except a failed query on an empty model,
+  // which is the not-run-yet state and stays silent. The query
+  // fails fast with no technology, no mapped design, or no
+  // floorplan, so the refresh needs no gate of its own; and the
+  // query itself is a cheap database walk (rows, track grids,
+  // block terminals), so it runs on every refresh, like the
+  // hierarchy refresh, and a persistent failure logs once per
+  // refresh cycle by design.
   void RefreshFloorplan();
 
   // Placement model, refreshed from the live session (see
@@ -271,13 +289,16 @@ class SessionView {
   // Re-reads the placement model from the live session:
   // dispatches place_summary WITHOUT an echo line (a model
   // refresh is not a user action) and rebuilds the model when
-  // a place run has succeeded; clears it otherwise, or when
-  // the query or its payload fails, so a stale placement
-  // never lingers. The query fails fast with no technology, no
-  // mapped design, or no placement, so the refresh needs no
-  // gate of its own; and the query itself is a cheap database
-  // walk plus the stored place record, so it runs on every
-  // refresh, like the floorplan refresh.
+  // a place run has succeeded. A failed query or a malformed
+  // payload keeps the last good model and logs the error to
+  // Messages, except a failed query on an empty model, which is
+  // the not-run-yet state and stays silent. The query fails
+  // fast with no technology, no mapped design, or no placement,
+  // so the refresh needs no gate of its own; and the query
+  // itself is a cheap database walk plus the stored place
+  // record, so it runs on every refresh, like the floorplan
+  // refresh, and a persistent failure logs once per refresh
+  // cycle by design.
   void RefreshPlacement();
 
   // Signoff model, refreshed from the live session (see
@@ -290,11 +311,14 @@ class SessionView {
   // Re-reads the signoff model from the live session:
   // dispatches signoff_summary WITHOUT an echo line (a model
   // refresh is not a user action) and rebuilds the model when
-  // the reports parse; clears it otherwise, or when the query
-  // fails, so stale verdicts never linger. The query parses
+  // the reports parse. A failed query or a malformed payload
+  // keeps the last good model and logs the error to Messages,
+  // except a failed query on an empty model, which is the
+  // not-run-yet state and stays silent. The query parses
   // two evidence documents and walks the live design for its
   // fingerprint, so it runs on every refresh, like the
-  // floorplan refresh.
+  // floorplan refresh, and a persistent failure logs once per
+  // refresh cycle by design.
   void RefreshSignoff();
 
   // Where a just-run command's results live, for the window to

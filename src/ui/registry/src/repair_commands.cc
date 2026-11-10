@@ -41,6 +41,7 @@
 // passes, and still returns Ok with post-repair metrics, mirroring
 // the upstream catch-and-continue scripts.
 #include "eos/ui/registry.h"
+#include "command_helpers.h"
 
 #include <tcl.h>
 
@@ -79,15 +80,8 @@ extern const char *tcl_inits[];
 namespace eos::ui {
 namespace {
 
-// ---- small helpers (registry-local; core_commands.cc has its own copies) ----
+// ---- small helpers (fail helpers live in command_helpers.h) ----
 
-CommandResult FailConfig(const std::string &message) {
-  return CommandResult::Fail(Diag::kInvalidConfiguration, message);
-}
-
-CommandResult FailIo(const std::string &message) {
-  return CommandResult::Fail(Diag::kIoError, message);
-}
 
 bool Readable(const std::string &path) {
   std::ifstream in(path);
@@ -297,13 +291,13 @@ std::optional<CommandResult> ParseRepairArgs(
   auto need_value = [&](std::size_t i, const std::string &key)
       -> std::optional<CommandResult> {
     if (i + 1 >= args.size())
-      return FailConfig("missing value for " + key + " (" + kUsage + ")");
+      return FailArgument("missing value for " + key + " (" + kUsage + ")");
     return std::nullopt;
   };
   auto need_double = [&](const std::string &text, const std::string &key,
                          double &out) -> std::optional<CommandResult> {
     if (!ParseDouble(text, out))
-      return FailConfig("bad numeric value for " + key + ": " + text);
+      return FailArgument("bad numeric value for " + key + ": " + text);
     return std::nullopt;
   };
   for (std::size_t i = 0; i < args.size(); ++i) {
@@ -355,7 +349,7 @@ std::optional<CommandResult> ParseRepairArgs(
     else if (a == "-clk_nets") o.clk_nets = true;
     else if (a == "-clk_inverters") o.clk_inverters = true;
     else if (a == "-allow_setup_violations") o.allow_setup_violations = true;
-    else return FailConfig("unknown option: " + a + " (" + kUsage + ")");
+    else return FailArgument("unknown option: " + a + " (" + kUsage + ")");
   }
   return std::nullopt;
 }
@@ -365,11 +359,11 @@ std::optional<CommandResult> ParseRepairArgs(
 // file is opened, so a bad call fails without side effects.
 std::optional<CommandResult> ValidateRepairOptions(const RepairOptions &o) {
   if (!o.def.has_value())
-    return FailConfig("missing required option -def");
+    return FailArgument("missing required option -def");
   if (o.liberties.empty())
-    return FailConfig("missing required option -liberty");
+    return FailArgument("missing required option -liberty");
   if (o.lefs.empty())
-    return FailConfig("missing required option -lef");
+    return FailArgument("missing required option -lef");
   if (!Readable(*o.def)) return FailIo("could not read file: " + *o.def);
   if (o.tlef.has_value() && !Readable(*o.tlef))
     return FailIo("could not read file: " + *o.tlef);
@@ -380,56 +374,56 @@ std::optional<CommandResult> ValidateRepairOptions(const RepairOptions &o) {
   if (o.sdc.has_value() && !Readable(*o.sdc))
     return FailIo("could not read file: " + *o.sdc);
   if (o.sdc.has_value() && (o.clock.has_value() || o.period_ns.has_value()))
-    return FailConfig("-sdc and -clock/-period together are ambiguous: "
+    return FailArgument("-sdc and -clock/-period together are ambiguous: "
                       "give the clock in one place only");
   if (o.clock.has_value() != o.period_ns.has_value())
-    return FailConfig("-clock and -period must be given together");
+    return FailArgument("-clock and -period must be given together");
   if (o.period_ns.has_value() && *o.period_ns <= 0)
-    return FailConfig("-period must be positive");
+    return FailArgument("-period must be positive");
   if (o.slack_margin_ns.has_value() && *o.slack_margin_ns < 0)
-    return FailConfig("-slack_margin must be non-negative");
+    return FailArgument("-slack_margin must be non-negative");
   if (o.max_buffer_percent.has_value() &&
       (*o.max_buffer_percent < 0 || *o.max_buffer_percent > 100))
-    return FailConfig("-max_buffer_percent must be between 0 and 100");
+    return FailArgument("-max_buffer_percent must be between 0 and 100");
   if (o.max_utilization.has_value() &&
       (*o.max_utilization < 0 || *o.max_utilization > 100))
-    return FailConfig("-max_utilization must be between 0 and 100");
+    return FailArgument("-max_utilization must be between 0 and 100");
   if (o.max_wire_length_m.has_value() && *o.max_wire_length_m < 0)
-    return FailConfig("-max_wire_length must be non-negative");
+    return FailArgument("-max_wire_length must be non-negative");
   if (o.max_slew_margin.has_value() && *o.max_slew_margin < 0)
-    return FailConfig("-max_slew_margin must be non-negative");
+    return FailArgument("-max_slew_margin must be non-negative");
   if (o.max_cap_margin.has_value() && *o.max_cap_margin < 0)
-    return FailConfig("-max_cap_margin must be non-negative");
+    return FailArgument("-max_cap_margin must be non-negative");
   if (o.separation_m.has_value() && *o.separation_m < 0)
-    return FailConfig("-separation must be non-negative");
+    return FailArgument("-separation must be non-negative");
   const bool any_pass = o.design || o.setup || o.hold || o.tie ||
                         o.clk_nets || o.clk_inverters;
   if (o.max_wire_length_m.has_value() && !o.design && !o.clk_nets)
-    return FailConfig("-max_wire_length requires -design or -clk_nets");
+    return FailArgument("-max_wire_length requires -design or -clk_nets");
   if ((o.max_slew_margin.has_value() || o.max_cap_margin.has_value()) &&
       !o.design)
-    return FailConfig("-max_slew_margin/-max_cap_margin require -design");
+    return FailArgument("-max_slew_margin/-max_cap_margin require -design");
   if ((!o.tie_ports.empty() || o.separation_m.has_value()) && !o.tie)
-    return FailConfig("-tie_port/-separation require -tie");
+    return FailArgument("-tie_port/-separation require -tie");
   if (o.tie && o.tie_ports.empty())
-    return FailConfig("-tie requires at least one -tie_port");
+    return FailArgument("-tie requires at least one -tie_port");
   if ((o.end_pin.has_value() || o.buffer_cell.has_value()) && !o.hold)
-    return FailConfig("-end_pin/-buffer_cell require -hold");
+    return FailArgument("-end_pin/-buffer_cell require -hold");
   if (o.end_pin.has_value() != o.buffer_cell.has_value())
-    return FailConfig("-end_pin and -buffer_cell must be given together "
+    return FailArgument("-end_pin and -buffer_cell must be given together "
                       "(pin-level hold repair)");
   if (o.slack_margin_ns.has_value() && !o.setup && !o.hold)
-    return FailConfig("-slack_margin requires -setup or -hold");
+    return FailArgument("-slack_margin requires -setup or -hold");
   if (o.allow_setup_violations && !o.hold)
-    return FailConfig("-allow_setup_violations requires -hold");
+    return FailArgument("-allow_setup_violations requires -hold");
   if (o.max_buffer_percent.has_value() && !o.hold)
-    return FailConfig("-max_buffer_percent requires -hold");
+    return FailArgument("-max_buffer_percent requires -hold");
   if ((o.wire_r.has_value() || o.wire_c.has_value()) &&
       !(o.wire_r.has_value() && o.wire_c.has_value()))
-    return FailConfig("-wire_r and -wire_c must be given together");
+    return FailArgument("-wire_r and -wire_c must be given together");
   if (o.wire_r.has_value() &&
       (*o.wire_r <= 0 || *o.wire_c <= 0))
-    return FailConfig("-wire_r/-wire_c must be positive (never 0.0)");
+    return FailArgument("-wire_r/-wire_c must be positive (never 0.0)");
   (void)any_pass;
   return std::nullopt;
 }
@@ -745,7 +739,7 @@ CommandResult RunRepair(CommandContext &ctx, const RepairOptions &o) {
   for (const std::string &net_name : o.clock_nets) {
     odb::dbNet *net = block->findNet(net_name.c_str());
     if (net == nullptr)
-      return FailConfig("clock net not found: " + net_name);
+      return FailNotFound("clock net not found: " + net_name);
     net->setSigType(odb::dbSigType::CLOCK);
   }
 
@@ -850,19 +844,19 @@ CommandResult RunRepair(CommandContext &ctx, const RepairOptions &o) {
     if (o.end_pin.has_value()) {
       std::string inst_name, pin_name;
       if (!SplitInstPin(*o.end_pin, inst_name, pin_name)) {
-        return FailConfig("bad -end_pin form (want inst/pin): " + *o.end_pin);
+        return FailArgument("bad -end_pin form (want inst/pin): " + *o.end_pin);
       }
       sta::dbNetwork *network = sta->getDbNetwork();
       sta::Instance *inst = network->findInstance(inst_name);
       if (inst == nullptr)
-        return FailConfig("instance not found: " + inst_name);
+        return FailNotFound("instance not found: " + inst_name);
       sta::Pin *pin = network->findPin(inst, pin_name);
       if (pin == nullptr)
-        return FailConfig("pin not found: " + *o.end_pin);
+        return FailNotFound("pin not found: " + *o.end_pin);
       sta::LibertyCell *buffer_cell =
           network->findLibertyCell(*o.buffer_cell);
       if (buffer_cell == nullptr)
-        return FailConfig("buffer cell not found: " + *o.buffer_cell);
+        return FailNotFound("buffer cell not found: " + *o.buffer_cell);
       run_pass_strict("hold", [&] {
         resizer.repairHold(pin, buffer_cell,
                            static_cast<float>(slack_margin_s),
@@ -881,14 +875,14 @@ CommandResult RunRepair(CommandContext &ctx, const RepairOptions &o) {
     for (const std::string &tie_port : o.tie_ports) {
       std::string cell_name, port_name;
       if (!SplitCellPin(tie_port, cell_name, port_name))
-        return FailConfig("bad -tie_port form (want cell/pin): " + tie_port);
+        return FailArgument("bad -tie_port form (want cell/pin): " + tie_port);
       sta::LibertyCell *cell =
           sta->getDbNetwork()->findLibertyCell(cell_name);
       if (cell == nullptr)
-        return FailConfig("tie cell not found: " + cell_name);
+        return FailNotFound("tie cell not found: " + cell_name);
       sta::LibertyPort *port = cell->findLibertyPort(port_name);
       if (port == nullptr)
-        return FailConfig("tie port not found: " + tie_port);
+        return FailNotFound("tie port not found: " + tie_port);
       const double separation = o.separation_m.value_or(0.0);
       run_pass_strict("tie", [&] {
         resizer.repairTieFanout(port, separation, false);
@@ -1036,16 +1030,16 @@ CommandResult RepairTimingHandler(CommandContext &ctx,
 CommandResult SetWireRcHandler(CommandContext &ctx,
                                const std::vector<std::string> &args) {
   if (args.size() != 3) {
-    return FailConfig(
+    return FailArgument(
         "usage: eos::set_wire_rc <layer> <r_ohm_per_m> <c_f_per_m>");
   }
   double r = 0.0, c = 0.0;
   if (!ParseDouble(args[1], r) || !ParseDouble(args[2], c)) {
-    return FailConfig("set_wire_rc values must be numbers: " + args[1] +
+    return FailArgument("set_wire_rc values must be numbers: " + args[1] +
                       " " + args[2]);
   }
   if (r <= 0 || c <= 0) {
-    return FailConfig(
+    return FailArgument(
         "set_wire_rc values must be positive (never 0.0): " + args[1] +
         " " + args[2]);
   }

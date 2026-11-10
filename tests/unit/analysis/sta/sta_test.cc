@@ -754,7 +754,7 @@ TEST(StaFacade, WorstPathToUnknownEndpointFails) {
   LoadFixture(engine, dir, kSdcTight);
   const auto path = engine.WorstPath(CheckKind::kSetup, "r9/D");
   EXPECT_FALSE(path.ok());
-  EXPECT_EQ(path.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_EQ(path.status().code(), ErrorCode::kNotFound);
 }
 
 TEST(StaFacade, WorstPathPointsCarryTimingData) {
@@ -885,7 +885,7 @@ TEST(StaFacade, WorstPathsUnknownEndpointFails) {
   LoadFixture(engine, dir, kSdc);
   const auto paths = engine.WorstPaths(CheckKind::kSetup, "r9/D", 2);
   EXPECT_FALSE(paths.ok());
-  EXPECT_EQ(paths.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_EQ(paths.status().code(), ErrorCode::kNotFound);
   EXPECT_NE(paths.status().message().find("no endpoint pin named r9/D"),
             std::string::npos);
 }
@@ -942,7 +942,7 @@ TEST(StaFacade, WorstPathsFromFilterSelectsStartpoint) {
   const auto unknown = engine.WorstPaths(CheckKind::kSetup, "r2/D", 2,
                                          PathFilter{{"nope"}, {}});
   EXPECT_FALSE(unknown.ok());
-  EXPECT_EQ(unknown.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_EQ(unknown.status().code(), ErrorCode::kNotFound);
   EXPECT_NE(unknown.status().message().find("no such object: nope"),
             std::string::npos);
 }
@@ -1039,7 +1039,7 @@ TEST(StaFacade, WorstPathReportToUnknownEndpointFails) {
   LoadFixture(engine, dir, kSdc);
   const auto report = engine.WorstPathReport(CheckKind::kSetup, "r9/D");
   EXPECT_FALSE(report.ok());
-  EXPECT_EQ(report.status().code(), ErrorCode::kInvalidArgument);
+  EXPECT_EQ(report.status().code(), ErrorCode::kNotFound);
 }
 
 TEST(StaFacade, WorstPathToUnconstrainedEndpointFails) {

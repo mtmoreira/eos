@@ -27,6 +27,7 @@ enum class ErrorCode : std::int32_t {
   kOutOfRange = 5,
   kIoError = 6,
   kUnsupported = 7,
+  kInvalidConfiguration = 8,
 };
 
 // A success or failure with no payload. Construct failures with

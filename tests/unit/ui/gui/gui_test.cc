@@ -485,7 +485,7 @@ TEST(GuiSessionView, RefreshHierarchyClearsWhenNotElaborated) {
   EXPECT_FALSE(view.Hierarchy().HasSelection());
 }
 
-TEST(GuiSessionView, RefreshHierarchyClearsOnFailedQuery) {
+TEST(GuiSessionView, RefreshHierarchyStaysEmptyOnFailedQuery) {
   CommandRegistry registry;
   RegisterHierarchyCommand(registry, kNestedPayload, true);
   CommandContext context;
@@ -754,6 +754,12 @@ void RegisterBlocksCommand(CommandRegistry& registry,
         if (args[0] == "optloop") {
           return CommandResult::Ok(kDiagramFlatPayload);
         }
+        // A leaf module has no sub-blocks: the real command
+        // returns an empty diagram, not a failure, so the
+        // center shows the no-diagram placeholder.
+        if (args[0] == "adder") {
+          return CommandResult::Ok("module=adder\n");
+        }
         return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
                                    "unknown module");
       });
@@ -827,7 +833,7 @@ TEST(GuiSessionView, RefreshDiagramClearsWhenNotElaborated) {
   EXPECT_TRUE(view.DiagramLevel().empty());
 }
 
-TEST(GuiSessionView, RefreshDiagramClearsOnFailedQuery) {
+TEST(GuiSessionView, RefreshDiagramStaysEmptyOnFailedQuery) {
   CommandRegistry registry;
   RegisterHierarchyCommand(registry, kNestedPayload, true);
   RegisterBlocksCommand(registry, nullptr);
@@ -1720,7 +1726,7 @@ TEST(GuiSessionView, RefreshSchematicClearsWhenNotElaborated) {
   EXPECT_TRUE(view.DiagramLevel().empty());
 }
 
-TEST(GuiSessionView, RefreshSchematicClearsOnFailedQuery) {
+TEST(GuiSessionView, RefreshSchematicStaysEmptyOnFailedQuery) {
   CommandRegistry registry;
   RegisterHierarchyCommand(registry, kNestedPayload, true);
   RegisterBlocksCommand(registry, nullptr);
@@ -2482,6 +2488,12 @@ TEST(GuiSessionView, DispatchEntryContinuesPastFailure) {
   const CommandResult result =
       view.DispatchEntry("eos::ping a\neos::nope\neos::ping b");
   EXPECT_FALSE(result.ok);
+  // The aggregate is the first failure: later segments still
+  // ran, but the entry reports the failure that stopped the
+  // streak.
+  EXPECT_EQ(result.diag, eos::ui::Diag::kInvalidCommand);
+  EXPECT_NE(result.message.find("unknown command: eos::nope"),
+            std::string::npos);
   ASSERT_EQ(view.EchoLog().size(), 6u);
   EXPECT_EQ(view.EchoLog()[0], "eos::ping a");
   EXPECT_EQ(view.EchoLog()[1], "ok");
@@ -5176,7 +5188,7 @@ TEST(GuiSessionView, RefreshIssuesClearsWhenNotElaborated) {
   EXPECT_TRUE(view.Issues().Issues().empty());
 }
 
-TEST(GuiSessionView, RefreshIssuesClearsOnFailedQuery) {
+TEST(GuiSessionView, RefreshIssuesStaysEmptyOnFailedQuery) {
   CommandRegistry registry;
   RegisterIssuesCommand(registry, "", false);
   CommandContext context;
@@ -5280,7 +5292,7 @@ TEST(GuiSessionView, RefreshTimingClearsWhenNoResults) {
   EXPECT_TRUE(view.Timing().Scenes().empty());
 }
 
-TEST(GuiSessionView, RefreshTimingClearsOnFailedQuery) {
+TEST(GuiSessionView, RefreshTimingStaysEmptyOnFailedQuery) {
   CommandRegistry registry;
   RegisterTimingCommand(registry, "", false);
   CommandContext context;
@@ -5298,6 +5310,9 @@ TEST(GuiSessionView, RefreshTimingClearsOnMalformedPayload) {
   SessionView view(registry, context);
   view.RefreshTiming();
   EXPECT_FALSE(view.Timing().Loaded());
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0],
+            "timing_summary: refresh failed: malformed payload");
 }
 
 TEST(GuiSessionView, RefreshFloorplanPopulatesModelWithoutEcho) {
@@ -5329,7 +5344,7 @@ TEST(GuiSessionView, RefreshFloorplanRunsQueryOnEveryRefresh) {
   EXPECT_EQ(calls, 2);
 }
 
-TEST(GuiSessionView, RefreshFloorplanClearsOnFailedQuery) {
+TEST(GuiSessionView, RefreshFloorplanStaysEmptyOnFailedQuery) {
   CommandRegistry registry;
   RegisterFloorplanCommand(registry, "", false);
   CommandContext context;
@@ -5345,9 +5360,12 @@ TEST(GuiSessionView, RefreshFloorplanClearsOnMalformedPayload) {
   SessionView view(registry, context);
   view.RefreshFloorplan();
   EXPECT_FALSE(view.Floorplan().Loaded());
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0],
+            "floorplan_summary: refresh failed: malformed payload");
 }
 
-TEST(GuiSessionView, RefreshFloorplanClearsWhenQueryStartsFailing) {
+TEST(GuiSessionView, RefreshFloorplanKeepsModelWhenQueryStartsFailing) {
   CommandRegistry registry;
   std::string payload = kFloorplanPayload;
   bool ok = true;
@@ -5368,7 +5386,48 @@ TEST(GuiSessionView, RefreshFloorplanClearsWhenQueryStartsFailing) {
   ASSERT_TRUE(view.Floorplan().Loaded());
   ok = false;
   view.RefreshFloorplan();
-  EXPECT_FALSE(view.Floorplan().Loaded());
+  EXPECT_TRUE(view.Floorplan().Loaded());
+  ASSERT_EQ(view.Floorplan().Rows().size(), 1u);
+  EXPECT_EQ(view.Floorplan().Rows()[0], (FloorplanRect{0, 0, 5000, 3200}));
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0],
+            "floorplan_summary: EOS invalid_configuration: no floorplan");
+}
+
+TEST(GuiSessionView, RefreshTimingKeepsModelWhenQueryStartsFailing) {
+  CommandRegistry registry;
+  std::string payload = kTimingPayload;
+  bool ok = true;
+  auto status = registry.Register(
+      "timing_summary", "timing_summary",
+      [&payload, &ok](CommandContext&,
+                      const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "no timing results");
+        }
+        return CommandResult::Ok(payload);
+      });
+  ASSERT_TRUE(status.ok());
+  CommandContext context;
+  context.timing.last_results.push_back(FakeTimingResult(0.05));
+  SessionView view(registry, context);
+  view.RefreshTiming();
+  ASSERT_TRUE(view.Timing().Loaded());
+  ASSERT_EQ(view.Timing().Scenes().size(), 1u);
+  EXPECT_EQ(view.Timing().Scenes()[0].worst_slack_ns, "0.05");
+  // New timing inputs force a re-run; the query now fails, so
+  // the last good model stays and the error is logged.
+  context.timing.last_results.clear();
+  context.timing.last_results.push_back(FakeTimingResult(0.1));
+  ok = false;
+  view.RefreshTiming();
+  EXPECT_TRUE(view.Timing().Loaded());
+  ASSERT_EQ(view.Timing().Scenes().size(), 1u);
+  EXPECT_EQ(view.Timing().Scenes()[0].worst_slack_ns, "0.05");
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0],
+            "timing_summary: EOS invalid_configuration: no timing results");
 }
 
 TEST(GuiSessionView, RefreshPlacementPopulatesModelWithoutEcho) {
@@ -5400,7 +5459,7 @@ TEST(GuiSessionView, RefreshPlacementRunsQueryOnEveryRefresh) {
   EXPECT_EQ(calls, 2);
 }
 
-TEST(GuiSessionView, RefreshPlacementClearsOnFailedQuery) {
+TEST(GuiSessionView, RefreshPlacementStaysEmptyOnFailedQuery) {
   CommandRegistry registry;
   RegisterPlacementCommand(registry, "", false);
   CommandContext context;
@@ -5418,7 +5477,7 @@ TEST(GuiSessionView, RefreshPlacementClearsOnMalformedPayload) {
   EXPECT_FALSE(view.Placement().Loaded());
 }
 
-TEST(GuiSessionView, RefreshPlacementClearsWhenQueryStartsFailing) {
+TEST(GuiSessionView, RefreshPlacementKeepsModelWhenQueryStartsFailing) {
   CommandRegistry registry;
   std::string payload = kPlacementPayload;
   bool ok = true;
@@ -5439,7 +5498,11 @@ TEST(GuiSessionView, RefreshPlacementClearsWhenQueryStartsFailing) {
   ASSERT_TRUE(view.Placement().Loaded());
   ok = false;
   view.RefreshPlacement();
-  EXPECT_FALSE(view.Placement().Loaded());
+  EXPECT_TRUE(view.Placement().Loaded());
+  ASSERT_EQ(view.Placement().Instances().size(), 4u);
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0],
+            "place_summary: EOS invalid_configuration: no placement");
 }
 
 TEST(GuiSessionView, DispatchPlaceShowsPlacementCenter) {
@@ -5495,7 +5558,7 @@ TEST(GuiSessionView, RefreshSignoffRunsQueryOnEveryRefresh) {
   EXPECT_EQ(calls, 2);
 }
 
-TEST(GuiSessionView, RefreshSignoffClearsOnFailedQuery) {
+TEST(GuiSessionView, RefreshSignoffStaysEmptyOnFailedQuery) {
   CommandRegistry registry;
   RegisterSignoffCommand(registry, "", false);
   CommandContext context;
@@ -5513,7 +5576,7 @@ TEST(GuiSessionView, RefreshSignoffClearsOnMalformedPayload) {
   EXPECT_FALSE(view.Signoff().Loaded());
 }
 
-TEST(GuiSessionView, RefreshSignoffClearsWhenQueryStartsFailing) {
+TEST(GuiSessionView, RefreshSignoffKeepsModelWhenQueryStartsFailing) {
   CommandRegistry registry;
   std::string payload = kSignoffPayload;
   bool ok = true;
@@ -5534,7 +5597,11 @@ TEST(GuiSessionView, RefreshSignoffClearsWhenQueryStartsFailing) {
   ASSERT_TRUE(view.Signoff().Loaded());
   ok = false;
   view.RefreshSignoff();
-  EXPECT_FALSE(view.Signoff().Loaded());
+  EXPECT_TRUE(view.Signoff().Loaded());
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0],
+            "signoff_summary: EOS invalid_configuration: no signoff "
+            "verdicts");
 }
 
 TEST(GuiSessionView, DispatchFloorplanShowsFloorplanCenter) {
@@ -5580,8 +5647,10 @@ TEST(GuiSessionView, DispatchLogsCommandAndFailure) {
   EXPECT_EQ(view.Log()[2].severity, "info");
   EXPECT_EQ(view.Log()[2].text, "eos::nope");
   EXPECT_EQ(view.Log()[3].severity, "error");
-  EXPECT_NE(view.Log()[3].text.find("EOS invalid_command"),
-            std::string::npos);
+  // The Log window holds the identical error line as the
+  // transcript and the Messages tab.
+  EXPECT_EQ(view.Log()[3].text,
+            "eos::nope: EOS invalid_command: unknown command: eos::nope");
 }
 
 // Console/log routing: a command that prints output leaves

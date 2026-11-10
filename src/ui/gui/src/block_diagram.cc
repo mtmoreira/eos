@@ -186,7 +186,12 @@ void BlockDiagram::RebuildBreadcrumb() {
 void BlockDiagram::RebuildScene() {
   scene_->clear();
   const DiagramModel& diagram = view_.Diagram();
-  if (diagram.Empty()) {
+  // A level with no sub-blocks has no block diagram: the leaf
+  // module's diagram loads (its parent ports are real) but there
+  // is nothing to draw, so the page shows the placeholder
+  // instead of a blank scene. This is the leaf case the
+  // schematic page covers.
+  if (diagram.Empty() || diagram.Blocks().empty()) {
     std::string text = "No diagram for this level.";
     if (!view_.context().synth.elaborated) {
       text = "No design loaded.";

@@ -169,6 +169,15 @@ int RunGui(int argc, char** argv, CommandRegistry& registry,
               std::string out;
               if (!evaluated.ok()) {
                 out = "error: " + evaluated.status().message();
+                // Show the drained engine log before Refresh()
+                // drains the originals into the Log window, so
+                // the terminal shows them and the Log window
+                // shows them too. Only on failure, never on
+                // success.
+                for (const std::string& log_line :
+                     shell->LastFailedEngineLog()) {
+                  out += "\n" + log_line;
+                }
               } else {
                 out = evaluated.value();
               }

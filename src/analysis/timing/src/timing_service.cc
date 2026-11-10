@@ -19,6 +19,10 @@ using foundation::ErrorCode;
 Status Invalid(const std::string& message) {
   return Status::Error(ErrorCode::kInvalidArgument, message);
 }
+Status NotFound(const std::string& message) {
+  return Status::Error(ErrorCode::kNotFound, message);
+}
+
 
 // Validates the shared inputs before any analysis runs.
 Status Validate(const std::string& sdc_path,
@@ -242,7 +246,7 @@ Result<ScenePathReports> ReportScene(const VerilogDesign& design,
     if (!found) {
       return SceneError(
           scene,
-          Invalid("unknown path group: " + request.group +
+          NotFound("unknown path group: " + request.group +
                   " (available: " +
                   (available.empty() ? std::string("(none)") : available) +
                   ")"));
