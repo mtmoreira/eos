@@ -1,6 +1,7 @@
 // gui: the hierarchy browser widget (Qt only).
 #include "hierarchy_browser.h"
 
+#include <QHeaderView>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
@@ -35,6 +36,10 @@ HierarchyBrowser::HierarchyBrowser(SessionView& view, QWidget* parent)
   tree_ = new QTreeWidget(this);
   tree_->setColumnCount(2);
   tree_->setHeaderLabels({"Instance", "Module"});
+  // The Instance column sizes to its contents: instance names
+  // are the point of the tree, and the default section size
+  // elides anything past "u_...".
+  tree_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
   layout->addWidget(tree_);
   connect(tree_, &QTreeWidget::itemClicked,
           [this](QTreeWidgetItem* item, int) {

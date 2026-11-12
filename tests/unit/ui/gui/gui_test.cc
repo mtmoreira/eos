@@ -35,13 +35,16 @@
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsSimpleTextItem>
 #include <QGraphicsView>
+#include <QHeaderView>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QTreeWidget>
 
 #include "block_diagram.h"
 #include "center_view.h"
 #include "floorplan_diagram.h"
+#include "hierarchy_browser.h"
 #include "main_window.h"
 #include "panels_view.h"
 #include "schematic_diagram.h"
@@ -2802,6 +2805,7 @@ using eos::ui::PanelsView;
 using eos::ui::FloorplanDiagram;
 using eos::ui::PlacementDiagram;
 using eos::ui::SchematicDiagram;
+using eos::ui::HierarchyBrowser;
 
 // Widget rendering tests: both diagrams sit on a dark
 // background, so every shape is a white contour with no fill
@@ -4034,6 +4038,47 @@ TEST(SchematicOutline, TerminalArrowsPointInSignalDirection) {
   }
   EXPECT_EQ(inputs, 4u);
   EXPECT_EQ(outputs, 2u);
+}
+
+// A hierarchy with a long instance name at depth 1 and a child at
+// depth 2, mirroring the hier demo shape (hier_top/u_data/u_alu)
+// with a longer name, so the Instance column must be wider than
+// the default section size to show the name without elision.
+const char kHierarchyLongNamePayload[] =
+    "top=hier_top\n"
+    "node path=hier_top module=hier_top ports=clk,rst_n,start,data,done,result\n"
+    "node path=hier_top/u_hier_datapath module=hier_datapath ports=clk,rst_n,data,result\n"
+    "node path=hier_top/u_hier_datapath/u_hier_alu module=hier_alu ports=a,b,z\n";
+
+TEST(HierarchyBrowser, InstanceColumnFitsLongNames) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterHierarchyCommand(registry, kHierarchyLongNamePayload, true);
+  CommandContext context;
+  context.synth.elaborated = true;
+  SessionView view(registry, context);
+  view.RefreshHierarchy();
+  ASSERT_FALSE(view.Hierarchy().Empty());
+  HierarchyBrowser browser(view);
+  browser.Refresh();
+  browser.show();
+  QApplication::processEvents();
+  QTreeWidget* tree = browser.findChild<QTreeWidget*>();
+  ASSERT_NE(tree, nullptr);
+  // The fix: the Instance column sizes to its contents, so a long
+  // instance name is never elided to "u_...".
+  EXPECT_EQ(tree->header()->sectionResizeMode(0),
+            QHeaderView::ResizeToContents);
+  // Qt sizes a ResizeToContents section from the visible rows, so
+  // expand the hierarchy (the state in which the elision showed)
+  // before measuring the fit.
+  tree->expandAll();
+  QApplication::processEvents();
+  // The longest instance name plus its tree indent fits.
+  const int needed =
+      tree->fontMetrics().horizontalAdvance("u_hier_datapath") +
+      tree->indentation();
+  EXPECT_GE(tree->columnWidth(0), needed);
 }
 
 TEST(SchematicOutline, LabelsAreWhite) {
