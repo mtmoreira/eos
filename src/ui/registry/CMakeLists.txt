@@ -1,6 +1,6 @@
 # registry: the one command registry (L6 interface).
 add_library(eda_ui_registry STATIC src/registry.cc src/core_commands.cc
-  src/gui_show.cc src/repair_commands.cc)
+  src/gui_show.cc src/repair_commands.cc src/eco_commands.cc)
 target_include_directories(eda_ui_registry PUBLIC include)
 # The synthesis commands drive the Yosys and ABC facades, so the
 # registry links both: Yosys whole-archive, exactly as every other
@@ -17,6 +17,7 @@ target_link_libraries(eda_ui_registry
          eda_db_design eda_db_scenarios eda_db_constraints
          eda_db_waivers
          eda_db_checkpoint eda_db_odb eda_analysis_timing
+         eda_eco_timing_eco
          eda_foundation_ids eda_foundation_errors
          eda_pd_floorplan
          eda_pd_rsz eda_pd_dbsta

@@ -96,8 +96,10 @@ TEST(Registry, CoreSetIsComplete) {
   // F4 adds place_summary. F13 adds signoff_summary. The
   // waiver-model unit adds set_waiver, list_waivers,
   // remove_waiver, and waiver_coverage (four commands). The
-  // F13 DRC engine unit adds drc_run (one command).
-  EXPECT_EQ(shell.registry.Names().size(), 119u);
+  // F13 DRC engine unit adds drc_run (one command). The
+  // per-cell edit unit adds size_cell, swap_cell,
+  // insert_buffer, and remove_buffer (four commands).
+  EXPECT_EQ(shell.registry.Names().size(), 123u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -110,6 +112,10 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("list_waivers"), nullptr);
   EXPECT_NE(shell.registry.Find("remove_waiver"), nullptr);
   EXPECT_NE(shell.registry.Find("waiver_coverage"), nullptr);
+  EXPECT_NE(shell.registry.Find("size_cell"), nullptr);
+  EXPECT_NE(shell.registry.Find("swap_cell"), nullptr);
+  EXPECT_NE(shell.registry.Find("insert_buffer"), nullptr);
+  EXPECT_NE(shell.registry.Find("remove_buffer"), nullptr);
   EXPECT_NE(shell.registry.Find("report_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("synth_issues"), nullptr);
   EXPECT_NE(shell.registry.Find("report_constraint"), nullptr);
@@ -5958,7 +5964,814 @@ TEST(CoreCommands, BridgeRunsOnMockPdk) {
   EXPECT_NE(floorplan.payload.find("die_area="),
             std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Per-cell edit commands (size_cell, swap_cell, insert_buffer,
+// remove_buffer): direct manual edits on the live session
+// database through the timing ECO adapters. The fixture is a
+// small DEF on the mock library holding every shape the commands
+// must handle: a one-load net, a three-load net, a fixture buffer
+// with three loads, a clock buffer, a buffer with an unconnected
+// output, a buffer with an unconnected input, a buffer driving a
+// top-level output port, a port-driven net, a port-loaded net, an
+// undriven net, a driver-only net, and a two-driver net. All
+// placements sit on the mock site grid (400 by 6400 database
+// units), so the -position interpolation snaps to the points the
+// tests assert exactly.
+const char kEcoDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN eco_top ;
+UNITS DISTANCE MICRONS 2000 ;
+DIEAREA ( 0 0 ) ( 100000 100000 ) ;
+COMPONENTS 36 ;
+- u_drv1 EM_AND2_X1 + PLACED ( 0 0 ) N ;
+- u_ld1 EM_INV_X1 + PLACED ( 4000 0 ) N ;
+- u_ld2 EM_AND2_X1 + PLACED ( 8000 0 ) N ;
+- u_src5 EM_AND2_X1 + PLACED ( 11200 0 ) N ;
+- u_bfree EM_BUF_X1 + PLACED ( 12000 0 ) N ;
+- u_src6 EM_AND2_X1 + PLACED ( 12800 0 ) N ;
+- u_clkbuf EM_CLKBUF_X1 + PLACED ( 13600 0 ) N ;
+- u_cl1 EM_AND2_X1 + PLACED ( 14400 0 ) N ;
+- u_odrv EM_AND2_X1 + PLACED ( 15200 0 ) N ;
+- u_nd1 EM_AND2_X1 + PLACED ( 17600 0 ) N ;
+- u_md1 EM_AND2_X1 + PLACED ( 18400 0 ) N ;
+- u_md2 EM_AND2_X1 + PLACED ( 19200 0 ) N ;
+- u_mdl EM_AND2_X1 + PLACED ( 20000 0 ) N ;
+- u_drv2 EM_BUF_X1 + PLACED ( 0 6400 ) N ;
+- u_m1 EM_AND2_X1 + PLACED ( 2000 6400 ) N ;
+- u_m2 EM_AND2_X1 + PLACED ( 4000 6400 ) N ;
+- u_m3 EM_INV_X1 + PLACED ( 6000 6400 ) N ;
+- u_src3 EM_AND2_X1 + PLACED ( 7200 6400 ) N ;
+- u_b3 EM_BUF_X1 + PLACED ( 8000 6400 ) N ;
+- u_b3l1 EM_AND2_X1 + PLACED ( 8800 6400 ) N ;
+- u_b3l2 EM_AND2_X1 + PLACED ( 9600 6400 ) N ;
+- u_b3l3 EM_INV_X1 + PLACED ( 10400 6400 ) N ;
+- u_borphan EM_BUF_X1 + PLACED ( 12000 6400 ) N ;
+- u_ol1 EM_AND2_X1 + PLACED ( 12800 6400 ) N ;
+- u_bport EM_BUF_X1 + PLACED ( 13600 6400 ) N ;
+- u_ff EM_DFF_X1 + PLACED ( 16000 6400 ) N ;
+- u_ffl EM_AND2_X1 + PLACED ( 16800 6400 ) N ;
+- u_drv7 EM_AND2_X1 + PLACED ( 17600 6400 ) N ;
+- u_swap EM_AND2_X1 + PLACED ( 20000 6400 ) N ;
+- u_swl EM_AND2_X1 + PLACED ( 20800 6400 ) N ;
+- u_src2 EM_AND2_X1 + PLACED ( 0 12800 ) N ;
+- u_src7 EM_AND2_X1 + PLACED ( 13600 12800 ) N ;
+- u_src8 EM_AND2_X1 + PLACED ( 15200 12800 ) N ;
+- u_src4 EM_AND2_X1 + PLACED ( 18400 12800 ) N ;
+- u_buf4 EM_BUF_X4 + PLACED ( 19200 12800 ) N ;
+- u_b4l EM_AND2_X1 + PLACED ( 20000 12800 ) N ;
+END COMPONENTS
+PINS 4 ;
+- clk + NET clk_n + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 50000 ) N ;
+- din + NET in_n + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 60000 ) N ;
+- dout + NET n_out + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 100000 50000 ) N ;
+- dout2 + NET n_bport_out + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 100000 60000 ) N ;
+END PINS
+NETS 23 ;
+- in_n ( PIN din ) ( u_drv1 A1 ) ( u_drv1 A2 ) ( u_ld2 A2 ) ( u_m1 A2 ) ( u_m2 A2 ) ( u_b3l1 A2 ) ( u_b3l2 A2 ) ( u_ol1 A2 ) ( u_src2 A1 ) ( u_src2 A2 ) ( u_src3 A1 ) ( u_src3 A2 ) ( u_src4 A1 ) ( u_src4 A2 ) ( u_src5 A1 ) ( u_src5 A2 ) ( u_src6 A1 ) ( u_src6 A2 ) ( u_src7 A1 ) ( u_src7 A2 ) ( u_src8 A1 ) ( u_src8 A2 ) ( u_nd1 A2 ) ( u_drv7 A1 ) ( u_drv7 A2 ) ( u_md1 A1 ) ( u_md1 A2 ) ( u_md2 A1 ) ( u_md2 A2 ) ( u_mdl A2 ) ( u_swap A1 ) ( u_swap A2 ) ( u_b4l A2 ) ( u_cl1 A2 ) ( u_ffl A2 ) ( u_swl A2 ) ;
+- clk_n ( PIN clk ) ( u_ff CK ) ;
+- n_one ( u_drv1 ZN ) ( u_ld1 A ) ;
+- n_inv ( u_ld1 ZN ) ( u_ld2 A1 ) ;
+- n_buf_in ( u_src2 ZN ) ( u_drv2 A ) ;
+- n_many ( u_drv2 Z ) ( u_m1 A1 ) ( u_m2 A1 ) ( u_m3 A ) ;
+- n_b4in ( u_src4 ZN ) ( u_buf4 A ) ;
+- n_b4out ( u_buf4 Z ) ( u_b4l A1 ) ;
+- n_b3in ( u_src3 ZN ) ( u_b3 A ) ;
+- n_b3out ( u_b3 Z ) ( u_b3l1 A1 ) ( u_b3l2 A1 ) ( u_b3l3 A ) ;
+- n_bfree_in ( u_src5 ZN ) ( u_bfree A ) ;
+- n_borphan_out ( u_borphan Z ) ( u_ol1 A1 ) ;
+- n_clk_in ( u_src6 ZN ) ( u_clkbuf A ) ;
+- n_clk_out ( u_clkbuf Z ) ( u_cl1 A1 ) ;
+- n_bport_in ( u_src7 ZN ) ( u_bport A ) ;
+- n_bport_out ( u_bport Z ) ( PIN dout2 ) ;
+- n_out ( u_odrv ZN ) ( PIN dout ) ;
+- n_ff_in ( u_src8 ZN ) ( u_ff D ) ;
+- n_ff_out ( u_ff Q ) ( u_ffl A1 ) ;
+- n_nodrv ( u_nd1 A1 ) ;
+- n_noload ( u_drv7 ZN ) ;
+- n_mdrv ( u_md1 ZN ) ( u_md2 ZN ) ( u_mdl A1 ) ;
+- n_swap_out ( u_swap ZN ) ( u_swl A1 ) ;
+END NETS
+END DESIGN
+)DEF";
+
+void LoadEcoFixture(Shell& shell, TimingTempDir& dir) {
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.tlef"}).ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.lef"}).ok);
+  const CommandResult loaded =
+      shell.Run("read_def", {dir.Write("eco_top.def", kEcoDef)});
+  ASSERT_TRUE(loaded.ok) << loaded.message;
+}
+
+bool EcoHasConnection(const std::vector<db::OdbNetConnection>& connections,
+                      const std::string& instance, const std::string& pin) {
+  for (const db::OdbNetConnection& connection : connections) {
+    if (connection.instance == instance && connection.pin == pin) {
+      return true;
+    }
+  }
+  return false;
+}
+
+TEST(CoreCommands, EcoCommandsFailWithoutADesign) {
+  Shell shell;
+  const CommandResult size =
+      shell.Run("size_cell", {"u_drv2", "EM_BUF_X2"});
+  ASSERT_FALSE(size.ok);
+  EXPECT_EQ(size.diag, Diag::kUnclosedDesign);
+  EXPECT_NE(size.message.find("import_odb"), std::string::npos);
+  EXPECT_EQ(shell.Run("swap_cell", {"u_drv2", "EM_BUF_X2"}).diag,
+            Diag::kUnclosedDesign);
+  EXPECT_EQ(
+      shell
+          .Run("insert_buffer", {"n_one", "-buffer_cell", "EM_BUF_X1"})
+          .diag,
+      Diag::kUnclosedDesign);
+  EXPECT_EQ(shell.Run("remove_buffer", {"u_b3"}).diag,
+            Diag::kUnclosedDesign);
+  // LEF loaded but no DEF read: the database holds no top block,
+  // which is the same unclosed-design failure.
+  TimingTempDir dir;
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.tlef"}).ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.lef"}).ok);
+  const CommandResult no_block =
+      shell.Run("size_cell", {"u_drv2", "EM_BUF_X2"});
+  ASSERT_FALSE(no_block.ok);
+  EXPECT_EQ(no_block.diag, Diag::kUnclosedDesign);
+}
+
+TEST(CoreCommands, EcoCommandsRejectBadArgumentCounts) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  EXPECT_EQ(shell.Run("size_cell", {"u_drv2"}).diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(
+      shell.Run("size_cell", {"u_drv2", "EM_BUF_X2", "extra"}).diag,
+      Diag::kInvalidArgument);
+  EXPECT_EQ(shell.Run("swap_cell", {"u_swap"}).diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(shell.Run("remove_buffer", {}).diag, Diag::kInvalidArgument);
+  EXPECT_EQ(shell.Run("remove_buffer", {"u_b3", "extra"}).diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(shell.Run("insert_buffer", {"n_one", "-bogus", "x"}).diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(shell.Run("insert_buffer", {"n_one", "n_many"}).diag,
+            Diag::kInvalidArgument);
+}
+
+TEST(CoreCommands, SizeCellResizesWithinTheFamily) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  // Up, twice, within the buffer family: the instance keeps its
+  // name, location, and connections; only the master changes.
+  const CommandResult up =
+      shell.Run("size_cell", {"u_drv2", "EM_BUF_X2"});
+  ASSERT_TRUE(up.ok) << up.message;
+  EXPECT_NE(up.payload.find("instance=u_drv2"), std::string::npos);
+  EXPECT_NE(up.payload.find("from_master=EM_BUF_X1"),
+            std::string::npos);
+  EXPECT_NE(up.payload.find("to_master=EM_BUF_X2"), std::string::npos);
+  EXPECT_NE(up.payload.find("timing_results=cleared"),
+            std::string::npos);
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(database.FindInstance("u_drv2", &info));
+  EXPECT_EQ(info.master, "EM_BUF_X2");
+  EXPECT_EQ(info.x, 0);
+  EXPECT_EQ(info.y, 6400);
+  EXPECT_EQ(database.InstanceCount(), 36u);
+  EXPECT_TRUE(EcoHasConnection(database.NetConnections("n_many"),
+                               "u_drv2", "Z"));
+  const CommandResult up2 =
+      shell.Run("size_cell", {"u_drv2", "EM_BUF_X4"});
+  ASSERT_TRUE(up2.ok) << up2.message;
+  ASSERT_TRUE(database.FindInstance("u_drv2", &info));
+  EXPECT_EQ(info.master, "EM_BUF_X4");
+  // Down: the X4 buffer in the fixture sizes back to X1.
+  const CommandResult down =
+      shell.Run("size_cell", {"u_buf4", "EM_BUF_X1"});
+  ASSERT_TRUE(down.ok) << down.message;
+  ASSERT_TRUE(database.FindInstance("u_buf4", &info));
+  EXPECT_EQ(info.master, "EM_BUF_X1");
+}
+
+TEST(CoreCommands, SizeCellResizesTheInverterFamily) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  // A second family, proving the rule is not buffer-specific.
+  const CommandResult result =
+      shell.Run("size_cell", {"u_ld1", "EM_INV_X2"});
+  ASSERT_TRUE(result.ok) << result.message;
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(shell.ctx.timing.odb->FindInstance("u_ld1", &info));
+  EXPECT_EQ(info.master, "EM_INV_X2");
+}
+
+TEST(CoreCommands, SizeCellFailuresChangeNothing) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  EXPECT_EQ(shell.Run("size_cell", {"nope", "EM_BUF_X2"}).diag,
+            Diag::kNotFound);
+  EXPECT_EQ(shell.Run("size_cell", {"u_drv2", "EM_BUF_X3"}).diag,
+            Diag::kNotFound);
+  EXPECT_EQ(shell.Run("size_cell", {"u_drv2", "EM_BUF_X1"}).diag,
+            Diag::kInvalidArgument);
+  // Cross-family: the gate fires before the adapter, so the
+  // message names the family rule.
+  const CommandResult cross =
+      shell.Run("size_cell", {"u_drv2", "EM_INV_X2"});
+  ASSERT_FALSE(cross.ok);
+  EXPECT_EQ(cross.diag, Diag::kInvalidArgument);
+  EXPECT_NE(cross.message.find("not a size variant"),
+            std::string::npos);
+  // Single-member family: EM_AND2_X1 has no variants, so even a
+  // pin-identical target is refused here (swap_cell allows it;
+  // see SwapCellChangesFunctionWithinSamePins).
+  EXPECT_EQ(shell.Run("size_cell", {"u_swap", "EM_NAND2_X1"}).diag,
+            Diag::kInvalidArgument);
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(database.FindInstance("u_drv2", &info));
+  EXPECT_EQ(info.master, "EM_BUF_X1");
+  ASSERT_TRUE(database.FindInstance("u_swap", &info));
+  EXPECT_EQ(info.master, "EM_AND2_X1");
+  EXPECT_EQ(database.InstanceCount(), 36u);
+  EXPECT_EQ(database.NetCount(), 23u);
+}
+
+TEST(CoreCommands, SwapCellChangesFunctionWithinSamePins) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  // AND2 to NAND2: same pin set, different function, the move
+  // size_cell's family rule forbids and swap_cell exists for.
+  // Connectivity is preserved pin for pin; the function change
+  // is the caller's responsibility, by design.
+  const CommandResult result =
+      shell.Run("swap_cell", {"u_swap", "EM_NAND2_X1"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("from_master=EM_AND2_X1"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("to_master=EM_NAND2_X1"),
+            std::string::npos);
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(database.FindInstance("u_swap", &info));
+  EXPECT_EQ(info.master, "EM_NAND2_X1");
+  EXPECT_TRUE(EcoHasConnection(database.NetConnections("n_swap_out"),
+                               "u_swap", "ZN"));
+  EXPECT_TRUE(EcoHasConnection(database.NetConnections("in_n"),
+                               "u_swap", "A1"));
+  // Cross-family with matching pins (buffer to clock buffer):
+  // the family rule does not apply to swap_cell.
+  const CommandResult cross =
+      shell.Run("swap_cell", {"u_drv2", "EM_CLKBUF_X1"});
+  ASSERT_TRUE(cross.ok) << cross.message;
+  ASSERT_TRUE(database.FindInstance("u_drv2", &info));
+  EXPECT_EQ(info.master, "EM_CLKBUF_X1");
+}
+
+TEST(CoreCommands, SwapCellFailures) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  EXPECT_EQ(shell.Run("swap_cell", {"nope", "EM_NAND2_X1"}).diag,
+            Diag::kNotFound);
+  EXPECT_EQ(shell.Run("swap_cell", {"u_swap", "EM_NOPE_X1"}).diag,
+            Diag::kNotFound);
+  EXPECT_EQ(shell.Run("swap_cell", {"u_swap", "EM_AND2_X1"}).diag,
+            Diag::kInvalidArgument);
+  // Pin count differs: AND3 carries a third input.
+  EXPECT_EQ(shell.Run("swap_cell", {"u_swap", "EM_AND3_X1"}).diag,
+            Diag::kInvalidArgument);
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(shell.ctx.timing.odb->FindInstance("u_swap", &info));
+  EXPECT_EQ(info.master, "EM_AND2_X1");
+}
+
+TEST(CoreCommands, InsertBufferSplitsAOneLoadNet) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  const CommandResult result = shell.Run(
+      "insert_buffer", {"n_one", "-buffer_cell", "EM_BUF_X2"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("net=n_one"), std::string::npos);
+  EXPECT_NE(result.payload.find("buffer_instance=n_one_eco_buf"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("buffer_master=EM_BUF_X2"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("new_net=n_one_eco_buf_net"),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("loads_moved=1"), std::string::npos);
+  EXPECT_NE(result.payload.find("timing_results=cleared"),
+            std::string::npos);
+  EXPECT_EQ(database.InstanceCount(), 37u);
+  EXPECT_EQ(database.NetCount(), 24u);
+  const auto original = database.NetConnections("n_one");
+  EXPECT_TRUE(EcoHasConnection(original, "u_drv1", "ZN"));
+  EXPECT_TRUE(EcoHasConnection(original, "n_one_eco_buf", "A"));
+  EXPECT_FALSE(EcoHasConnection(original, "u_ld1", "A"));
+  const auto split = database.NetConnections("n_one_eco_buf_net");
+  EXPECT_TRUE(EcoHasConnection(split, "n_one_eco_buf", "Z"));
+  EXPECT_TRUE(EcoHasConnection(split, "u_ld1", "A"));
+  // Default position 0: the buffer sits at the driver's
+  // location, (0, 0).
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(database.FindInstance("n_one_eco_buf", &info));
+  EXPECT_EQ(info.x, 0);
+  EXPECT_EQ(info.y, 0);
+}
+
+TEST(CoreCommands, InsertBufferMovesEveryLoad) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  const CommandResult result = shell.Run(
+      "insert_buffer", {"n_many", "-buffer_cell", "EM_BUF_X1"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_NE(result.payload.find("loads_moved=3"), std::string::npos);
+  const auto original = database.NetConnections("n_many");
+  EXPECT_EQ(original.size(), 2u);
+  EXPECT_TRUE(EcoHasConnection(original, "n_many_eco_buf", "A"));
+  const auto split = database.NetConnections("n_many_eco_buf_net");
+  EXPECT_EQ(split.size(), 4u);
+  EXPECT_TRUE(EcoHasConnection(split, "u_m1", "A1"));
+  EXPECT_TRUE(EcoHasConnection(split, "u_m2", "A1"));
+  EXPECT_TRUE(EcoHasConnection(split, "u_m3", "A"));
+}
+
+TEST(CoreCommands, InsertBufferPositionParameter) {
+  // The driver of n_many sits at (0, 6400); its loads at x 2000,
+  // 4000, and 6000 on the same row, so the load centroid is
+  // (4000, 6400): position 0.5 lands on (2000, 6400) and
+  // position 1 on the centroid itself. Every point is on the
+  // mock site grid, so the snap is exact.
+  for (const auto& [position, expected_x] :
+       std::vector<std::pair<std::string, int>>{
+           {"0", 0}, {"0.5", 2000}, {"1", 4000}}) {
+    TimingTempDir dir;
+    Shell shell;
+    LoadEcoFixture(shell, dir);
+    const CommandResult result =
+        shell.Run("insert_buffer", {"n_many", "-buffer_cell",
+                                    "EM_BUF_X1", "-position",
+                                    position});
+    ASSERT_TRUE(result.ok) << position << ": " << result.message;
+    db::OdbInstanceInfo info;
+    ASSERT_TRUE(
+        shell.ctx.timing.odb->FindInstance("n_many_eco_buf", &info));
+    EXPECT_EQ(info.x, expected_x) << position;
+    EXPECT_EQ(info.y, 6400) << position;
+  }
+  // Out of range is kOutOfRange, and nothing is inserted.
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  for (const char* bad : {"1.5", "-0.5"}) {
+    const CommandResult result =
+        shell.Run("insert_buffer", {"n_many", "-buffer_cell",
+                                    "EM_BUF_X1", "-position", bad});
+    ASSERT_FALSE(result.ok) << bad;
+    EXPECT_EQ(result.diag, Diag::kOutOfRange) << bad;
+  }
+  EXPECT_EQ(
+      shell.Run("insert_buffer",
+                {"n_many", "-buffer_cell", "EM_BUF_X1", "-position",
+                 "half"})
+          .diag,
+      Diag::kInvalidArgument);
+  EXPECT_EQ(shell.ctx.timing.odb->InstanceCount(), 36u);
+}
+
+TEST(CoreCommands, InsertBufferNamesExplicitAndGenerated) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  // Explicit names are used verbatim.
+  const CommandResult named = shell.Run(
+      "insert_buffer",
+      {"n_one", "-buffer_cell", "EM_BUF_X1", "-instance_name",
+       "my_buf", "-net_name", "my_net"});
+  ASSERT_TRUE(named.ok) << named.message;
+  EXPECT_NE(named.payload.find("buffer_instance=my_buf"),
+            std::string::npos);
+  EXPECT_NE(named.payload.find("new_net=my_net"), std::string::npos);
+  EXPECT_TRUE(database.HasInstance("my_buf"));
+  EXPECT_TRUE(database.HasNet("my_net"));
+  // A taken explicit name is an error, never silently suffixed.
+  EXPECT_EQ(shell
+                .Run("insert_buffer",
+                     {"n_inv", "-buffer_cell", "EM_BUF_X1",
+                      "-instance_name", "my_buf"})
+                .diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(shell
+                .Run("insert_buffer",
+                     {"n_inv", "-buffer_cell", "EM_BUF_X1",
+                      "-net_name", "my_net"})
+                .diag,
+            Diag::kInvalidArgument);
+  // Generated names suffix on collision: buffering n_inv twice
+  // (the second insert's only load is the first buffer's input)
+  // yields the base name, then the _1 form, for both objects.
+  const CommandResult first = shell.Run(
+      "insert_buffer", {"n_inv", "-buffer_cell", "EM_BUF_X1"});
+  ASSERT_TRUE(first.ok) << first.message;
+  const CommandResult second = shell.Run(
+      "insert_buffer", {"n_inv", "-buffer_cell", "EM_BUF_X1"});
+  ASSERT_TRUE(second.ok) << second.message;
+  EXPECT_NE(second.payload.find("buffer_instance=n_inv_eco_buf_1"),
+            std::string::npos);
+  EXPECT_NE(second.payload.find("new_net=n_inv_eco_buf_net_1"),
+            std::string::npos);
+  EXPECT_TRUE(database.HasInstance("n_inv_eco_buf"));
+  EXPECT_TRUE(database.HasInstance("n_inv_eco_buf_1"));
+}
+
+TEST(CoreCommands, InsertBufferClockBufferCell) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  // No clock special case: a clock buffer on a data net is the
+  // same edit as any buffer.
+  const CommandResult result = shell.Run(
+      "insert_buffer", {"n_one", "-buffer_cell", "EM_CLKBUF_X2"});
+  ASSERT_TRUE(result.ok) << result.message;
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(
+      shell.ctx.timing.odb->FindInstance("n_one_eco_buf", &info));
+  EXPECT_EQ(info.master, "EM_CLKBUF_X2");
+}
+
+TEST(CoreCommands, InsertBufferFailuresChangeNothing) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  EXPECT_EQ(
+      shell.Run("insert_buffer", {"nope", "-buffer_cell", "EM_BUF_X1"})
+          .diag,
+      Diag::kNotFound);
+  EXPECT_EQ(
+      shell.Run("insert_buffer", {"n_one", "-buffer_cell", "EM_NOPE"})
+          .diag,
+      Diag::kNotFound);
+  // Masters that are not one input and one output signal pin.
+  EXPECT_EQ(shell
+                .Run("insert_buffer",
+                     {"n_one", "-buffer_cell", "EM_AND2_X1"})
+                .diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(shell
+                .Run("insert_buffer",
+                     {"n_one", "-buffer_cell", "EM_DFF_X1"})
+                .diag,
+            Diag::kInvalidArgument);
+  // -buffer_cell is required (decision D2), and its value too.
+  EXPECT_EQ(shell.Run("insert_buffer", {"n_one"}).diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(
+      shell.Run("insert_buffer", {"n_one", "-buffer_cell"}).diag,
+      Diag::kInvalidArgument);
+  // Port boundaries are the adapter's v1 scope limit.
+  EXPECT_EQ(
+      shell.Run("insert_buffer", {"in_n", "-buffer_cell", "EM_BUF_X1"})
+          .diag,
+      Diag::kUnsupportedFeature);
+  EXPECT_EQ(
+      shell.Run("insert_buffer", {"n_out", "-buffer_cell", "EM_BUF_X1"})
+          .diag,
+      Diag::kUnsupportedFeature);
+  // Net shapes with nothing to buffer.
+  EXPECT_EQ(shell
+                .Run("insert_buffer",
+                     {"n_nodrv", "-buffer_cell", "EM_BUF_X1"})
+                .diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(shell
+                .Run("insert_buffer",
+                     {"n_noload", "-buffer_cell", "EM_BUF_X1"})
+                .diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(shell
+                .Run("insert_buffer",
+                     {"n_mdrv", "-buffer_cell", "EM_BUF_X1"})
+                .diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(database.InstanceCount(), 36u);
+  EXPECT_EQ(database.NetCount(), 23u);
+}
+
+TEST(CoreCommands, RemoveBufferRoundTrip) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  const auto before = database.NetConnections("n_many");
+  const CommandResult inserted = shell.Run(
+      "insert_buffer", {"n_many", "-buffer_cell", "EM_BUF_X1"});
+  ASSERT_TRUE(inserted.ok) << inserted.message;
+  const CommandResult removed =
+      shell.Run("remove_buffer", {"n_many_eco_buf"});
+  ASSERT_TRUE(removed.ok) << removed.message;
+  EXPECT_NE(removed.payload.find("instance=n_many_eco_buf"),
+            std::string::npos);
+  EXPECT_NE(removed.payload.find("master=EM_BUF_X1"),
+            std::string::npos);
+  EXPECT_NE(removed.payload.find("net_restored=n_many"),
+            std::string::npos);
+  EXPECT_NE(removed.payload.find("net_removed=n_many_eco_buf_net"),
+            std::string::npos);
+  EXPECT_NE(removed.payload.find("loads_moved=3"), std::string::npos);
+  EXPECT_NE(removed.payload.find("timing_results=cleared"),
+            std::string::npos);
+  // The pre-insert state is restored exactly.
+  EXPECT_EQ(database.InstanceCount(), 36u);
+  EXPECT_EQ(database.NetCount(), 23u);
+  EXPECT_FALSE(database.HasNet("n_many_eco_buf_net"));
+  const auto after = database.NetConnections("n_many");
+  ASSERT_EQ(after.size(), before.size());
+  for (const db::OdbNetConnection& connection : before) {
+    EXPECT_TRUE(
+        EcoHasConnection(after, connection.instance, connection.pin));
+  }
+}
+
+TEST(CoreCommands, RemoveBufferFixtureBufferWithThreeLoads) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  const CommandResult removed = shell.Run("remove_buffer", {"u_b3"});
+  ASSERT_TRUE(removed.ok) << removed.message;
+  EXPECT_NE(removed.payload.find("net_restored=n_b3in"),
+            std::string::npos);
+  EXPECT_NE(removed.payload.find("net_removed=n_b3out"),
+            std::string::npos);
+  EXPECT_NE(removed.payload.find("loads_moved=3"), std::string::npos);
+  EXPECT_FALSE(database.HasInstance("u_b3"));
+  EXPECT_FALSE(database.HasNet("n_b3out"));
+  const auto restored = database.NetConnections("n_b3in");
+  EXPECT_TRUE(EcoHasConnection(restored, "u_src3", "ZN"));
+  EXPECT_TRUE(EcoHasConnection(restored, "u_b3l1", "A1"));
+  EXPECT_TRUE(EcoHasConnection(restored, "u_b3l2", "A1"));
+  EXPECT_TRUE(EcoHasConnection(restored, "u_b3l3", "A"));
+}
+
+TEST(CoreCommands, RemoveBufferUnconnectedOutputIsAPureDelete) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  const CommandResult removed =
+      shell.Run("remove_buffer", {"u_bfree"});
+  ASSERT_TRUE(removed.ok) << removed.message;
+  EXPECT_NE(removed.payload.find("loads_moved=0"), std::string::npos);
+  EXPECT_NE(removed.payload.find("net_removed=none"),
+            std::string::npos);
+  EXPECT_FALSE(database.HasInstance("u_bfree"));
+  EXPECT_EQ(database.NetCount(), 23u);
+  const auto input_net = database.NetConnections("n_bfree_in");
+  EXPECT_EQ(input_net.size(), 1u);
+  EXPECT_TRUE(EcoHasConnection(input_net, "u_src5", "ZN"));
+}
+
+TEST(CoreCommands, RemoveBufferClockBuffer) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  // Clock buffers are buffers under the shared definition.
+  const CommandResult removed =
+      shell.Run("remove_buffer", {"u_clkbuf"});
+  ASSERT_TRUE(removed.ok) << removed.message;
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  EXPECT_TRUE(EcoHasConnection(database.NetConnections("n_clk_in"),
+                               "u_cl1", "A1"));
+  EXPECT_FALSE(database.HasNet("n_clk_out"));
+}
+
+TEST(CoreCommands, RemoveBufferFailuresChangeNothing) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadEcoFixture(shell, dir);
+  db::OdbDatabase& database = *shell.ctx.timing.odb;
+  EXPECT_EQ(shell.Run("remove_buffer", {"nope"}).diag, Diag::kNotFound);
+  EXPECT_EQ(shell.Run("remove_buffer", {"u_swap"}).diag,
+            Diag::kInvalidArgument);
+  EXPECT_EQ(shell.Run("remove_buffer", {"u_ff"}).diag,
+            Diag::kInvalidArgument);
+  // An inverter is buffer-shaped but not a buffer: removing one
+  // would drop an inversion, so the identity rule refuses it.
+  const CommandResult inverter = shell.Run("remove_buffer", {"u_ld1"});
+  ASSERT_FALSE(inverter.ok);
+  EXPECT_EQ(inverter.diag, Diag::kInvalidArgument);
+  EXPECT_NE(inverter.message.find("not a buffer"), std::string::npos);
+  // A load on the output net that is a top-level port is outside
+  // the adapters' surface.
+  EXPECT_EQ(shell.Run("remove_buffer", {"u_bport"}).diag,
+            Diag::kUnsupportedFeature);
+  // Unconnected input with loads on the output: refused, and the
+  // loads stay connected to the output net.
+  EXPECT_EQ(shell.Run("remove_buffer", {"u_borphan"}).diag,
+            Diag::kInvalidArgument);
+  EXPECT_TRUE(EcoHasConnection(database.NetConnections("n_borphan_out"),
+                               "u_ol1", "A1"));
+  EXPECT_EQ(database.InstanceCount(), 36u);
+  EXPECT_EQ(database.NetCount(), 23u);
+}
+
+// A clean buffer chain on the mock library for the timing
+// invalidation test: clock, flop, buffer, flop, output.
+const char kEcoChainDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN eco_chain ;
+UNITS DISTANCE MICRONS 2000 ;
+DIEAREA ( 0 0 ) ( 50000 50000 ) ;
+COMPONENTS 3 ;
+- u_r1 EM_DFF_X1 + PLACED ( 0 0 ) N ;
+- u_buf EM_BUF_X1 + PLACED ( 4000 0 ) N ;
+- u_r2 EM_DFF_X1 + PLACED ( 8000 0 ) N ;
+END COMPONENTS
+PINS 3 ;
+- clk + NET clk_n + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- din + NET d_n + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- dout + NET q_n + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 50000 5000 ) N ;
+END PINS
+NETS 5 ;
+- clk_n ( PIN clk ) ( u_r1 CK ) ( u_r2 CK ) ;
+- d_n ( PIN din ) ( u_r1 D ) ;
+- n1 ( u_r1 Q ) ( u_buf A ) ;
+- n2 ( u_buf Z ) ( u_r2 D ) ;
+- q_n ( u_r2 Q ) ( PIN dout ) ;
+END NETS
+END DESIGN
+)DEF";
+
+TEST(CoreCommands, EcoEditClearsTimingResults) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty", {"tt", mock_dir + "/eos_mock.lib"}).ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.tlef"}).ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.lef"}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_def", {dir.Write("chain.def", kEcoChainDef)}).ok);
+  ASSERT_TRUE(shell.Run("read_sdc",
+                        {dir.Write("chain.sdc",
+                                   "create_clock -name clk -period 10 "
+                                   "[get_ports clk]\n")})
+                    .ok);
+  const CommandResult timed = shell.Run("run_timing");
+  ASSERT_TRUE(timed.ok) << timed.message;
+  ASSERT_FALSE(shell.ctx.timing.last_results.empty());
+  ASSERT_TRUE(shell.Run("timing_summary").ok);
+  // Stand-ins for a bottleneck capture's stored paths: a
+  // successful edit must clear both lists along with the results,
+  // so stale paths can never serve a later report.
+  shell.ctx.timing.last_bottleneck_setup_paths.push_back(
+      analysis::ScenePathReports{});
+  shell.ctx.timing.last_bottleneck_hold_paths.push_back(
+      analysis::ScenePathReports{});
+  const CommandResult sized =
+      shell.Run("size_cell", {"u_buf", "EM_BUF_X4"});
+  ASSERT_TRUE(sized.ok) << sized.message;
+  EXPECT_TRUE(shell.ctx.timing.last_results.empty());
+  EXPECT_TRUE(shell.ctx.timing.last_bottleneck_setup_paths.empty());
+  EXPECT_TRUE(shell.ctx.timing.last_bottleneck_hold_paths.empty());
+  const CommandResult summary = shell.Run("timing_summary");
+  ASSERT_FALSE(summary.ok);
+  EXPECT_NE(summary.message.find("no timing results"),
+            std::string::npos);
+  const CommandResult bottleneck = shell.Run("report_bottleneck");
+  ASSERT_FALSE(bottleneck.ok);
+  EXPECT_NE(bottleneck.message.find("no timing results"),
+            std::string::npos);
+}
+
 #endif
+
+// swap_cell's pin-direction refusal, on a two-cell embedded
+// library: CELLP and CELLQ carry the same pin names with the
+// directions flipped, a pair the mock library does not contain
+// (its same-name pairs agree on direction). The pin set
+// comparison, not the family rule, is what refuses this swap.
+const char kDirectionLef[] = R"LEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MANUFACTURINGGRID 0.005 ;
+SITE core
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END core
+LAYER metal1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal1
+MACRO CELLP
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Y
+END CELLP
+MACRO CELLQ
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END Y
+END CELLQ
+END LIBRARY
+)LEF";
+
+const char kDirectionDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 1 ;
+- u1 CELLP + PLACED ( 1000 1000 ) N ;
+END COMPONENTS
+PINS 2 ;
+- a + NET na + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- y + NET ny + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 2 ;
+- na ( PIN a ) ( u1 A ) ;
+- ny ( u1 Y ) ( PIN y ) ;
+END NETS
+END DESIGN
+)DEF";
+
+TEST(CoreCommands, SwapCellRejectsPinDirectionMismatch) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("read_lef", {dir.Write("cells.lef", kDirectionLef)}).ok);
+  const CommandResult loaded =
+      shell.Run("read_def", {dir.Write("top.def", kDirectionDef)});
+  ASSERT_TRUE(loaded.ok) << loaded.message;
+  // Same pin names, flipped directions: the swap would strand
+  // every connection's direction, so it is refused.
+  const CommandResult result = shell.Run("swap_cell", {"u1", "CELLQ"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidArgument);
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(shell.ctx.timing.odb->FindInstance("u1", &info));
+  EXPECT_EQ(info.master, "CELLP");
+}
 
 TEST(CoreCommands, WriteDefFailsFastWithoutMappedDesign) {
   TimingTempDir dir;

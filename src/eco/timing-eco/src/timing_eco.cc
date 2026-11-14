@@ -5,9 +5,15 @@
 // header).
 #include "eos/eco/timing_eco.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <map>
 #include <set>
 #include <utility>
 #include <vector>
+
+#include "odb/db.h"
 
 namespace eos::eco {
 namespace {
@@ -27,7 +33,149 @@ std::set<std::pair<std::string, std::pair<bool, bool>>> PinSet(
   return set;
 }
 
+// The sizing family's naming split (see the header): the stem is
+// the master name with its trailing drive digits, and one
+// trailing underscore, stripped; drive is that number, or -1 when
+// the name carries none.
+struct DriveStem {
+  std::string stem;
+  long drive = -1;  // -1: the name carries no trailing number
+};
+
+DriveStem SplitDrive(const std::string& name) {
+  std::size_t digits = 0;
+  while (digits < name.size() &&
+         name[name.size() - 1 - digits] >= '0' &&
+         name[name.size() - 1 - digits] <= '9') {
+    ++digits;
+  }
+  if (digits == 0) {
+    return DriveStem{name, -1};
+  }
+  DriveStem split;
+  split.stem = name.substr(0, name.size() - digits);
+  if (!split.stem.empty() && split.stem.back() == '_') {
+    split.stem.pop_back();
+  }
+  split.drive = std::stol(name.substr(name.size() - digits));
+  return split;
+}
+
+std::string PinSignature(const std::vector<db::OdbMasterPin>& pins) {
+  std::string signature;
+  for (const db::OdbMasterPin& pin : pins) {
+    signature += pin.name + (pin.is_input ? ":i" : "") +
+                 (pin.is_output ? ":o" : "") + ";";
+  }
+  return signature;
+}
+
+// Buffer shape: exactly two signal pins, one input-only and one
+// output-only. The same test the buffer-master derivation applies.
+bool BufferShaped(const std::vector<db::OdbMasterPin>& pins) {
+  if (pins.size() != 2) return false;
+  std::size_t inputs = 0;
+  std::size_t outputs = 0;
+  for (const db::OdbMasterPin& pin : pins) {
+    if (pin.is_input && !pin.is_output) ++inputs;
+    if (pin.is_output && !pin.is_input) ++outputs;
+  }
+  return inputs == 1 && outputs == 1;
+}
+
+bool StemNamesBuffer(const std::string& master) {
+  std::string lower = SplitDrive(master).stem;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return lower.find("buf") != std::string::npos;
+}
+
+struct CandidateSets {
+  std::vector<std::vector<std::string>> families;
+  std::vector<std::string> buffer_masters;
+};
+
+// One pass over the library deriving both candidate sets, so the
+// two queries below and the closure's derivation can never drift.
+CandidateSets DeriveCandidates(const db::OdbDatabase& database) {
+  CandidateSets sets;
+  std::map<std::string, std::vector<std::pair<long, std::string>>> groups;
+  for (const std::string& master : database.MasterNames()) {
+    const std::vector<db::OdbMasterPin> pins = database.MasterPins(master);
+    if (pins.empty()) {
+      continue;
+    }
+    const DriveStem split = SplitDrive(master);
+    groups[split.stem + "|" + PinSignature(pins)].push_back(
+        {split.drive, master});
+    if (BufferShaped(pins) && StemNamesBuffer(master)) {
+      sets.buffer_masters.push_back(master);
+    }
+  }
+  for (auto& entry : groups) {
+    std::vector<std::pair<long, std::string>>& members = entry.second;
+    if (members.size() < 2) {
+      continue;
+    }
+    std::sort(members.begin(), members.end());
+    std::vector<std::string> family;
+    for (const auto& member : members) {
+      family.push_back(member.second);
+    }
+    sets.families.push_back(std::move(family));
+  }
+  std::sort(sets.buffer_masters.begin(), sets.buffer_masters.end(),
+            [](const std::string& a, const std::string& b) {
+              const long da = SplitDrive(a).drive;
+              const long db = SplitDrive(b).drive;
+              if (da != db) return da > db;
+              return a < b;
+            });
+  return sets;
+}
+
+// The placement site grid of one master, through the facade's
+// raw-database accessor (the header of odb.h reserves it for L4
+// engine modules): the site the master's LEF names, in database
+// units. False when the master or its site cannot be read, in
+// which case the caller places unsnapped.
+bool MasterSiteSize(const db::OdbDatabase& database,
+                    const std::string& master, int* width, int* height) {
+  odb::dbDatabase* raw = database.RawDatabase();
+  if (raw == nullptr) return false;
+  for (odb::dbLib* lib : raw->getLibs()) {
+    odb::dbMaster* found = lib->findMaster(master.c_str());
+    if (found == nullptr) continue;
+    odb::dbSite* site = found->getSite();
+    if (site == nullptr) return false;
+    *width = static_cast<int>(site->getWidth());
+    *height = static_cast<int>(site->getHeight());
+    return *width > 0 && *height > 0;
+  }
+  return false;
+}
+
+long SnapToGrid(long value, int grid) {
+  if (grid <= 0) return value;
+  return std::lround(static_cast<double>(value) / grid) * grid;
+}
+
 }  // namespace
+
+std::vector<std::vector<std::string>> SizingFamilies(
+    const db::OdbDatabase& database) {
+  return DeriveCandidates(database).families;
+}
+
+std::vector<std::string> BufferMasters(const db::OdbDatabase& database) {
+  return DeriveCandidates(database).buffer_masters;
+}
+
+bool IsBufferMaster(const db::OdbDatabase& database,
+                    const std::string& master) {
+  return BufferShaped(database.MasterPins(master)) &&
+         StemNamesBuffer(master);
+}
 
 Status ResizeInstance(db::OdbDatabase& database, const std::string& instance,
                       const std::string& new_master) {
@@ -58,6 +206,19 @@ Status InsertBuffer(db::OdbDatabase& database, const std::string& net_name,
                     const std::string& buffer_master,
                     const std::string& new_instance_name,
                     const std::string& new_net_name) {
+  return InsertBuffer(database, net_name, buffer_master, new_instance_name,
+                      new_net_name, 0.0);
+}
+
+Status InsertBuffer(db::OdbDatabase& database, const std::string& net_name,
+                    const std::string& buffer_master,
+                    const std::string& new_instance_name,
+                    const std::string& new_net_name, double position) {
+  if (!(position >= 0.0 && position <= 1.0)) {
+    return Status::Error(ErrorCode::kOutOfRange,
+                         "buffer position is outside [0, 1]: " +
+                             std::to_string(position));
+  }
   if (!database.HasNet(net_name)) {
     return NotFound("net", net_name);
   }
@@ -157,12 +318,49 @@ Status InsertBuffer(db::OdbDatabase& database, const std::string& net_name,
     return NotFound("driver instance", driver->instance);
   }
 
-  // The edit itself. The new buffer sits at the driver instance's
-  // location (the disclosed v1 placement simplification).
+  // The buffer's placement (the header's -position rule): at the
+  // driver instance's location for position 0; above 0, the point
+  // interpolated from the driver's location toward the centroid
+  // of the loads' locations, snapped to the buffer master's site
+  // grid. With no readable load location the buffer follows the
+  // driver, as at position 0.
+  int place_x = driver_info.x;
+  int place_y = driver_info.y;
+  if (position > 0.0) {
+    double centroid_x = 0.0;
+    double centroid_y = 0.0;
+    std::size_t located = 0;
+    for (const db::OdbNetConnection& load : loads) {
+      db::OdbInstanceInfo load_info;
+      if (!database.FindInstance(load.instance, &load_info)) continue;
+      centroid_x += load_info.x;
+      centroid_y += load_info.y;
+      ++located;
+    }
+    if (located > 0) {
+      centroid_x /= static_cast<double>(located);
+      centroid_y /= static_cast<double>(located);
+      long x = std::lround(driver_info.x +
+                           position * (centroid_x - driver_info.x));
+      long y = std::lround(driver_info.y +
+                           position * (centroid_y - driver_info.y));
+      int site_width = 0;
+      int site_height = 0;
+      if (MasterSiteSize(database, buffer_master, &site_width,
+                         &site_height)) {
+        x = SnapToGrid(x, site_width);
+        y = SnapToGrid(y, site_height);
+      }
+      place_x = static_cast<int>(x);
+      place_y = static_cast<int>(y);
+    }
+  }
+
+  // The edit itself.
   Status status = database.CreateNet(new_net_name);
   if (!status.ok()) return status;
   status = database.CreateInstance(new_instance_name, buffer_master,
-                                   driver_info.x, driver_info.y);
+                                   place_x, place_y);
   if (!status.ok()) return status;
   status = database.ConnectInstancePin(new_instance_name, input_pin,
                                        net_name);
@@ -175,6 +373,92 @@ Status InsertBuffer(db::OdbDatabase& database, const std::string& net_name,
     if (!status.ok()) return status;
     status = database.ConnectInstancePin(load.instance, load.pin,
                                          new_net_name);
+    if (!status.ok()) return status;
+  }
+  return Status::Ok();
+}
+
+Status RemoveBuffer(db::OdbDatabase& database, const std::string& instance) {
+  db::OdbInstanceInfo info;
+  if (!database.FindInstance(instance, &info)) {
+    return NotFound("instance", instance);
+  }
+  if (!IsBufferMaster(database, info.master)) {
+    return Status::Error(
+        ErrorCode::kInvalidArgument,
+        "instance " + instance + " is a " + info.master +
+            ", not a buffer: remove_buffer removes an instance whose "
+            "master is buffer-shaped (exactly one input and one "
+            "output signal pin) with \"buf\" in its name stem");
+  }
+  // The buffer's two pins, by the identity rule exactly one input
+  // and one output.
+  std::string input_pin;
+  std::string output_pin;
+  for (const db::OdbMasterPin& pin : database.MasterPins(info.master)) {
+    if (pin.is_input && !pin.is_output) input_pin = pin.name;
+    if (pin.is_output && !pin.is_input) output_pin = pin.name;
+  }
+
+  // Locate the two nets before touching anything: the net holding
+  // the buffer's input pin, and the net its output pin drives.
+  std::string in_net;
+  std::string out_net;
+  for (const std::string& net : database.NetNames()) {
+    for (const db::OdbNetConnection& connection :
+         database.NetConnections(net)) {
+      if (connection.is_port || connection.instance != instance) {
+        continue;
+      }
+      if (connection.pin == input_pin) in_net = net;
+      if (connection.pin == output_pin) out_net = net;
+    }
+  }
+  std::vector<db::OdbNetConnection> out_loads;
+  if (!out_net.empty()) {
+    for (const db::OdbNetConnection& connection :
+         database.NetConnections(out_net)) {
+      if (!connection.is_driver) out_loads.push_back(connection);
+    }
+  }
+  if (!in_net.empty() && in_net == out_net) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "buffer " + instance +
+                             " has its input and output on the same "
+                             "net " +
+                             in_net + "; there is no split to invert");
+  }
+  for (const db::OdbNetConnection& load : out_loads) {
+    if (load.is_port) {
+      return Status::Error(
+          ErrorCode::kUnsupported,
+          "net " + out_net +
+              " drives a top-level port; v1 removal moves instance "
+              "loads only");
+    }
+  }
+  if (in_net.empty() && !out_loads.empty()) {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "buffer " + instance +
+                             " has no input connection: removing it "
+                             "would orphan the loads on " +
+                             out_net);
+  }
+
+  // The edit itself: the output net's loads move to the input
+  // net, the buffer is deleted, and the output net, left with no
+  // connections, is deleted with it.
+  for (const db::OdbNetConnection& load : out_loads) {
+    Status status =
+        database.DisconnectInstancePin(load.instance, load.pin);
+    if (!status.ok()) return status;
+    status = database.ConnectInstancePin(load.instance, load.pin, in_net);
+    if (!status.ok()) return status;
+  }
+  Status status = database.DeleteInstance(instance);
+  if (!status.ok()) return status;
+  if (!out_net.empty()) {
+    status = database.DeleteNet(out_net);
     if (!status.ok()) return status;
   }
   return Status::Ok();

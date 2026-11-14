@@ -711,6 +711,7 @@
         "signoff",
         "sta",
         "timing",
+        "timing-eco",
         "waivers",
         "yosys"
       ],
@@ -808,6 +809,10 @@
           "include"
         ],
         "timing": [
+          "cmake-link",
+          "include"
+        ],
+        "timing-eco": [
           "cmake-link",
           "include"
         ],

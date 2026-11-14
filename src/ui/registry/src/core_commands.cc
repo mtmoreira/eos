@@ -17,6 +17,7 @@
 #include "eos/pv/signoff.h"
 #include "eos/db/odb.h"
 #include "eos/db/waivers.h"
+#include "eos/eco/timing_eco.h"
 #include "odb/db.h"
 #include "eos/session/flow.h"
 #include "eos/synth/abc.h"
@@ -2022,103 +2023,20 @@ std::string RenderPathReport(const analysis::PathReport& report,
   return out;
 }
 
-// The closure loop's candidate knowledge, derived from the
-// database's master list (Phase 2 unit 2.5). Drive strength is a
-// Liberty fact the ODB facade does not carry, so the command
-// layer derives the sizing families from the master naming
-// convention the libraries in scope follow: masters that share a
-// stem and a signal pin set, differing only in a trailing drive
-// number (BUF_X1 and BUF_X2, sky130_fd_sc_hd__buf_1 and _buf_2),
-// form one family ordered by that number. The derivation is a
-// naming heuristic and is stated as such: the L5 service takes
-// the families as given and validates their pin sets, and a
-// library whose variants do not follow the convention yields
-// fewer families, never wrong ones the pin check would not catch.
-// Buffer masters are the buffer-shaped masters (exactly one
-// input and one output signal pin) whose stem names a buffer,
-// strongest first.
-struct DriveStem {
-  std::string stem;
-  long drive = -1;  // -1: the name carries no trailing number
-};
-
-DriveStem SplitDrive(const std::string& name) {
-  std::size_t digits = 0;
-  while (digits < name.size() &&
-         name[name.size() - 1 - digits] >= '0' &&
-         name[name.size() - 1 - digits] <= '9') {
-    ++digits;
-  }
-  if (digits == 0) {
-    return DriveStem{name, -1};
-  }
-  DriveStem split;
-  split.stem = name.substr(0, name.size() - digits);
-  if (!split.stem.empty() && split.stem.back() == '_') {
-    split.stem.pop_back();
-  }
-  split.drive = std::stol(name.substr(name.size() - digits));
-  return split;
-}
-
-std::string PinSignature(const std::vector<db::OdbMasterPin>& pins) {
-  std::string signature;
-  for (const db::OdbMasterPin& pin : pins) {
-    signature += pin.name + (pin.is_input ? ":i" : "") +
-                 (pin.is_output ? ":o" : "") + ";";
-  }
-  return signature;
-}
-
+// The closure loop's candidate knowledge (Phase 2 unit 2.5):
+// the sizing families and buffer masters of the database's
+// library. The derivation itself lives with the ECO adapters
+// (eos::eco::SizingFamilies and eos::eco::BufferMasters in
+// src/eco/timing-eco), so the closure here and the manual
+// per-cell edit commands share one definition by construction
+// rather than by copy; this wrapper keeps the closure call site
+// in the shape the L5 service consumes.
 void DeriveClosureCandidates(
     const db::OdbDatabase& database,
     std::vector<std::vector<std::string>>* families,
     std::vector<std::string>* buffer_masters) {
-  std::map<std::string, std::vector<std::pair<long, std::string>>> groups;
-  for (const std::string& master : database.MasterNames()) {
-    const std::vector<db::OdbMasterPin> pins = database.MasterPins(master);
-    if (pins.empty()) {
-      continue;
-    }
-    const DriveStem split = SplitDrive(master);
-    groups[split.stem + "|" + PinSignature(pins)].push_back(
-        {split.drive, master});
-    bool buffer_shaped = pins.size() == 2;
-    if (buffer_shaped) {
-      std::size_t inputs = 0;
-      std::size_t outputs = 0;
-      for (const db::OdbMasterPin& pin : pins) {
-        if (pin.is_input && !pin.is_output) ++inputs;
-        if (pin.is_output && !pin.is_input) ++outputs;
-      }
-      buffer_shaped = inputs == 1 && outputs == 1;
-    }
-    std::string lower = split.stem;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    if (buffer_shaped && lower.find("buf") != std::string::npos) {
-      buffer_masters->push_back(master);
-    }
-  }
-  for (auto& entry : groups) {
-    std::vector<std::pair<long, std::string>>& members = entry.second;
-    if (members.size() < 2) {
-      continue;
-    }
-    std::sort(members.begin(), members.end());
-    std::vector<std::string> family;
-    for (const auto& member : members) {
-      family.push_back(member.second);
-    }
-    families->push_back(std::move(family));
-  }
-  std::sort(buffer_masters->begin(), buffer_masters->end(),
-            [](const std::string& a, const std::string& b) {
-              const long da = SplitDrive(a).drive;
-              const long db = SplitDrive(b).drive;
-              if (da != db) return da > db;
-              return a < b;
-            });
+  *families = eco::SizingFamilies(database);
+  *buffer_masters = eco::BufferMasters(database);
 }
 
 // ---- SDC command family (Immediate unit 3) -------------------------
@@ -14502,6 +14420,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
       });
 
   RegisterRepairCommands(registry);
+  RegisterEcoCommands(registry);
   RegisterGuiShowCommand(registry);
 }
 

@@ -1,11 +1,13 @@
 // timing-eco: the v1 timing ECO adapters (L4 engines).
 //
-// Two function-preserving edits, both meant to run inside an ECO
+// Three function-preserving edits, meant to run inside an ECO
 // transaction (src/eco/transactions), which supplies the
 // checkpoint, the all-scene re-analysis and the commit or roll
 // back decision. Called outside a transaction an adapter that
 // fails midway can leave the edits it already made in place; the
-// transaction is what makes an edit atomic.
+// transaction is what makes an edit atomic. (The registry's
+// per-cell edit commands call them directly, as manual edits the
+// user named exactly; see src/ui/registry/src/eco_commands.cc.)
 //
 // - ResizeInstance swaps one instance to another drive variant of
 //   the same cell: the two masters must carry the same signal pins
@@ -20,17 +22,25 @@
 //   its input, per its Liberty function); the adapter checks the
 //   cell's shape (exactly one input and one output signal pin),
 //   not its logic function, and says so here.
+// - RemoveBuffer is InsertBuffer's exact inverse: every load on
+//   the buffer's output net reconnects to the net on its input
+//   pin, and the buffer instance and its output net are deleted.
 //
 // Disclosed simplifications (also for the phase exit report):
-// - An inserted buffer is placed at its driver instance's
-//   location. No placement legalization runs in v1; the designs in
-//   scope have room at that location by construction, and a real
-//   legalizer is physical-design work, not ECO work.
+// - An inserted buffer is placed by the -position rule of the
+//   six-argument InsertBuffer: at its driver instance's location
+//   by default (position 0), interpolating toward the centroid
+//   of the loads' locations as position rises to 1, snapped to
+//   the buffer master's placement site grid. No placement
+//   legalization runs in v1; the designs in scope have room at
+//   that location by construction, and a real legalizer is
+//   physical-design work, not ECO work.
 // - Buffering a net whose driver is a top-level port, or whose
 //   loads include a top-level port, is refused (kUnsupported):
 //   port connections live outside the instance-pin surface the
 //   adapters move. Instance-driven, instance-loaded nets are the
-//   v1 scope.
+//   v1 scope. RemoveBuffer refuses the symmetric case (a load on
+//   the output net that is a top-level port).
 //
 // This header is a stable surface.
 #ifndef EOS_ECO_TIMING_ECO_H_
@@ -67,6 +77,72 @@ Status InsertBuffer(db::OdbDatabase& database, const std::string& net_name,
                     const std::string& buffer_master,
                     const std::string& new_instance_name,
                     const std::string& new_net_name);
+
+// InsertBuffer with the buffer placed along the segment from the
+// driver instance's location (position 0) to the centroid of the
+// loads' locations (position 1): the placed point is
+// driver + position * (centroid - driver), snapped to the buffer
+// master's placement site grid so the buffer lands legally
+// placed. When no load location can be read the buffer follows
+// the driver, as at position 0. A position outside [0, 1] fails
+// with kOutOfRange before anything is checked or changed. The
+// five-argument form above is this function at position 0.
+Status InsertBuffer(db::OdbDatabase& database, const std::string& net_name,
+                    const std::string& buffer_master,
+                    const std::string& new_instance_name,
+                    const std::string& new_net_name, double position);
+
+// Removes one buffer instance: every load on the buffer's output
+// net reconnects to the net on its input pin, the instance is
+// deleted, and the output net, left with no connections, is
+// deleted with it: the exact inverse of InsertBuffer's split, at
+// any fanout. Buffer identity is the shared rule of
+// IsBufferMaster below, so an inverter (buffer-shaped, but its
+// stem names no buffer) is refused rather than dropped with its
+// inversion. Fails with kNotFound for an unknown instance, with
+// kInvalidArgument when the instance's master is not a buffer,
+// when the input pin is unconnected while the output net has
+// loads (removal would orphan them), or when input and output
+// sit on the same net, and with kUnsupported when a load on the
+// output net is a top-level port. A buffer whose output pin is
+// unconnected drives nothing: removing it is a pure instance
+// delete and succeeds.
+Status RemoveBuffer(db::OdbDatabase& database, const std::string& instance);
+
+// ---------------------------------------------------------------------------
+// The closure loop's candidate knowledge (Phase 2 unit 2.5),
+// factored here from the registry's command layer so the manual
+// per-cell edit commands and the automatic closure share one
+// definition by construction rather than by copy.
+//
+// Drive strength is a Liberty fact the ODB facade does not carry,
+// so the sizing families are derived from the master naming
+// convention the libraries in scope follow: masters that share a
+// stem (the name with its trailing drive digits, and one trailing
+// underscore, stripped) and an identical signal pin signature,
+// differing only in a trailing drive number (BUF_X1 and BUF_X2,
+// sky130_fd_sc_hd__buf_1 and _buf_2), form one family ordered by
+// that number. The derivation is a naming heuristic and is stated
+// as such: the closure service takes the families as given and
+// validates their pin sets, and a library whose variants do not
+// follow the convention yields fewer families, never wrong ones
+// the pin check would not catch.
+
+// The sizing families of the database's library: only groups of
+// at least two masters are families, each sorted by drive.
+std::vector<std::vector<std::string>> SizingFamilies(
+    const db::OdbDatabase& database);
+
+// The buffer masters of the database's library: buffer-shaped
+// masters (exactly one input and one output signal pin) whose
+// stem names a buffer ("buf", case-insensitive), strongest first.
+std::vector<std::string> BufferMasters(const db::OdbDatabase& database);
+
+// Whether master is a buffer under the BufferMasters rule:
+// buffer-shaped, with "buf" in its name stem. An unknown master
+// (no pins) is not a buffer.
+bool IsBufferMaster(const db::OdbDatabase& database,
+                    const std::string& master);
 
 // ---------------------------------------------------------------------------
 // Resynthesis (Phase 2 unit 2.6): the third adapter, and the first
