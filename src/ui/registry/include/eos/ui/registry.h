@@ -481,6 +481,12 @@ class CommandRegistry {
 // eos::set_wire_rc); called from RegisterCoreCommands.
 void RegisterRepairCommands(CommandRegistry& registry);
 
+// Registers the per-cell ECO edit command set (eos::size_cell,
+// eos::swap_cell, eos::insert_buffer, eos::remove_buffer): direct
+// manual edits on the live session database through the timing
+// ECO adapters; called from RegisterCoreCommands.
+void RegisterEcoCommands(CommandRegistry& registry);
+
 // Registers eos::gui_show; called from RegisterCoreCommands.
 // In a GUI process (RunGui installs a handler with
 // SetGuiShowHandler) it shows the running viewer; otherwise it

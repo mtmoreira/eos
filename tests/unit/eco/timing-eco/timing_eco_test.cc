@@ -482,6 +482,182 @@ TEST(TimingEco, BufferInsertionImprovesSlackOnAHighFanoutNet) {
   EXPECT_GT(after, before);
 }
 
+// ---------------------------------------------------------------------------
+// RemoveBuffer and the shared candidate derivation (per-cell edit
+// commands unit). RemoveBuffer is InsertBuffer's exact inverse,
+// and the sizing families and buffer masters the closure used to
+// derive in the registry's command layer live in timing-eco now,
+// shared with the manual edit commands by construction.
+
+const char kBufferChainDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 4 ;
+- r1 DFF + PLACED ( 1000 1000 ) N ;
+- u_free BUF_X1 + PLACED ( 2000 1000 ) N ;
+- u_orphan BUF_X1 + PLACED ( 3000 1000 ) N ;
+- r2 DFF + PLACED ( 4000 1000 ) N ;
+END COMPONENTS
+PINS 2 ;
+- clk + NET clk + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- d + NET d + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+END PINS
+NETS 4 ;
+- clk ( PIN clk ) ( r1 CK ) ( r2 CK ) ;
+- d ( PIN d ) ( r1 D ) ;
+- n1 ( r1 Q ) ( u_free A ) ;
+- n2 ( u_orphan Y ) ( r2 D ) ;
+END NETS
+END DESIGN
+)DEF";
+
+const char kPortBufDef[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 2 ;
+- r1 DFF + PLACED ( 1000 1000 ) N ;
+- u1 BUF_X1 + PLACED ( 2000 1000 ) N ;
+END COMPONENTS
+PINS 3 ;
+- clk + NET clk + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- d + NET d + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- q + NET q + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 4 ;
+- clk ( PIN clk ) ( r1 CK ) ;
+- d ( PIN d ) ( r1 D ) ;
+- n1 ( r1 Q ) ( u1 A ) ;
+- q ( u1 Y ) ( PIN q ) ;
+END NETS
+END DESIGN
+)DEF";
+
+TEST(TimingEco, RemoveBufferRestoresTheOriginalNet) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadFixture(db, dir, kDef);
+  ASSERT_TRUE(RemoveBuffer(db, "u1").ok());
+  EXPECT_EQ(db.InstanceCount(), 2u);
+  EXPECT_EQ(db.NetCount(), 4u);
+  EXPECT_FALSE(db.HasNet("n2"));
+  const auto restored = db.NetConnections("n1");
+  EXPECT_TRUE(HasConnection(restored, "r1", "Q"));
+  EXPECT_TRUE(HasConnection(restored, "r2", "D"));
+  db::OdbInstanceInfo info;
+  EXPECT_FALSE(db.FindInstance("u1", &info));
+}
+
+TEST(TimingEco, RemoveBufferInvertsInsertBufferExactly) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadFixture(db, dir, kFanoutDef);
+  const auto before = db.NetConnections("wide");
+  ASSERT_TRUE(InsertBuffer(db, "wide", "BUF_X4", "u_buf", "wide_buf").ok());
+  ASSERT_TRUE(RemoveBuffer(db, "u_buf").ok());
+  EXPECT_EQ(db.InstanceCount(), 9u);
+  EXPECT_EQ(db.NetCount(), 3u);
+  EXPECT_FALSE(db.HasNet("wide_buf"));
+  const auto after = db.NetConnections("wide");
+  ASSERT_EQ(after.size(), before.size());
+  for (const db::OdbNetConnection& connection : before) {
+    EXPECT_TRUE(HasConnection(after, connection.instance, connection.pin));
+  }
+}
+
+TEST(TimingEco, RemoveBufferRejectsUnknownAndNonBufferInstances) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadFixture(db, dir, kDef);
+  EXPECT_EQ(RemoveBuffer(db, "nope").code(), ErrorCode::kNotFound);
+  // r1 is a flip-flop: not a buffer under the shared identity
+  // rule, and refusing it changes nothing.
+  EXPECT_EQ(RemoveBuffer(db, "r1").code(), ErrorCode::kInvalidArgument);
+  EXPECT_EQ(db.InstanceCount(), 3u);
+  EXPECT_EQ(db.NetCount(), 5u);
+}
+
+TEST(TimingEco, RemoveBufferHandlesUnconnectedPins) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadFixture(db, dir, kBufferChainDef);
+  // u_orphan's input pin is unconnected while its output drives
+  // r2: removal would orphan the load, so it is refused and the
+  // load stays exactly where it was.
+  EXPECT_EQ(RemoveBuffer(db, "u_orphan").code(),
+            ErrorCode::kInvalidArgument);
+  EXPECT_TRUE(HasConnection(db.NetConnections("n2"), "r2", "D"));
+  EXPECT_EQ(db.InstanceCount(), 4u);
+  // u_free's output pin is unconnected: it drives nothing, so
+  // removal is a pure instance delete; its input net keeps its
+  // driver.
+  ASSERT_TRUE(RemoveBuffer(db, "u_free").ok());
+  EXPECT_EQ(db.InstanceCount(), 3u);
+  EXPECT_TRUE(db.HasNet("n1"));
+  EXPECT_TRUE(HasConnection(db.NetConnections("n1"), "r1", "Q"));
+}
+
+TEST(TimingEco, RemoveBufferRefusesPortLoads) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadFixture(db, dir, kPortBufDef);
+  // The buffer's output net drives the top-level port q: port
+  // connections are outside the surface the adapters move.
+  EXPECT_EQ(RemoveBuffer(db, "u1").code(), ErrorCode::kUnsupported);
+  EXPECT_EQ(db.InstanceCount(), 2u);
+  EXPECT_TRUE(HasConnection(db.NetConnections("q"), "u1", "Y"));
+}
+
+TEST(TimingEco, InsertBufferPositionInterpolatesAndSnaps) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadFixture(db, dir, kDef);
+  // n1 runs from r1 at (1000, 1000) to its one load u1 at
+  // (2000, 1000). The fixture site grid is 460 by 2720, so the
+  // interpolated points snap to its multiples: position 0.5
+  // interpolates to (1500, 1000) and snaps to (1380, 0);
+  // position 1 is the load centroid (2000, 1000), snapping to
+  // (1840, 0). Position 0 stays the shipped behavior, the
+  // driver's exact location, unsnapped.
+  ASSERT_TRUE(InsertBuffer(db, "n1", "BUF_X4", "u_mid", "n1_mid", 0.5).ok());
+  db::OdbInstanceInfo info;
+  ASSERT_TRUE(db.FindInstance("u_mid", &info));
+  EXPECT_EQ(info.x, 1380);
+  EXPECT_EQ(info.y, 0);
+  ASSERT_TRUE(RemoveBuffer(db, "u_mid").ok());
+  ASSERT_TRUE(InsertBuffer(db, "n1", "BUF_X4", "u_far", "n1_far", 1.0).ok());
+  ASSERT_TRUE(db.FindInstance("u_far", &info));
+  EXPECT_EQ(info.x, 1840);
+  EXPECT_EQ(info.y, 0);
+  EXPECT_EQ(InsertBuffer(db, "n1", "BUF_X4", "u_bad", "n1_bad", 1.5).code(),
+            ErrorCode::kOutOfRange);
+  EXPECT_EQ(InsertBuffer(db, "n1", "BUF_X4", "u_bad", "n1_bad", -0.5)
+                .code(),
+            ErrorCode::kOutOfRange);
+}
+
+TEST(TimingEco, CandidateDerivationIsShared) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadFixture(db, dir, kDef);
+  const std::vector<std::vector<std::string>> families =
+      SizingFamilies(db);
+  ASSERT_EQ(families.size(), 1u);
+  EXPECT_EQ(families[0],
+            std::vector<std::string>({"BUF_X1", "BUF_X2", "BUF_X4"}));
+  EXPECT_EQ(BufferMasters(db),
+            std::vector<std::string>({"BUF_X4", "BUF_X2", "BUF_X1"}));
+  EXPECT_TRUE(IsBufferMaster(db, "BUF_X1"));
+  EXPECT_FALSE(IsBufferMaster(db, "DFF"));
+  EXPECT_FALSE(IsBufferMaster(db, "WIDE"));
+  EXPECT_FALSE(IsBufferMaster(db, "NOPE"));
+}
+
 }  // namespace
 }  // namespace eos::eco
 
