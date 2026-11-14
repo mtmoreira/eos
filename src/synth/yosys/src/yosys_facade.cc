@@ -1078,6 +1078,7 @@ Result<YosysEngine::YosysDesignTotals> YosysEngine::DesignTotals() {
     return InvalidState("Yosys engine does not own the Yosys session");
   }
   YosysDesignTotals totals;
+  std::map<std::string, int> by_type;
   for (const auto& entry : Yosys::yosys_design->modules_) {
     const YosysNetlistStats stats = ComputeStats(entry.second);
     totals.cell_count += stats.cell_count;
@@ -1085,6 +1086,17 @@ Result<YosysEngine::YosysDesignTotals> YosysEngine::DesignTotals() {
     if (stats.logic_depth > totals.logic_depth) {
       totals.logic_depth = stats.logic_depth;
     }
+    for (const YosysCellTypeCount& type_count : stats.cells_by_type) {
+      // The totals name types unescaped (leaf, EM_DFFR_X1),
+      // the form a caller matches against; the per-module
+      // stats keep the raw RTLIL spelling, as they always have.
+      by_type[Yosys::RTLIL::unescape_id(type_count.type)] +=
+          type_count.count;
+    }
+  }
+  for (const auto& entry : by_type) {
+    totals.cells_by_type.push_back(
+        YosysCellTypeCount{entry.first, entry.second});
   }
   return totals;
 }
@@ -1269,6 +1281,196 @@ Status YosysEngine::AigMap() {
   const Status techmap = RunPass("techmap");
   if (!techmap.ok()) return techmap;
   return RunPass("aigmap");
+}
+
+// The fine sequential shapes DffLibMap maps (synth_map
+// sequential design doc, section 4): a positive-edge flop with
+// no reset, an asynchronous reset of either polarity to either
+// value, or a latch of either enable polarity. Everything
+// these seven shapes' families also contain (negedge clocks,
+// clock enables, synchronous resets, set/reset, async loads,
+// latches with reset) is refused by name before the pass runs,
+// because dfflegalize would otherwise convert some of them by
+// changing the design's meaning ahead of CTS (an inverter in
+// the clock path, a feedback mux for an enable).
+bool IsMappableSequentialShape(const std::string& type) {
+  static const char* kShapes[] = {"$_DFF_P_",   "$_DFF_PP0_", "$_DFF_PN0_",
+                                  "$_DFF_PN1_", "$_DFF_PP1_", "$_DLATCH_P_",
+                                  "$_DLATCH_N_"};
+  for (const char* shape : kShapes) {
+    if (type == shape) return true;
+  }
+  return false;
+}
+
+// Cell types that carry state, for DffLibMap's screen and
+// remainder checks: IsSequentialCell's prefix set, plus the
+// families it does not cover (async-load flops in coarse and
+// fine form, coarse latches), so no survivor can hide under a
+// name IsSequentialCell does not know.
+bool IsSequentialType(const std::string& type) {
+  if (IsSequentialCell(type)) return true;
+  static const char* kPrefixes[] = {"$_ALDFF", "$aldff", "$adlatch",
+                                    "$dlatch", "$dlatchsr"};
+  for (const char* prefix : kPrefixes) {
+    if (type.compare(0, std::string(prefix).size(), prefix) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The live design's sequential cells, counted by type, sorted
+// by type name (the map's iteration order).
+std::map<std::string, int> SequentialCellsByType() {
+  std::map<std::string, int> by_type;
+  if (Yosys::yosys_design == nullptr) return by_type;
+  for (const auto& entry : Yosys::yosys_design->modules_) {
+    for (const auto& cell_entry : entry.second->cells_) {
+      const std::string type = cell_entry.second->type.str();
+      if (IsSequentialType(type)) ++by_type[type];
+    }
+  }
+  return by_type;
+}
+
+// "type xN, type xM" for a by-type count map, in name order.
+std::string SequentialCountsText(
+    const std::map<std::string, int>& by_type) {
+  std::string text;
+  for (const auto& entry : by_type) {
+    if (!text.empty()) text += ", ";
+    text += entry.first + " x" + std::to_string(entry.second);
+  }
+  return text;
+}
+
+// The tier 2 screen's verdict (design doc section 3): Ok when
+// every sequential shape in the live design is in the mappable
+// set, else kUnsupported naming each refused type and count.
+// The shapes are judged by name before any mapping pass runs,
+// so a refused shape is never silently legalized into a
+// different design. Callers run AigMap first, so the shapes
+// seen here are the fine forms techmap produced; a coarse
+// survivor is refused under its own name by the same rule.
+Status RefuseIfUnmappableSequentialShapes() {
+  std::map<std::string, int> refused;
+  for (const auto& entry : SequentialCellsByType()) {
+    if (!IsMappableSequentialShape(entry.first)) {
+      refused.insert(entry);
+    }
+  }
+  if (refused.empty()) return Status::Ok();
+  return Status::Error(
+      ErrorCode::kUnsupported,
+      "sequential cell type(s) with no mapped form: " +
+          SequentialCountsText(refused) +
+          "; synth_map maps positive-edge flops (plain or "
+          "asynchronous reset) and latches only, and refuses "
+          "negedge-clock, clock-enable, synchronous-reset, "
+          "set/reset, and async-load shapes by name");
+}
+
+Status YosysEngine::ScreenSequentialShapes() {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  return RefuseIfUnmappableSequentialShapes();
+}
+
+Status YosysEngine::DffLibMap(const std::string& liberty_path) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  {
+    std::ifstream in(liberty_path);
+    if (!in.good()) {
+      return IoError("cannot read Liberty file", liberty_path);
+    }
+  }
+  {
+    const Status screen = RefuseIfUnmappableSequentialShapes();
+    if (!screen.ok()) return screen;
+  }
+  const Status mapped = RunPass("dfflibmap -liberty " + liberty_path);
+  if (!mapped.ok()) return mapped;
+  // The backstop: no sequential cell may remain. A shape the
+  // screen misjudged, or one dfflibmap could not place in this
+  // library, is still a refusal naming the type, never a
+  // mapped netlist with a silent hole.
+  const std::map<std::string, int> remaining = SequentialCellsByType();
+  if (!remaining.empty()) {
+    return Status::Error(
+        ErrorCode::kUnsupported,
+        "dfflibmap left sequential cell(s) unmapped: " +
+            SequentialCountsText(remaining) +
+            "; the library holds no cell for this shape");
+  }
+  return Status::Ok();
+}
+
+Status YosysEngine::AbcLibertyMap(const std::string& liberty_path,
+                                  const std::string& target) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  if (target != "delay" && target != "area") {
+    return InvalidArgument("unknown mapping target: " + target);
+  }
+  {
+    std::ifstream in(liberty_path);
+    if (!in.good()) {
+      return IoError("cannot read Liberty file", liberty_path);
+    }
+  }
+  // The pass's sequential mapping configuration (abc.cc): with
+  // -dff, each clock domain's fine flops are extracted, passed
+  // through ABC as latches, and written back as fine flops;
+  // with -liberty, ABC maps the combinational cloud to the
+  // Liberty's cells (in this in-process build the pass hands
+  // the Liberty to ABC's own read_lib). The delay target takes
+  // the pass's default mapping script. The pass has no area
+  // knob, so the area target names a script instead: the
+  // classic mapper's area form, the steps AbcEngine's own
+  // MapTechnology runs with map -a in place of map. Script
+  // commands are separated by semicolons, not commas: the
+  // pass turns commas in a +-script into blanks (they separate
+  // a command's arguments), so a comma-separated command list
+  // reaches ABC as one command with ignored arguments and the
+  // mapping silently never runs (measured on the clocked
+  // design: the netlist came back strashed but unmapped, as
+  // $lut cells).
+  std::string pass = "abc -dff -liberty " + liberty_path;
+  if (target == "area") {
+    pass += " -script +strash;rewrite;balance;map,-a";
+  }
+  // Running ABC in process writes an abc.history file into the
+  // working directory, as in AbcDff: remove the one this call
+  // creates, and never touch one that was already there.
+  const std::filesystem::path history =
+      std::filesystem::current_path() / "abc.history";
+  std::error_code ec;
+  const bool history_existed = std::filesystem::exists(history, ec);
+  const Status ran = RunPass(pass);
+  if (!history_existed) {
+    std::error_code remove_ec;
+    std::filesystem::remove(history, remove_ec);
+  }
+  return ran;
+}
+
+Status YosysEngine::WriteMappedVerilog(const std::string& path) {
+  if (!owns_) {
+    return InvalidState("Yosys engine does not own the Yosys session");
+  }
+  if (Yosys::yosys_design != nullptr) {
+    for (const auto& module_entry : Yosys::yosys_design->modules_) {
+      for (const auto& wire_entry : module_entry.second->wires_) {
+        wire_entry.second->is_signed = false;
+      }
+    }
+  }
+  return WriteVerilog(path);
 }
 
 // Maps an EOS synth_generic script name onto the inline ABC

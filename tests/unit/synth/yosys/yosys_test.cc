@@ -732,6 +732,225 @@ TEST(YosysFacade, IssuesUnknownTopFails) {
   EXPECT_EQ(issues.status().code(), foundation::ErrorCode::kInvalidArgument);
 }
 
+// Sequential synth_map fixtures (design doc sections 4 and 6):
+// one flop per module in kPolarityFlops, each a different reset
+// shape the mapping table covers, plus the refused enable flop
+// and a leaf-only hierarchy for the design-wide census.
+const char kPolarityFlops[] = R"V(module rst_high (clk, rst, d, q);
+  input clk, rst, d;
+  output reg q;
+  always @(posedge clk or posedge rst) begin
+    if (rst) q <= 1'b0;
+    else q <= d;
+  end
+endmodule
+module rst_low (clk, rst_n, d, q);
+  input clk, rst_n, d;
+  output reg q;
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) q <= 1'b0;
+    else q <= d;
+  end
+endmodule
+module rst_one (clk, rst_n, d, q);
+  input clk, rst_n, d;
+  output reg q;
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) q <= 1'b1;
+    else q <= d;
+  end
+endmodule
+module plain_flop (clk, d, q);
+  input clk, d;
+  output reg q;
+  always @(posedge clk) q <= d;
+endmodule
+)V";
+
+const char kLeafFlop[] = R"V(module leaf (clk, d, q);
+  input clk, d;
+  output reg q;
+  always @(posedge clk) q <= d;
+endmodule
+module top (clk, d, q);
+  input clk, d;
+  output q;
+  leaf u_leaf (.clk(clk), .d(d), .q(q));
+endmodule
+)V";
+
+int TypeCount(const std::vector<YosysCellTypeCount>& by_type,
+              const std::string& type) {
+  for (const YosysCellTypeCount& entry : by_type) {
+    if (entry.type == type) return entry.count;
+  }
+  return 0;
+}
+
+// The design-wide census is the tier 1 information source of
+// the new synth_map guard: the flop lives only in the leaf, so
+// the top module's own count reads zero (the count that misled
+// the old top-only guard) while the totals see it, by type.
+TEST(YosysFacade, DesignTotalsReportsCellsByTypeAcrossModules) {
+  TempDir dir;
+  const std::string file = dir.Write("hier.v", kLeafFlop);
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(file).ok());
+  ASSERT_TRUE(engine.Elaborate("top").ok());
+  const auto stats = engine.Stats("top");
+  ASSERT_TRUE(stats.ok()) << stats.status().message();
+  EXPECT_EQ(stats.value().sequential_cells, 0);
+  EXPECT_EQ(TypeCount(stats.value().cells_by_type, "$dff"), 0);
+  const auto totals = engine.DesignTotals();
+  ASSERT_TRUE(totals.ok()) << totals.status().message();
+  EXPECT_EQ(totals.value().sequential_cells, 1);
+  EXPECT_EQ(TypeCount(totals.value().cells_by_type, "$dff"), 1);
+  EXPECT_EQ(TypeCount(totals.value().cells_by_type, "leaf"), 1);
+}
+
+#ifdef EOS_MOCK_PDK_DIR
+// The mapping table's covered shapes, against the real mock
+// Liberty: asynchronous reset of either polarity to 0, reset
+// to 1, and the plain flop. This is also the first exercise of
+// dfflibmap's own Liberty parser on the mock file (design doc
+// risk R3): a parse rejection fails here, before any command
+// test depends on it.
+TEST(YosysFacade, DffLibMapMapsResetPolaritiesAndValues) {
+  TempDir dir;
+  const std::string file = dir.Write("flops.v", kPolarityFlops);
+  const std::string liberty =
+      std::string(EOS_MOCK_PDK_DIR) + "/eos_mock.lib";
+  const struct {
+    const char* module;
+    const char* cell;
+  } cases[] = {
+      {"rst_high", "EM_DFFR_X1"},
+      {"rst_low", "EM_DFFR_X1"},
+      {"rst_one", "EM_DFFR_X1"},
+      {"plain_flop", "EM_DFF_X1"},
+  };
+  for (const auto& test_case : cases) {
+    YosysEngine engine;
+    ASSERT_TRUE(engine.ParseVerilog(file).ok());
+    ASSERT_TRUE(engine.Elaborate(test_case.module).ok());
+    ASSERT_TRUE(engine.AigMap().ok());
+    const Status mapped = engine.DffLibMap(liberty);
+    ASSERT_TRUE(mapped.ok()) << test_case.module << ": "
+                             << mapped.message();
+    const auto totals = engine.DesignTotals();
+    ASSERT_TRUE(totals.ok());
+    EXPECT_EQ(TypeCount(totals.value().cells_by_type, test_case.cell),
+              1)
+        << test_case.module;
+    // No sequential cell remains: the mapped cell is a library
+    // cell now, not a sequential type.
+    EXPECT_EQ(totals.value().sequential_cells, 0) << test_case.module;
+  }
+}
+
+// A negedge clock has no mock counterpart, and legalizing it
+// would put an inverter in the clock path, which is CTS's
+// call, not mapping's: the screen refuses the fine shape by
+// name before the pass runs. (The design doc's plan named a
+// clock-enable fixture for this refusal test, but in this
+// pipeline an RTL enable never reaches the screen as $_DFFE:
+// elaboration's proc decomposes it into a plain $dff behind a
+// feedback $mux, measured with synth_stats on such a fixture
+// (type $dff 1, type $mux 1); a synchronous reset decomposes
+// the same way. Both designs map, and the registry suite pins
+// that. The screen still refuses $dffe, $_DFFE, $sdff, and
+// $_SDFF cells by name whenever a design carries one, e.g.
+// structural input.)
+const char kNegedgeFlop[] = R"V(module neg_flop (clk, rst_n, d, q);
+  input clk, rst_n, d;
+  output reg q;
+  always @(negedge clk or negedge rst_n) begin
+    if (!rst_n) q <= 1'b0;
+    else q <= d;
+  end
+endmodule
+)V";
+
+TEST(YosysFacade, DffLibMapRefusesNegedgeFlop) {
+  TempDir dir;
+  const std::string file = dir.Write("neg.v", kNegedgeFlop);
+  const std::string liberty =
+      std::string(EOS_MOCK_PDK_DIR) + "/eos_mock.lib";
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(file).ok());
+  ASSERT_TRUE(engine.Elaborate("neg_flop").ok());
+  ASSERT_TRUE(engine.AigMap().ok());
+  const Status mapped = engine.DffLibMap(liberty);
+  ASSERT_FALSE(mapped.ok());
+  EXPECT_EQ(mapped.code(), foundation::ErrorCode::kUnsupported);
+  EXPECT_NE(mapped.message().find("$_DFF_N"), std::string::npos);
+}
+
+// Two async-reset flops with a small combinational cloud, for
+// the Route B mapping test: the cloud's AND and OR are what
+// the abc pass maps, the flops are what dfflibmap maps. The
+// signed wire gives the design a signed RTL signal, the case
+// WriteMappedVerilog exists for.
+const char kTwoFlopCloud[] = R"V(module cloud_leaf (clk, rst_n, a, b, q);
+  input clk, rst_n, a, b;
+  output reg [1:0] q;
+  wire signed [1:0] s;
+  assign s = {a, b};
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) q <= 2'b00;
+    else q <= {a & b, a | b} ^ s;
+  end
+endmodule
+)V";
+
+// Route B's counterpart of the step 0 probe (design doc
+// section 6): the abc pass in its sequential configuration
+// maps the cloud to mock cells and hands the flops back as
+// fine forms, and dfflibmap then makes them library flops, so
+// the written netlist is a mapped netlist: library cells only,
+// EM_DFFR_X1 for both flops, no sequential cell left. This is
+// also the first exercise of the pass's own Liberty handling
+// (read_lib in the in-process build) on the mock file.
+TEST(YosysFacade, AbcLibertyMapProducesMappedNetlist) {
+  TempDir dir;
+  const std::string file = dir.Write("cloud.v", kTwoFlopCloud);
+  const std::string liberty =
+      std::string(EOS_MOCK_PDK_DIR) + "/eos_mock.lib";
+  YosysEngine engine;
+  ASSERT_TRUE(engine.ParseVerilog(file).ok());
+  ASSERT_TRUE(engine.Elaborate("cloud_leaf").ok());
+  ASSERT_TRUE(engine.AigMap().ok());
+  ASSERT_TRUE(engine.ScreenSequentialShapes().ok());
+  // An unknown target is refused before the pass runs.
+  const Status bad_target = engine.AbcLibertyMap(liberty, "speed");
+  ASSERT_FALSE(bad_target.ok());
+  EXPECT_EQ(bad_target.code(),
+            foundation::ErrorCode::kInvalidArgument);
+  const Status abc_mapped = engine.AbcLibertyMap(liberty, "delay");
+  ASSERT_TRUE(abc_mapped.ok()) << abc_mapped.message();
+  const Status dff_mapped = engine.DffLibMap(liberty);
+  ASSERT_TRUE(dff_mapped.ok()) << dff_mapped.message();
+  const auto totals = engine.DesignTotals();
+  ASSERT_TRUE(totals.ok());
+  EXPECT_EQ(totals.value().sequential_cells, 0);
+  const std::string out = dir.Path("mapped.v");
+  ASSERT_TRUE(engine.WriteMappedVerilog(out).ok());
+  std::ifstream in(out);
+  ASSERT_TRUE(in.good());
+  std::stringstream contents;
+  contents << in.rdbuf();
+  const std::string text = contents.str();
+  EXPECT_NE(text.find("EM_DFFR_X1"), std::string::npos);
+  // The cloud mapped onto mock gates, and no fine flop form
+  // leaked through either mapping step.
+  EXPECT_NE(text.find("AND2_X1"), std::string::npos);
+  EXPECT_EQ(text.find("$_DFF"), std::string::npos);
+  // The fixture's signed RTL signal leaves no signed wire in
+  // the mapped netlist (the STA reader's grammar has none).
+  EXPECT_EQ(text.find(" signed"), std::string::npos);
+}
+#endif  // EOS_MOCK_PDK_DIR
+
 // Panel rework: the engine-log capture. The drain takes what
 // the engine logged since the last drain (the elaboration
 // passes report their steps), and a second drain right after

@@ -541,5 +541,72 @@ TEST(AbcFacade, ProveEquivalentIsUnknownWhenTheProofCannotRun) {
   EXPECT_EQ(verdict.value(), EquivalenceVerdict::kUnknown);
 }
 
+#ifdef EOS_MOCK_PDK_DIR
+// The stubs of the mock Liberty: exactly its four sequential
+// cells, each with its pins split by direction in Liberty
+// declaration order, and no stub for any combinational cell.
+TEST(AbcFacade, BlackboxStubsCoverMockSequentialCells) {
+  const std::string liberty =
+      std::string(EOS_MOCK_PDK_DIR) + "/eos_mock.lib";
+  const auto stubs = AbcEngine::BlackboxStubs(liberty);
+  ASSERT_TRUE(stubs.ok()) << stubs.status().message();
+  ASSERT_EQ(stubs.value().cell_names.size(), 4u);
+  EXPECT_EQ(stubs.value().cell_names[0], "EM_DFFR_X1");
+  EXPECT_EQ(stubs.value().cell_names[1], "EM_DFF_SLEW");
+  EXPECT_EQ(stubs.value().cell_names[2], "EM_DFF_X1");
+  EXPECT_EQ(stubs.value().cell_names[3], "EM_LATCH");
+  const std::string& text = stubs.value().text;
+  EXPECT_NE(text.find(".model EM_DFF_X1\n.inputs D CK\n.outputs Q\n"
+                      ".blackbox\n.end\n"),
+            std::string::npos);
+  EXPECT_NE(text.find(".model EM_DFFR_X1\n.inputs D CK R\n.outputs Q\n"
+                      ".blackbox\n.end\n"),
+            std::string::npos);
+  EXPECT_NE(text.find(".model EM_DFF_SLEW\n.inputs D CK\n.outputs Q\n"
+                      ".blackbox\n.end\n"),
+            std::string::npos);
+  EXPECT_NE(text.find(".model EM_LATCH\n.inputs D GATE_N\n.outputs Q\n"
+                      ".blackbox\n.end\n"),
+            std::string::npos);
+  // Exactly four models: no combinational cell is stubbed.
+  std::size_t models = 0;
+  for (std::size_t at = text.find(".model "); at != std::string::npos;
+       at = text.find(".model ", at + 1)) {
+    ++models;
+  }
+  EXPECT_EQ(models, 4u);
+  // A combinational-only Liberty yields an empty stub set, not
+  // a failure; a missing file is an I/O error.
+  TempDir dir;
+  const std::string comb = dir.Write(
+      "comb.lib",
+      "library (x) { cell (AND2) { area : 2.0; "
+      "pin (A) { direction : input; capacitance : 0.001; } "
+      "pin (B) { direction : input; capacitance : 0.001; } "
+      "pin (Y) { direction : output; function : \"A*B\"; "
+      "timing () { related_pin : \"A\"; "
+      "cell_rise (scalar) { values (\"0.6\"); } "
+      "cell_fall (scalar) { values (\"0.6\"); } } } } }\n");
+  const auto none = AbcEngine::BlackboxStubs(comb);
+  ASSERT_TRUE(none.ok()) << none.status().message();
+  EXPECT_TRUE(none.value().cell_names.empty());
+  EXPECT_TRUE(none.value().text.empty());
+  const auto missing = AbcEngine::BlackboxStubs(dir.Path("no_such.lib"));
+  ASSERT_FALSE(missing.ok());
+  EXPECT_EQ(missing.status().code(), foundation::ErrorCode::kIoError);
+}
+#endif  // EOS_MOCK_PDK_DIR
+
+// The step 0 probe of the synth_map sequential design doc
+// (MapTechnologyPassesBlackboxFlopThrough: a hand-written BLIF
+// whose EM_DFFR_X1 black box was to survive MapTechnology) is
+// deliberately not here. It was run as step 0 of the build and
+// failed: ABC's reader converts the box instance, but strash
+// rebuilds the network as an AIG, which has no box form, so
+// the box's output net came back as a primary input and the
+// instance vanished from the mapped Verilog. Per the doc,
+// that failure selects Route B, whose counterpart test is
+// AbcLibertyMapProducesMappedNetlist in the synth.yosys suite.
+
 }  // namespace
 }  // namespace eos::synth

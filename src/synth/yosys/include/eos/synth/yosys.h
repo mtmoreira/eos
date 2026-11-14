@@ -100,16 +100,17 @@ struct YosysCellTypeCount {
 // (flip-flops, memories, FSMs) break the chain. A design with no
 // combinational cell has depth 0. sequential_cells counts the
 // cells whose type the facade treats as sequential (the same
-// types that break the depth chain); synthesis unit S2 uses it
-// to refuse mapping a sequential design, whose latches ABC's
-// mapped Verilog writer renders as behavioural blocks rather
-// than mapped gates.
+// types that break the depth chain); synth_map dispatches on
+// the design-wide sum of this count (DesignTotals) to choose
+// its combinational or sequential mapping path.
 struct YosysNetlistStats {
   std::string module;
   int cell_count = 0;
   int wire_count = 0;
   int logic_depth = 0;
   int sequential_cells = 0;
+  // Cell counts by type, summed over all modules, type names
+  // unescaped (leaf, EM_DFFR_X1, $dff), sorted by type name.
   std::vector<YosysCellTypeCount> cells_by_type;
 };
 
@@ -248,8 +249,10 @@ class YosysEngine {
   Result<YosysNetlistStats> Stats(const std::string& top);
 
   // The design-wide totals of the live design: the cell and
-  // sequential-cell counts summed over every module, and the
-  // deepest per-module logic depth. The per-module counts are
+  // sequential-cell counts summed over every module, the
+  // deepest per-module logic depth, and the per-type cell
+  // counts summed over every module (sorted by type name, the
+  // order YosysNetlistStats reports). The per-module counts are
   // the same numbers Stats reports; the sum is the flattened
   // view the synthesis commands need, because a hierarchical
   // design's sequential cells live in its leaf modules, not in
@@ -263,6 +266,7 @@ class YosysEngine {
     int cell_count = 0;
     int sequential_cells = 0;
     int logic_depth = 0;
+    std::vector<YosysCellTypeCount> cells_by_type;
   };
   Result<YosysDesignTotals> DesignTotals();
 
@@ -424,6 +428,73 @@ class YosysEngine {
   // kInvalidArgument when a pass rejects the design, and with
   // kInvalidState when the engine does not own the session.
   Status AigMap();
+
+  // Maps the live design's fine flip-flops and latches onto
+  // the sequential cells of a Liberty library, through the
+  // upstream dfflibmap pass. The caller runs AigMap first:
+  // dfflibmap works on the fine forms techmap produces, and
+  // its own legalization step (dfflegalize, which the pass
+  // runs first) converts a flop into a library-expressible
+  // form by adding inverters on control pins for unsupported
+  // polarity and on the D and Q pins for an unsupported reset
+  // value. Legalization would also happily invert a clock or
+  // emulate a clock enable, which changes what the design
+  // means ahead of CTS, so this method screens the fine shapes
+  // before the pass runs and refuses by name every sequential
+  // shape outside the mappable set: $_DFF_P_, $_DFF_PP0_,
+  // $_DFF_PN0_, $_DFF_PN1_, $_DFF_PP1_, $_DLATCH_P_,
+  // $_DLATCH_N_. Refused are all negedge-clock forms, the
+  // clock-enable family ($_DFFE_), the synchronous-reset
+  // family ($_SDFF), the set/reset and async-load families
+  // ($_DFFSR, $_ALDFF), and latches with an asynchronous
+  // reset; the refusal is kUnsupported, naming each offending
+  // type and its count. After the pass, the method verifies
+  // no sequential cell remains unmapped (the same refusal if
+  // one does). Fails with kIoError when the Liberty cannot be
+  // read, with kInvalidArgument when the pass rejects the
+  // design, and with kInvalidState when the engine does not
+  // own the session.
+  Status DffLibMap(const std::string& liberty_path);
+
+  // The tier 2 shape screen on its own (synth_map sequential
+  // design doc, section 3): Ok when every sequential cell in
+  // the live design has a mapped form, else kUnsupported
+  // naming each refused type and its count. DffLibMap runs the
+  // same screen before dfflibmap. synth_map's sequential path
+  // (Route B) also runs it before AbcLibertyMap, while the
+  // design still holds the fine forms the refusal names: the
+  // abc pass works on the shapes it extracts, and a shape
+  // absorbed there could no longer be refused under its fine
+  // name.
+  Status ScreenSequentialShapes();
+
+  // Maps the live design's combinational logic to a Liberty's
+  // cells with the upstream abc pass in its sequential
+  // configuration, abc -dff -liberty <path> (synth_map
+  // sequential design doc, section 2, Route B): each clock
+  // domain's fine flops pass through ABC as latches and come
+  // back as fine flops with their clock, enable, and reset
+  // connections intact, and cells the pass does not extract
+  // (latches, and the library cells DffLibMap already placed)
+  // stay in place as boundary cells.
+  // target is "delay" (the pass's default mapping script) or
+  // "area" (the same steps with the mapper's area switch; the
+  // pass has no area knob of its own); anything else is
+  // kInvalidArgument. kIoError when the Liberty cannot be
+  // read.
+  Status AbcLibertyMap(const std::string& liberty_path,
+                       const std::string& target);
+
+  // Writes the live design as the sequential path's mapped
+  // netlist: WriteVerilog, but first clearing the signed flag
+  // on every wire. A mapped netlist's wires carry no
+  // arithmetic meaning, so the flag is inert for the netlist
+  // itself; it is also the one piece of RTL metadata the STA
+  // Verilog reader cannot parse (its grammar has no signed
+  // wire declaration), so a design with signed RTL signals
+  // would otherwise produce a mapped netlist the synth_map
+  // judgement and run_timing cannot read back.
+  Status WriteMappedVerilog(const std::string& path);
 
   // Optimizes the live design's combinational logic with ABC
   // in process, through the upstream `abc -dff` pass: the pass

@@ -1839,7 +1839,8 @@ std::string OptNameListText(const std::vector<std::string>& names) {
 // sets from_odb for the caller's service call choice.
 std::optional<CommandResult> BuildTimingScenes(
     CommandContext& ctx, bool& from_odb,
-    std::vector<analysis::SceneAnalysis>& scenes) {
+    std::vector<analysis::SceneAnalysis>& scenes,
+    bool caller_supplies_design = false) {
   const std::vector<const db::Scenario*> active =
       ctx.project.scenarios.ActiveScenarios();
   if (active.empty()) {
@@ -1850,7 +1851,13 @@ std::optional<CommandResult> BuildTimingScenes(
   from_odb =
       ctx.timing.odb.has_value() && ctx.timing.odb->has_top_block();
   const bool from_verilog = !ctx.timing.verilog_path.empty();
-  if (!from_odb && !from_verilog) {
+  // The design-source gate guards commands that analyze
+  // whatever design the timing session holds. A caller that
+  // supplies the design itself (synth_map, judging its mapped
+  // netlist) has a design by construction; without the
+  // exemption, a design loaded by read_filelist, which records
+  // no timing source, could never be judged at all.
+  if (!caller_supplies_design && !from_odb && !from_verilog) {
     return CommandResult::Fail(
         Diag::kUnclosedDesign,
         "no timing design source: eos::import_odb or "
@@ -9624,19 +9631,39 @@ void RegisterCoreCommands(CommandRegistry& registry) {
   // from -liberty, else the sole recorded Liberty, else the
   // Liberty shared by every active scenario's corner; anything
   // else fails naming the ambiguity, before any engine runs.
-  // Sequential designs fail before the bridge: ABC's mapped
-  // Verilog writes latches as behavioural always blocks, not
-  // mapped gates, so a mapped sequential netlist would be a
-  // lie the STA Verilog path cannot link. The bridge runs
-  // Yosys first, then ABC, then nothing else, each engine
-  // constructed and released in turn (both guard a process
-  // singleton). The Yosys design is mutated by aigmap before
-  // ABC runs, so any failure after that point clears the synth
-  // state, exactly as synth_generic does. The STA judgement
-  // runs on the mapped netlist without registering a report
-  // binding (that is run_timing's job); on success the timing
-  // session is pointed at the mapped netlist, so the next
-  // run_timing is the end-to-end STA on the mapped design.
+  // The bridge runs Yosys first, then ABC, then nothing else,
+  // each engine constructed and released in turn (both guard
+  // a process singleton). The Yosys design is mutated by
+  // aigmap before ABC runs, so any failure after that point
+  // clears the synth state, exactly as synth_generic does.
+  // The STA judgement runs on the mapped netlist without
+  // registering a report binding (that is run_timing's job);
+  // on success the timing session is pointed at the mapped
+  // netlist, so the next run_timing is the end-to-end STA on
+  // the mapped design.
+  //
+  // Sequential designs take a second path behind the same
+  // command (synth_map sequential unit): the dispatch is the
+  // design-wide sequential census, the same totals
+  // synth_generic dispatches on, because a hierarchical
+  // design's flops live in its leaf modules and a top-only
+  // count misses them. Behind the dispatch, the mapping runs
+  // inside Yosys (Route B of the design doc): dfflibmap
+  // (YosysEngine::DffLibMap) turns the flops and latches into
+  // library cells, and the abc pass in its sequential
+  // configuration (abc -dff -liberty, through
+  // YosysEngine::AbcLibertyMap) then maps the combinational
+  // cloud, legalization inverters included, with the library
+  // flops carried as boundary cells; the mapped Verilog is
+  // written directly, with no BLIF bridge. (The
+  // doc's Route A, carrying mapped flops across this bridge
+  // as black boxes, was settled against by its step 0 probe:
+  // ABC's strash drops a black box and promotes its output to
+  // a primary input.) Refusals are two-tier: shapes the
+  // census alone condemns ($mem, $fsm, $sr) fail before any
+  // mutation with the session untouched, and fine shapes with
+  // no mapped form fail at the shape screen, after mutation,
+  // with the session cleared.
   add("synth_map", "synth_map [-target delay|area] [-liberty <path>]",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
@@ -9727,32 +9754,102 @@ void RegisterCoreCommands(CommandRegistry& registry) {
               ctx.synth = CommandContext::SynthSession();
               return FromStatus(status);
             };
-        // The sequential guard runs before any mutation, so a
-        // rejected sequential design leaves the session
-        // untouched. Stats itself does not mutate the design.
-        int sequential_cells = 0;
+        // Dispatch on the design-wide sequential census, taken
+        // before any mutation (synth_map sequential design doc,
+        // sections 2 and 3). synth_generic dispatches on the
+        // same totals: sequential cells live in leaf modules,
+        // so the top module's own count would miss them (the
+        // old Stats(top) guard did, and a hierarchical
+        // sequential design slipped through it and died inside
+        // ABC). A census failure means the session claims an
+        // elaborated design the live engine does not hold;
+        // clear it rather than let a later command operate on
+        // the disagreement.
+        synth::YosysEngine::YosysDesignTotals totals;
         {
           synth::YosysEngine yosys;
-          const foundation::Result<synth::YosysNetlistStats> stats =
-              yosys.Stats(ctx.synth.top_cell);
-          if (!stats.ok()) {
-            // The session claims an elaborated design the live
-            // engine does not hold; clear it rather than let a
-            // later command operate on the disagreement.
+          const foundation::Result<synth::YosysEngine::YosysDesignTotals>
+              census = yosys.DesignTotals();
+          if (!census.ok()) {
             ctx.synth = CommandContext::SynthSession();
-            return FromStatus(stats.status());
+            return FromStatus(census.status());
           }
-          sequential_cells = stats.value().sequential_cells;
+          totals = census.value();
         }
-        if (sequential_cells > 0) {
-          return CommandResult::Fail(
-              Diag::kUnsupportedFeature,
-              "synth_map maps combinational designs only: the "
-              "elaborated design has " +
-                  std::to_string(sequential_cells) +
-                  " sequential cell(s), which ABC's mapped "
-                  "Verilog renders as behavioural blocks rather "
-                  "than mapped gates");
+        // The census counts a cell as sequential by the
+        // facade's prefix set, which does not cover the coarse
+        // latch and async-load spellings ($dlatch, $adlatch,
+        // $aldff): a design whose only sequential cells take
+        // those forms would read zero here, take the
+        // combinational path, and die inside ABC the way
+        // hierarchical designs did. The dispatch therefore
+        // also scans the by-type census for those spellings.
+        // The facade set is shared with synth_generic's
+        // dispatch, so widening it there would change that
+        // command too; it is this command's call, made here.
+        bool sequential = totals.sequential_cells > 0;
+        if (!sequential) {
+          for (const synth::YosysCellTypeCount& entry :
+               totals.cells_by_type) {
+            if (entry.type.rfind("$aldff", 0) == 0 ||
+                entry.type.rfind("$adlatch", 0) == 0 ||
+                entry.type.rfind("$dlatch", 0) == 0) {
+              sequential = true;
+              break;
+            }
+          }
+        }
+        if (sequential) {
+          // Tier 1 refusals, before any mutation, session
+          // untouched: the families techmap never normalizes
+          // into a mappable fine form ($mem and its $memrd /
+          // $memwr kin, $fsm, $sr), named with their counts.
+          std::string refused;
+          for (const synth::YosysCellTypeCount& entry :
+               totals.cells_by_type) {
+            const std::string& type = entry.type;
+            const bool tier1 = type == "$sr" || type == "$fsm" ||
+                               type == "$mem" ||
+                               type.rfind("$mem_", 0) == 0 ||
+                               type.rfind("$memrd", 0) == 0 ||
+                               type.rfind("$memwr", 0) == 0 ||
+                               type.rfind("$meminit", 0) == 0;
+            if (!tier1) continue;
+            if (!refused.empty()) refused += ", ";
+            refused += type + " x" + std::to_string(entry.count);
+          }
+          if (!refused.empty()) {
+            return CommandResult::Fail(
+                Diag::kUnsupportedFeature,
+                "synth_map cannot map this design: it holds " +
+                    refused +
+                    ", sequential shape(s) with no mapped form "
+                    "(memory, FSM, and set/reset latch cells are "
+                    "never techmapped into a mappable flop or "
+                    "latch); remove the shape from the design, "
+                    "or extend the library");
+          }
+          // The unresolved-reference pre-gate synth_generic
+          // runs for sequential designs: without it, a
+          // hierarchical design with a missing leaf would
+          // surface later as an opaque engine failure instead
+          // of this named configuration error, before mutation.
+          synth::YosysEngine yosys;
+          const foundation::Result<
+              std::vector<synth::YosysEngine::YosysIssue>>
+              issues = yosys.Issues(ctx.synth.top_cell);
+          if (!issues.ok()) {
+            ctx.synth = CommandContext::SynthSession();
+            return FromStatus(issues.status());
+          }
+          for (const synth::YosysEngine::YosysIssue& issue :
+               issues.value()) {
+            if (issue.code == "unresolved_reference") {
+              return CommandResult::Fail(
+                  Diag::kInvalidConfiguration,
+                  "elaboration issue: " + issue.message);
+            }
+          }
         }
         const std::string bridge = SynthTempPath("map_bridge", ".blif");
         const std::string genlib = SynthTempPath("map_genlib", ".genlib");
@@ -9761,31 +9858,88 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           synth::YosysEngine yosys;
           const foundation::Status mapped_aig = yosys.AigMap();
           if (!mapped_aig.ok()) return fail_after_mutation(mapped_aig);
-          const foundation::Status written =
-              yosys.WriteBlif(bridge, ctx.synth.top_cell);
-          if (!written.ok()) return fail_after_mutation(written);
+          if (sequential) {
+            // The sequential path (design doc section 2,
+            // Route B). The shape screen runs first, while the
+            // design still holds the fine forms its refusals
+            // name; its failure is a post-mutation failure and
+            // clears the session, the tier 2 posture.
+            const foundation::Status screened =
+                yosys.ScreenSequentialShapes();
+            if (!screened.ok()) return fail_after_mutation(screened);
+            // dfflibmap runs before the abc pass, not after
+            // it as the doc's Route B lists: dfflegalize
+            // inserts its polarity inverters as unmapped
+            // $_NOT_ cells, and only the abc pass can turn
+            // them into library inverters. Run in the doc's
+            // order, they survive to the writer and come out
+            // as assign statements, a netlist that is neither
+            // fully mapped nor readable by the STA judgement.
+            // In this order the library flops and latches
+            // cross the abc pass as boundary cells, which the
+            // pass carries by construction.
+            const foundation::Status dff_mapped =
+                yosys.DffLibMap(liberty_path);
+            if (!dff_mapped.ok()) {
+              return fail_after_mutation(dff_mapped);
+            }
+            const foundation::Status abc_mapped =
+                yosys.AbcLibertyMap(liberty_path, target);
+            if (!abc_mapped.ok()) {
+              return fail_after_mutation(abc_mapped);
+            }
+            const foundation::Status written =
+                yosys.WriteMappedVerilog(mapped);
+            if (!written.ok()) return fail_after_mutation(written);
+          } else {
+            const foundation::Status written =
+                yosys.WriteBlif(bridge, ctx.synth.top_cell);
+            if (!written.ok()) return fail_after_mutation(written);
+          }
         }
         std::vector<std::string> genlib_cells;
+        std::vector<std::string> sequential_cell_names;
         {
           synth::AbcEngine abc;
           const foundation::Result<std::vector<std::string>> converted =
               abc.LibertyToGenlib(liberty_path, genlib);
           if (!converted.ok()) return fail_after_mutation(converted.status());
           genlib_cells = converted.value();
-          const foundation::Status status = abc.MapTechnology(
-              bridge, genlib, mapped,
-              target == "area" ? synth::MapTarget::kArea
-                               : synth::MapTarget::kDelay);
-          std::error_code ec;
-          std::filesystem::remove(bridge, ec);
-          if (!status.ok()) return fail_after_mutation(status);
+          if (sequential) {
+            // The mapping already ran inside Yosys; this scope
+            // only gathers the scan set's sequential half: the
+            // Liberty's sequential cell names, from the same
+            // parse that produced the genlib list. (Under the
+            // doc's Route A these names also named the bridge's
+            // black-box stubs; the probe settled against that
+            // route, and the helper stays as the one place the
+            // Liberty's sequential cells are enumerated.)
+            const foundation::Result<synth::AbcBlackboxStubs> stubs =
+                synth::AbcEngine::BlackboxStubs(liberty_path);
+            if (!stubs.ok()) return fail_after_mutation(stubs.status());
+            sequential_cell_names = stubs.value().cell_names;
+          } else {
+            const foundation::Status status = abc.MapTechnology(
+                bridge, genlib, mapped,
+                target == "area" ? synth::MapTarget::kArea
+                                 : synth::MapTarget::kDelay);
+            std::error_code ec;
+            std::filesystem::remove(bridge, ec);
+            if (!status.ok()) return fail_after_mutation(status);
+          }
         }
         // Cell counts scanned from ABC's mapped Verilog writer
         // format: each gate line starts with its cell name.
         // The mapped netlist is not re-parsed by Yosys: its
-        // Liberty cells are unknown modules there.
+        // Liberty cells are unknown modules there. On the
+        // sequential path the scan set also holds the Liberty's
+        // sequential cells, so the mapped flops are counted in
+        // cells= and types=; genlib_cells= keeps its meaning
+        // (the combinational genlib list).
         std::set<std::string> cell_set(genlib_cells.begin(),
                                        genlib_cells.end());
+        cell_set.insert(sequential_cell_names.begin(),
+                        sequential_cell_names.end());
         std::map<std::string, int> by_type;
         int total_cells = 0;
         ScanMappedCells(mapped, cell_set, &by_type, &total_cells);
@@ -9811,7 +9965,9 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         {
           bool from_odb = false;
           std::vector<analysis::SceneAnalysis> scenes;
-          if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
+          if (auto bad = BuildTimingScenes(ctx, from_odb, scenes,
+                                            /*caller_supplies_design=*/
+                                            true)) {
             timing_lines = " timing=not_run reason=" + bad->message;
           } else {
             analysis::TimingService service;

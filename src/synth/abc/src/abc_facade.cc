@@ -178,6 +178,10 @@ struct LibCell {
   double area = 0.0;
   bool sequential = false;
   std::map<std::string, LibPin> pins;
+  // Pin names in Liberty declaration order (pins above is keyed
+  // by name, so it sorts; the black-box stub writer needs the
+  // declared order, the way the Liberty author wrote the cell).
+  std::vector<std::string> pin_order;
 };
 
 // One scalar delay value out of a pin's timing blocks: the maximum
@@ -496,14 +500,13 @@ Status AbcEngine::MapForDelay(const std::string& input_verilog,
   return Status::Ok();
 }
 
-Result<std::vector<std::string>> AbcEngine::LibertyToGenlib(
-    const std::string& liberty_path, const std::string& genlib_path) {
-  const std::string text = ReadTextFile(liberty_path);
-  if (text.empty()) {
-    return Status::Error(ErrorCode::kIoError,
-                         "Liberty file is empty or unreadable: " +
-                             liberty_path);
-  }
+namespace {
+
+// The Liberty text parse both converters share: every cell of
+// the file with its area, sequential flag, and pins (directions,
+// capacitance, function, scalar delay), cells keyed by name.
+// Parsing is text work only; it never touches the ABC frame.
+std::map<std::string, LibCell> ParseLibertyCells(const std::string& text) {
   std::map<std::string, LibCell> cells;
   ForEachBlock(text, "cell", [&](const std::string& name,
                                  const std::string& block) {
@@ -537,10 +540,27 @@ Result<std::vector<std::string>> AbcEngine::LibertyToGenlib(
       FindScalar(pin_block, "capacitance", &pin.capacitance);
       pin.function = FindQuoted(pin_block, "function");
       ParsePinTiming(pin_block, &pin);
+      if (cell.pins.find(pin_name) == cell.pins.end()) {
+        cell.pin_order.push_back(pin_name);
+      }
       cell.pins[pin_name] = pin;
     });
     cells[name] = cell;
   });
+  return cells;
+}
+
+}  // namespace
+
+Result<std::vector<std::string>> AbcEngine::LibertyToGenlib(
+    const std::string& liberty_path, const std::string& genlib_path) {
+  const std::string text = ReadTextFile(liberty_path);
+  if (text.empty()) {
+    return Status::Error(ErrorCode::kIoError,
+                         "Liberty file is empty or unreadable: " +
+                             liberty_path);
+  }
+  const std::map<std::string, LibCell> cells = ParseLibertyCells(text);
   if (cells.empty()) {
     return Status::Error(ErrorCode::kIoError,
                          "no cells found in Liberty file: " + liberty_path);
@@ -593,6 +613,49 @@ Result<std::vector<std::string>> AbcEngine::LibertyToGenlib(
     }
   }
   return emitted;
+}
+
+Result<AbcBlackboxStubs> AbcEngine::BlackboxStubs(
+    const std::string& liberty_path) {
+  const std::string text = ReadTextFile(liberty_path);
+  if (text.empty()) {
+    return Status::Error(ErrorCode::kIoError,
+                         "Liberty file is empty or unreadable: " +
+                             liberty_path);
+  }
+  const std::map<std::string, LibCell> cells = ParseLibertyCells(text);
+  if (cells.empty()) {
+    return Status::Error(ErrorCode::kIoError,
+                         "no cells found in Liberty file: " + liberty_path);
+  }
+  AbcBlackboxStubs stubs;
+  std::stringstream out;
+  for (const auto& entry : cells) {
+    const LibCell& cell = entry.second;
+    if (!cell.sequential) continue;
+    // Pins split by direction, in Liberty declaration order:
+    // an inout pin is both an input and an output of the box.
+    std::string inputs;
+    std::string outputs;
+    for (const std::string& pin_name : cell.pin_order) {
+      const LibPin& pin = cell.pins.at(pin_name);
+      if (pin.is_input) {
+        if (!inputs.empty()) inputs += ' ';
+        inputs += pin_name;
+      }
+      if (pin.is_output) {
+        if (!outputs.empty()) outputs += ' ';
+        outputs += pin_name;
+      }
+    }
+    out << ".model " << cell.name << '\n';
+    if (!inputs.empty()) out << ".inputs " << inputs << '\n';
+    if (!outputs.empty()) out << ".outputs " << outputs << '\n';
+    out << ".blackbox\n.end\n";
+    stubs.cell_names.push_back(cell.name);
+  }
+  stubs.text = out.str();
+  return stubs;
 }
 
 Status AbcEngine::MapTechnology(const std::string& input_network,
