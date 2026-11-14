@@ -62,6 +62,11 @@ add_test(NAME eco.timing_eco COMMAND eda_eco_timing_eco_unit_test)
 add_executable(eda_synth_abc_unit_test synth/abc/abc_test.cc)
 target_link_libraries(eda_synth_abc_unit_test
   PRIVATE eda_synth_abc GTest::gtest GTest::gtest_main)
+# The black-box stub test reads the mock Liberty from the source
+# tree, like the registry tests read the mock PDK.
+target_compile_definitions(eda_synth_abc_unit_test
+  PRIVATE
+    EOS_MOCK_PDK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../src/pd/rsz/tests/mock")
 add_test(NAME synth.abc COMMAND eda_synth_abc_unit_test)
 
 # Yosys must be linked whole-archive: it registers its passes and
@@ -78,6 +83,11 @@ target_link_libraries(eda_synth_yosys_unit_test
           # itself, which links eda_synth_abc for its
           # abc::Abc_RealMain shim.
           GTest::gtest GTest::gtest_main)
+# The DffLibMap tests map against the real mock Liberty from the
+# source tree, like the registry tests read the mock PDK.
+target_compile_definitions(eda_synth_yosys_unit_test
+  PRIVATE
+    EOS_MOCK_PDK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../src/pd/rsz/tests/mock")
 add_test(NAME synth.yosys COMMAND eda_synth_yosys_unit_test)
 
 # The `abc -dff` in-process integration test: sequential
@@ -305,7 +315,8 @@ target_link_libraries(eda_ui_registry_unit_test
 target_compile_definitions(eda_ui_registry_unit_test
   PRIVATE
     EOS_MOCK_PDK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../src/pd/rsz/tests/mock"
-    EOS_DEMO_SYNTH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/synth")
+    EOS_DEMO_SYNTH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/synth"
+    EOS_CLOCKED_DEMO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/clocked")
 add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test)
 
 if(TCL_FOUND)

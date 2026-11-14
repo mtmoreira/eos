@@ -2,6 +2,7 @@
 #include "eos/ui/registry.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -2564,7 +2565,20 @@ TEST(CoreCommands, SynthMapRequiresAnElaboratedDesign) {
   EXPECT_EQ(parsed_only.diag, Diag::kInvalidConfiguration);
 }
 
-TEST(CoreCommands, SynthMapRejectsSequentialDesigns) {
+// Before the sequential unit, this test (under the name
+// SynthMapRejectsSequentialDesigns) pinned the combinational-
+// only guard, which refused every sequential design before
+// the bridge. The guard is gone: the demo design maps. Its
+// register resets synchronously, which elaboration's proc
+// decomposes into a feedback mux in front of plain flops (the
+// same decomposition a clock enable gets), so the four
+// register bits map onto the fixture library's DFF cell and
+// the reset lives on in the mux cloud, the exact hardware the
+// RTL describes. A design carrying a shape with no mapped
+// form (a negedge clock, a latch with async reset, a coarse
+// $dffe/$sdff cell from structural input) is still refused;
+// the refusal tests below pin those.
+TEST(CoreCommands, SynthMapMapsSequentialDemoDesign) {
   TimingTempDir dir;
   Shell shell;
   const std::string liberty = dir.Write("cells.lib", kSynthMapLiberty);
@@ -2575,15 +2589,334 @@ TEST(CoreCommands, SynthMapRejectsSequentialDesigns) {
   EXPECT_EQ(shell.ctx.synth.elaborated_cells, 3);
   const CommandResult mapped =
       shell.Run("synth_map", {"-liberty", liberty});
-  EXPECT_FALSE(mapped.ok);
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  EXPECT_NE(mapped.payload.find("DFF:4"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+}
+
+// Sequential synth_map fixtures (design doc section 6): small
+// embedded designs mapped against the mock library, one per
+// shape family. The hierarchical register keeps its flops in
+// a leaf, the case the old top-only guard could not count.
+const char kHierFlopVerilog[] = R"V(module leaf_reg (clk, rst_n, d, q);
+  input clk, rst_n;
+  input [3:0] d;
+  output reg [3:0] q;
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) q <= 4'd0;
+    else q <= d;
+  end
+endmodule
+module hier_top (clk, rst_n, d, q);
+  input clk, rst_n;
+  input [3:0] d;
+  output [3:0] q;
+  leaf_reg u_reg (.clk(clk), .rst_n(rst_n), .d(d), .q(q));
+endmodule
+)V";
+
+const char kResetToOneVerilog[] = R"V(module rst_one (clk, rst_n, d, q);
+  input clk, rst_n, d;
+  output reg q;
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) q <= 1'b1;
+    else q <= d;
+  end
+endmodule
+)V";
+
+const char kLatchVerilog[] = R"V(module latch_leaf (en, d, q);
+  input en, d;
+  output reg q;
+  always @* begin
+    if (en) q = d;
+  end
+endmodule
+)V";
+
+const char kEnableFlopVerilog[] = R"V(module en_leaf (clk, en, d, q);
+  input clk, en, d;
+  output reg q;
+  always @(posedge clk) begin
+    if (en) q <= d;
+  end
+endmodule
+module en_top (clk, en, d, q);
+  input clk, en, d;
+  output q;
+  en_leaf u_leaf (.clk(clk), .en(en), .d(d), .q(q));
+endmodule
+)V";
+
+const char kNegedgeVerilog[] = R"V(module neg_leaf (clk, rst_n, d, q);
+  input clk, rst_n, d;
+  output reg q;
+  always @(negedge clk or negedge rst_n) begin
+    if (!rst_n) q <= 1'b0;
+    else q <= d;
+  end
+endmodule
+module neg_top (clk, rst_n, d, q);
+  input clk, rst_n, d;
+  output q;
+  neg_leaf u_leaf (.clk(clk), .rst_n(rst_n), .d(d), .q(q));
+endmodule
+)V";
+
+const char kMemoryVerilog[] = R"V(module mem_leaf (clk, we, addr, din, dout);
+  input clk, we;
+  input [1:0] addr;
+  input [7:0] din;
+  output reg [7:0] dout;
+  reg [7:0] mem [0:3];
+  always @(posedge clk) begin
+    if (we) mem[addr] <= din;
+    dout <= mem[addr];
+  end
+endmodule
+module mem_top (clk, we, addr, din, dout);
+  input clk, we;
+  input [1:0] addr;
+  input [7:0] din;
+  output [7:0] dout;
+  mem_leaf u_mem (.clk(clk), .we(we), .addr(addr), .din(din), .dout(dout));
+endmodule
+)V";
+
+#ifdef EOS_MOCK_PDK_DIR
+// The leaf's four async-reset flops map under the area target:
+// the record's types= carries the leaf's flop count as
+// EM_DFFR_X1, and the design is marked mapped.
+TEST(CoreCommands, SynthMapSequentialAreaTargetMaps) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string liberty =
+      std::string(EOS_MOCK_PDK_DIR) + "/eos_mock.lib";
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("hier.v", kHierFlopVerilog),
+                         "hier_top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult mapped = shell.Run(
+      "synth_map", {"-target", "area", "-liberty", liberty});
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  EXPECT_NE(mapped.payload.find("target=area"), std::string::npos);
+  EXPECT_NE(mapped.payload.find("EM_DFFR_X1:4"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+  EXPECT_EQ(shell.ctx.synth.mapped_target, "area");
+}
+
+// A single flop that resets to 1: the shape exists in the real
+// design exactly once (the one-hot IDLE bit), and legalization
+// turns the library's clear-to-0 into a reset-to-1 with
+// inverters on D and Q.
+TEST(CoreCommands, SynthMapSequentialResetToOneMaps) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string liberty =
+      std::string(EOS_MOCK_PDK_DIR) + "/eos_mock.lib";
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("rst_one.v", kResetToOneVerilog),
+                         "rst_one"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-liberty", liberty});
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  EXPECT_NE(mapped.payload.find("EM_DFFR_X1:1"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+}
+
+// An inferred latch maps to the library's latch cell.
+TEST(CoreCommands, SynthMapLatchDesignMaps) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string liberty =
+      std::string(EOS_MOCK_PDK_DIR) + "/eos_mock.lib";
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("latch.v", kLatchVerilog),
+                         "latch_leaf"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-liberty", liberty});
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  EXPECT_NE(mapped.payload.find("EM_LATCH:1"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+}
+
+// A clock-enable flop maps: elaboration's proc decomposes
+// the enable into a feedback mux in front of a plain flop
+// (measured with synth_stats on this fixture's leaf: type
+// $dff 1, type $mux 1), so no $_DFFE shape ever reaches the
+// shape screen from RTL input, and the mapped form (mux cloud
+// plus EM_DFF_X1) is the exact same hardware. The design
+// doc's plan expected a tier 2 refusal here, on the
+// assumption that the enable survives to the screen as a fine
+// shape; in this pipeline it does not, so this test pins the
+// behavior the pipeline actually has. A design that carries
+// a $dffe or $_DFFE cell itself (structural input) is still
+// refused by name at the screen.
+TEST(CoreCommands, SynthMapEnableFlopDesignMaps) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string liberty =
+      std::string(EOS_MOCK_PDK_DIR) + "/eos_mock.lib";
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("en.v", kEnableFlopVerilog),
+                         "en_top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-liberty", liberty});
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  EXPECT_NE(mapped.payload.find("EM_DFF_X1:1"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+}
+
+// A negedge-clock flop is refused by name rather than
+// legalized with an inverter in the clock path: tier 2
+// refusal, session cleared.
+TEST(CoreCommands, SynthMapRefusesNegedgeDesign) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string liberty =
+      std::string(EOS_MOCK_PDK_DIR) + "/eos_mock.lib";
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("neg.v", kNegedgeVerilog),
+                         "neg_top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-liberty", liberty});
+  ASSERT_FALSE(mapped.ok);
   EXPECT_EQ(mapped.diag, Diag::kUnsupportedFeature);
-  EXPECT_NE(mapped.message.find("combinational"), std::string::npos);
-  // The rejection happened before the bridge, so the elaborated
-  // state is untouched and the design is not marked mapped.
+  EXPECT_NE(mapped.message.find("$_DFF_N"), std::string::npos);
+  EXPECT_FALSE(shell.ctx.synth.elaborated);
+  EXPECT_FALSE(shell.ctx.synth.mapped);
+  EXPECT_FALSE(shell.Run("synth_stats").ok);
+}
+
+// An inferred memory maps: elaboration's memory pass
+// converts it into storage flops and mux logic before the
+// census ever sees it (measured in the elaboration log:
+// "created 4 $dff cells and 0 static cells of width 8" for
+// this fixture's leaf), so there is no $mem for tier 1 to
+// refuse, and the storage lands in the record as plain flops.
+// The design doc's plan expected a tier 1 refusal here, on
+// the assumption that the memory survives elaboration as a
+// $mem cell; in this pipeline it does not. Tier 1 (section 3)
+// still refuses $mem, $fsm, and $sr cells by name whenever a
+// design carries one into the census, e.g. a structural
+// netlist that bypassed the memory pass; no RTL fixture in
+// this pipeline produces one, so that posture is pinned by
+// the guard's code and this note, not by a test.
+TEST(CoreCommands, SynthMapMemoryDesignMaps) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string liberty =
+      std::string(EOS_MOCK_PDK_DIR) + "/eos_mock.lib";
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("mem.v", kMemoryVerilog),
+                         "mem_top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-liberty", liberty});
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  EXPECT_NE(mapped.payload.find("EM_DFF_X1:"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+}
+
+// No Liberty anywhere on a sequential design: the failure is
+// the configuration error the combinational path gives today,
+// proving the configuration checks still run before any
+// sequential work.
+TEST(CoreCommands, SynthMapSequentialNoLibertyFailsAsBefore) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("read_verilog",
+                        {dir.Write("hier.v", kHierFlopVerilog),
+                         "hier_top"})
+                    .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult mapped = shell.Run("synth_map");
+  ASSERT_FALSE(mapped.ok);
+  EXPECT_EQ(mapped.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(mapped.message.find("no Liberty for mapping"),
+            std::string::npos);
   EXPECT_TRUE(shell.ctx.synth.elaborated);
-  EXPECT_EQ(shell.ctx.synth.elaborated_cells, 3);
   EXPECT_FALSE(shell.ctx.synth.mapped);
 }
+#endif  // EOS_MOCK_PDK_DIR
+
+#if defined(EOS_CLOCKED_DEMO_DIR) && defined(EOS_MOCK_PDK_DIR)
+// The acceptance run as a CI test (design doc A1 to A3): the
+// real clocked demo design maps end to end. All 39 elaborated
+// flops carry an asynchronous reset, so the record must show
+// EM_DFFR_X1:39 and no other sequential cell; the run is
+// STA-judged with a finite worst slack (not the
+// 1.000000015e+39 no-path value the unmapped design reports),
+// and run_timing reproduces it on the mapped netlist. The
+// area target runs in a fresh session, as A1 states.
+TEST(CoreCommands, SynthMapClockedDemoMapsEndToEnd) {
+  const std::string demo_dir = EOS_CLOCKED_DEMO_DIR;
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const auto run_sequence = [&](Shell& shell,
+                                const std::vector<std::string>&
+                                    map_args,
+                                CommandResult* mapped) {
+    ASSERT_TRUE(
+        shell
+            .Run("create_scenario",
+                 {"func_tt", "func", "tt", "estimate"})
+            .ok);
+    ASSERT_TRUE(shell.Run("read_liberty",
+                          {"tt", mock_dir + "/eos_mock.lib"})
+                      .ok);
+    ASSERT_TRUE(shell.Run("read_filelist",
+                          {demo_dir + "/design.f", "clk_top"})
+                      .ok);
+    ASSERT_TRUE(
+        shell.Run("read_sdc", {demo_dir + "/clk_top.sdc"}).ok);
+    ASSERT_TRUE(shell.Run("elaborate").ok);
+    *mapped = shell.Run("synth_map", map_args);
+  };
+  const auto payload_number = [](const CommandResult& result,
+                                 const std::string& key) {
+    const std::string field = key + "=";
+    const std::size_t at = result.payload.find(field);
+    EXPECT_NE(at, std::string::npos) << "missing " << key;
+    if (at == std::string::npos) return 0.0;
+    return std::stod(result.payload.substr(at + field.size()));
+  };
+  Shell shell;
+  CommandResult mapped;
+  run_sequence(shell, {}, &mapped);
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  EXPECT_NE(mapped.payload.find("EM_DFFR_X1:39"), std::string::npos);
+  EXPECT_EQ(mapped.payload.find("EM_DFF_X1:"), std::string::npos);
+  EXPECT_EQ(mapped.payload.find("EM_DFF_SLEW:"), std::string::npos);
+  EXPECT_EQ(mapped.payload.find("EM_LATCH:"), std::string::npos);
+  EXPECT_TRUE(shell.ctx.synth.mapped);
+  EXPECT_TRUE(shell.ctx.synth.mapped_timing_judged);
+  const double slack = payload_number(mapped, "worst_slack_ns");
+  EXPECT_TRUE(std::isfinite(slack));
+  EXPECT_LT(std::fabs(slack), 1e30);
+  // A3: run_timing on the mapped netlist reproduces the slack.
+  const CommandResult run = shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  EXPECT_NEAR(payload_number(run, "worst_slack_ns"), slack, 1e-6);
+  // A1, area target, fresh session.
+  Shell area_shell;
+  CommandResult area_mapped;
+  run_sequence(area_shell, {"-target", "area"}, &area_mapped);
+  ASSERT_TRUE(area_mapped.ok) << area_mapped.message;
+  EXPECT_NE(area_mapped.payload.find("EM_DFFR_X1:39"),
+            std::string::npos);
+  EXPECT_TRUE(area_shell.ctx.synth.mapped);
+}
+#endif  // EOS_CLOCKED_DEMO_DIR && EOS_MOCK_PDK_DIR
 
 // The S3 loop fixtures: a two-output design whose outputs both
 // compute the same four-input AND (AND is commutative, so ABC's
@@ -11410,20 +11743,25 @@ TEST(ErrorTaxonomy, FromStatusMapsEachCodeThroughDispatch) {
   EXPECT_EQ(missing.diag, Diag::kIoError);
   EXPECT_NE(missing.message.find("could not read file: /no/such/file.v"),
             std::string::npos);
-  // A sequential design fails synth_map with kUnsupportedFeature.
+  // A sequential design whose shape has no mapped form (the
+  // negedge-clock fixture, the $_DFF_N family) fails synth_map
+  // with kUnsupportedFeature, naming the shape. (This leg used
+  // the sync-reset demo design before the sequential unit;
+  // that design maps now, its reset decomposed into a mux
+  // cloud at elaboration, so it can no longer produce the
+  // code.)
   TimingTempDir dir;
   Shell map;
   const std::string liberty = dir.Write("cells.lib", kSynthMapLiberty);
   ASSERT_TRUE(map.Run("read_verilog",
-                      {dir.Write("demo.v", kSynthDemo), "demo"})
+                      {dir.Write("neg.v", kNegedgeVerilog), "neg_top"})
                   .ok);
   ASSERT_TRUE(map.Run("elaborate").ok);
   const CommandResult sequential =
       map.Run("synth_map", {"-liberty", liberty});
   ASSERT_FALSE(sequential.ok);
   EXPECT_EQ(sequential.diag, Diag::kUnsupportedFeature);
-  EXPECT_NE(sequential.message.find("combinational"),
-            std::string::npos);
+  EXPECT_NE(sequential.message.find("$_DFF_N"), std::string::npos);
 }
 
 // The message rules (error-behavior unit): a failure names the

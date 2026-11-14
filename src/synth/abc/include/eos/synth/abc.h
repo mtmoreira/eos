@@ -97,6 +97,18 @@ struct AbcGenericResult {
   AbcNetworkStats after;
 };
 
+// The BLIF black-box stubs of one Liberty's sequential cells:
+// one .model/.blackbox block per cell (see AbcEngine::
+// BlackboxStubs), and the stubbed cell names in alphabetical
+// order. The text is bridge material: the caller appends it to
+// a BLIF network whose top model instantiates those cells, so
+// ABC reads the flops as boxes instead of failing on a .subckt
+// with no model behind it.
+struct AbcBlackboxStubs {
+  std::string text;
+  std::vector<std::string> cell_names;
+};
+
 // One ABC session. Move-only; the destructor releases the upstream
 // frame.
 class AbcEngine {
@@ -147,6 +159,31 @@ class AbcEngine {
   // this engine only because genlib is ABC's format.
   Result<std::vector<std::string>> LibertyToGenlib(
       const std::string& liberty_path, const std::string& genlib_path);
+
+  // The BLIF black-box stubs of the Liberty's sequential cells
+  // (the cells LibertyToGenlib skips: an ff or latch block has
+  // no combinational function for a genlib GATE entry). One
+  // stub per sequential cell:
+  //
+  //   .model EM_DFFR_X1
+  //   .inputs D CK R
+  //   .outputs Q
+  //   .blackbox
+  //   .end
+  //
+  // Pins are split by direction and listed in Liberty
+  // declaration order, from the same Liberty text parse
+  // LibertyToGenlib performs. Sequential synth_map appends the
+  // stubs to its bridge BLIF: the mapped flops reach ABC as
+  // .subckt instances of these models, and ABC carries a
+  // black box through mapping untouched and writes it back out
+  // as an instance of the library cell. A Liberty with no
+  // sequential cell yields an empty text and no names, not a
+  // failure. Fails with kIoError when the Liberty file cannot
+  // be read or holds no cells. Static because the conversion
+  // does not touch the upstream frame, like LibertyToGenlib.
+  static Result<AbcBlackboxStubs> BlackboxStubs(
+      const std::string& liberty_path);
 
   // Technology mapping of one unmapped network (the BLIF form
   // Yosys hands over, or an assign-form Verilog netlist) onto
