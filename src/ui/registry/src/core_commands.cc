@@ -488,24 +488,49 @@ std::string CellTypesText(const std::map<std::string, int>& by_type) {
 }
 
 // Mapped-netlist reader and DEF writer (unit F0, synth-to-PD
-// bridge).
+// bridge; the Yosys format and the in-reader flattening are
+// the mapped-netlist bridge unit ahead of F5).
 //
-// The bridge turns the mapped Verilog synth_map wrote (ABC's mapped
-// Verilog writer format, see ioWriteVerilog.c in the imported ABC
-// tree) into a DEF file the ODB facade can read back, so a design
-// synthesized in-session can reach floorplan without an ORFS run.
-// The reader is deliberately narrow: it accepts exactly the
-// constructs ABC's mapped writer emits, and fails fast naming the
-// line of anything else, so a netlist from another writer can
-// never be misread as a mapped design. Known limits, stated here
-// rather than hidden: ABC writes constant nets as `assign <net> =
-// 1'b0;` lines (unsupported: tie the constant off in the RTL),
-// drops feedthrough outputs from the module port list (a design
-// whose output is driven straight by an input loses that pin
-// here), and a gate line carrying a twin node's second output
-// surfaces as a duplicate pin and is rejected at the LEF check.
-// A gate must have exactly one output pin in the LEF, so
-// multi-output cells are rejected the same way.
+// The bridge turns the mapped Verilog synth_map wrote into a
+// DEF file the ODB facade can read back, so a design
+// synthesized in-session can reach floorplan without an ORFS
+// run. Two writer formats are accepted, because synth_map has
+// two mapping paths. The combinational path writes ABC's
+// mapped Verilog format (see ioWriteVerilog.c in the imported
+// ABC tree): flat, one module, // comments, one gate per line.
+// The sequential path (PR 141) writes Yosys's Verilog backend
+// format: a /* */ header comment, one module per leaf with the
+// top last, ranged declarations with each port declared twice
+// (once as a port, once as a wire), multi-line named-port
+// instantiations, bit-select and part-select connections, and
+// assign statements (aliases, per-bit concatenations, and
+// constants). The reader parses every module in the file and
+// flattens rooted at the session top into the flat netlist
+// below: a submodule instance contributes its gates under
+// hierarchy-path instance names (u_acc/_659_), its port bits
+// map onto the parent nets its connection expressions name,
+// and its internal wires become path-prefixed nets (u_acc/w).
+// Modules the top never instantiates are ignored: the backend
+// dumps every module in the design, so presence in the file is
+// not membership in the design. Assigns resolve per scalar bit
+// as net aliases; each alias group takes one canonical name (a
+// top port's name first, then the name written at a connection,
+// then the first assign left side that formed the group). A
+// constant assign records the bit's value instead of an alias:
+// a constant net feeding a gate pin or a top output is refused
+// (tie constants off in the RTL), and a constant feeding
+// nothing is dropped with its wire. No tie cells are ever
+// invented here: inserting cells is a mapping decision, not a
+// reading one. The reader stays deliberately narrow within
+// this grammar and fails fast naming the line of anything
+// else, so a netlist from another writer can never be misread
+// as a mapped design. Known limits, stated here rather than
+// hidden: ABC drops feedthrough outputs from the module port
+// list (a design whose output is driven straight by an input
+// loses that pin here), and a gate line carrying a twin node's
+// second output surfaces as a duplicate pin and is rejected at
+// the LEF check. A gate must have exactly one output pin in
+// the LEF, so multi-output cells are rejected the same way.
 struct MappedGate {
   std::string cell;
   std::string instance;
@@ -554,6 +579,32 @@ Result<std::vector<VerilogToken>> TokenizeVerilog(
       while (i < text.size() && text[i] != '\n') ++i;
       continue;
     }
+    if (c == '/' && i + 1 < text.size() && text[i + 1] == '*') {
+      // Block comment (the Yosys backend's file header is
+      // one). Newlines inside it still count, so the line
+      // numbers in error messages stay true.
+      const int start_line = line;
+      i += 2;
+      bool closed = false;
+      while (i < text.size()) {
+        if (text[i] == '*' && i + 1 < text.size() &&
+            text[i + 1] == '/') {
+          i += 2;
+          closed = true;
+          break;
+        }
+        if (text[i] == '\n') ++line;
+        ++i;
+      }
+      if (!closed) {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "mapped Verilog " + path + " line " +
+                std::to_string(start_line) +
+                ": unterminated block comment");
+      }
+      continue;
+    }
     if (c == '\\') {
       // Verilog escaped identifier: a backslash plus every
       // character up to whitespace. ABC writes exactly this form
@@ -597,7 +648,8 @@ Result<std::vector<VerilogToken>> TokenizeVerilog(
       continue;
     }
     if (c == '(' || c == ')' || c == ',' || c == ';' || c == '.' ||
-        c == '=') {
+        c == '=' || c == '[' || c == ']' || c == '{' || c == '}' ||
+        c == ':') {
       tokens.push_back({std::string(1, c), line});
       ++i;
       continue;
@@ -607,13 +659,1263 @@ Result<std::vector<VerilogToken>> TokenizeVerilog(
   return tokens;
 }
 
-// Reads one ABC mapped Verilog file. cell_set is the genlib cell
-// list from the mapping run: a line whose first token is a genlib
-// cell starts a gate instantiation, and any other statement shape
-// is an error. Port and wire lists may wrap across lines; gate
-// lines are one instantiation each, as ABC writes them.
+// One scalar bit of a declared net in one module: the
+// declaration's base name and the bit's index within the
+// declared range (0 for a scalar name).
+struct BridgeBitRef {
+  std::string name;
+  int index = 0;
+};
+
+// One bit of a connection expression: either a net bit of the
+// enclosing module or one constant bit.
+struct BridgeExprBit {
+  bool constant = false;
+  bool value = false;
+  BridgeBitRef net;
+};
+
+// A connection expression as its bits in written order (most
+// significant first: the order Verilog pairs the two sides of
+// an assign and the bits of a bus connection).
+using BridgeExpr = std::vector<BridgeExprBit>;
+
+// A connection expression as written, before the module's
+// declarations are all known: a name with an optional select,
+// a sized constant, or a concatenation of expressions.
+struct BridgeExprNode {
+  enum class Kind { kName, kConstant, kConcat };
+  Kind kind = Kind::kName;
+  std::string name;
+  int select = 0;  // 0 none, 1 bit-select, 2 part-select.
+  int a = 0;
+  int b = 0;
+  std::vector<bool> const_bits;  // kConstant, written order.
+  std::vector<BridgeExprNode> parts;  // kConcat.
+};
+
+struct BridgeDecl {
+  int direction = 0;  // -1 input, 1 output, 0 wire only.
+  bool ranged = false;
+  int first = 0;   // Range bounds as written; a scalar name
+  int second = 0;  // has ranged false and first == second == 0.
+};
+
+struct BridgeRawInstance {
+  bool is_module = false;
+  std::string type;
+  std::string instance;
+  int line = 0;
+  std::vector<std::pair<std::string, BridgeExprNode>> pins;
+};
+
+struct BridgeRawAssign {
+  BridgeExprNode lhs;
+  BridgeExprNode rhs;
+  int line = 0;
+};
+
+struct BridgeInstance {
+  bool is_module = false;
+  std::string type;
+  std::string instance;
+  int line = 0;
+  std::vector<std::pair<std::string, BridgeExpr>> pins;
+};
+
+struct BridgeAssign {
+  BridgeExpr lhs;  // Net bits only; the parser refuses more.
+  BridgeExpr rhs;
+  int line = 0;
+};
+
+struct BridgeModule {
+  std::string name;
+  std::map<std::string, BridgeDecl> decls;
+  std::vector<std::string> decl_order;
+  std::vector<BridgeRawInstance> raw_instances;
+  std::vector<BridgeRawAssign> raw_assigns;
+  // Filled by the expansion pass once every declaration of
+  // the module is known.
+  std::vector<BridgeInstance> instances;
+  std::vector<BridgeAssign> assigns;
+};
+
+// The bit indices of one declaration in written order (the
+// order a whole-bus connection or assign pairs them).
+std::vector<int> BridgeDeclBits(const BridgeDecl& decl) {
+  std::vector<int> bits;
+  if (!decl.ranged) {
+    bits.push_back(0);
+    return bits;
+  }
+  const int step = decl.first <= decl.second ? 1 : -1;
+  for (int i = decl.first;; i += step) {
+    bits.push_back(i);
+    if (i == decl.second) break;
+  }
+  return bits;
+}
+
+bool BridgeDeclHasBit(const BridgeDecl& decl, int index) {
+  if (!decl.ranged) return index == 0;
+  const int lo = std::min(decl.first, decl.second);
+  const int hi = std::max(decl.first, decl.second);
+  return index >= lo && index <= hi;
+}
+
+// Parses the modules of one mapped Verilog file (either
+// writer format), validates every net reference against its
+// module's declarations, expands every connection expression
+// to scalar bits, and refuses instantiation cycles. The
+// flattener below consumes the result.
+class BridgeParser {
+ public:
+  BridgeParser(const std::vector<VerilogToken>& tokens,
+               const std::string& path,
+               const std::set<std::string>& cell_set)
+      : tokens_(tokens), path_(path), cell_set_(cell_set) {
+    // A statement whose first token names a module anywhere
+    // in the file is a submodule instantiation, so collect
+    // the module names before parsing any body: the top
+    // module is written last, and a cycle's first module
+    // names one not yet parsed.
+    for (std::size_t i = 0; i + 1 < tokens_.size(); ++i) {
+      if (tokens_[i].text == "module") {
+        module_names_.insert(tokens_[i + 1].text);
+      }
+    }
+  }
+
+  Result<std::map<std::string, BridgeModule>> Parse() {
+    std::map<std::string, BridgeModule> modules;
+    while (!AtEnd()) {
+      if (Peek().text != "module") {
+        return FailAt(Peek(), "expected 'module', found '" +
+                                  Peek().text + "'");
+      }
+      BridgeModule module;
+      if (auto bad = ParseModule(&module)) return *bad;
+      const std::string name = module.name;
+      if (!modules.emplace(name, std::move(module)).second) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path_ +
+                                 ": duplicate module '" + name + "'");
+      }
+    }
+    if (modules.empty()) {
+      return Status::Error(ErrorCode::kInvalidArgument,
+                           "mapped Verilog " + path_ + ": no modules");
+    }
+    for (auto& entry : modules) {
+      if (auto bad = ExpandModule(&entry.second)) return *bad;
+    }
+    if (auto bad = CheckCycles(modules)) return *bad;
+    return modules;
+  }
+
+ private:
+  bool AtEnd() const { return pos_ >= tokens_.size(); }
+  const VerilogToken& Peek() const { return tokens_[pos_]; }
+
+  Status FailAt(const VerilogToken& token,
+                const std::string& message) const {
+    return Status::Error(ErrorCode::kInvalidArgument,
+                         "mapped Verilog " + path_ + " line " +
+                             std::to_string(token.line) + ": " +
+                             message);
+  }
+
+  std::optional<Status> Expect(const std::string& text) {
+    if (AtEnd() || Peek().text != text) {
+      const std::string got =
+          AtEnd() ? std::string("end of file") : Peek().text;
+      const int line = AtEnd() ? 0 : Peek().line;
+      return Status::Error(
+          ErrorCode::kInvalidArgument,
+          "mapped Verilog " + path_ +
+              (line > 0 ? " line " + std::to_string(line) : "") +
+              ": expected '" + text + "', found '" + got + "'");
+    }
+    ++pos_;
+    return std::nullopt;
+  }
+
+  // An index or constant size: a token of decimal digits.
+  std::optional<Status> ParseIndex(const VerilogToken& token,
+                                   int* out) {
+    if (token.text.empty()) {
+      return FailAt(token, "expected a number");
+    }
+    for (const char c : token.text) {
+      if (c < '0' || c > '9') {
+        return FailAt(token, "expected a number, found '" +
+                                 token.text + "'");
+      }
+    }
+    try {
+      *out = std::stoi(token.text);
+    } catch (const std::exception&) {
+      return FailAt(token, "number out of range: '" + token.text +
+                               "'");
+    }
+    return std::nullopt;
+  }
+
+  // A sized constant token (8'h00, 1'b0, 1024'h...): expands
+  // to its bits in written order, truncated or zero-extended
+  // on the left to the stated size, as Verilog reads it.
+  std::optional<Status> ParseConstant(const VerilogToken& token,
+                                      BridgeExprNode* out) {
+    const std::string& text = token.text;
+    const std::size_t tick = text.find('\'');
+    if (tick == std::string::npos || tick + 2 >= text.size()) {
+      return FailAt(token, "malformed constant '" + text + "'");
+    }
+    int size = 0;
+    if (auto bad = ParseIndex(
+            VerilogToken{text.substr(0, tick), token.line}, &size)) {
+      return *bad;
+    }
+    if (size <= 0) {
+      return FailAt(token, "constant '" + text + "' has no size");
+    }
+    const char base = text[tick + 1];
+    const std::string digits = text.substr(tick + 2);
+    std::vector<bool> bits;
+    if (base == 'b' || base == 'B') {
+      for (const char c : digits) {
+        if (c == '0' || c == '1') {
+          bits.push_back(c == '1');
+        } else if (c == '_') {
+          continue;
+        } else {
+          return FailAt(token, "constant '" + text +
+                                   "' holds a non-binary digit");
+        }
+      }
+    } else if (base == 'h' || base == 'H') {
+      for (const char c : digits) {
+        if (c == '_') continue;
+        int value = 0;
+        if (c >= '0' && c <= '9') {
+          value = c - '0';
+        } else if (c >= 'a' && c <= 'f') {
+          value = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'F') {
+          value = c - 'A' + 10;
+        } else {
+          return FailAt(token, "constant '" + text +
+                                   "' holds a non-hex digit");
+        }
+        for (int k = 3; k >= 0; --k) {
+          bits.push_back(((value >> k) & 1) != 0);
+        }
+      }
+    } else if (base == 'o' || base == 'O') {
+      for (const char c : digits) {
+        if (c == '_') continue;
+        if (c < '0' || c > '7') {
+          return FailAt(token, "constant '" + text +
+                                   "' holds a non-octal digit");
+        }
+        const int value = c - '0';
+        for (int k = 2; k >= 0; --k) {
+          bits.push_back(((value >> k) & 1) != 0);
+        }
+      }
+    } else if (base == 'd' || base == 'D') {
+      long long value = 0;
+      bool any = false;
+      for (const char c : digits) {
+        if (c == '_') continue;
+        if (c < '0' || c > '9') {
+          return FailAt(token, "constant '" + text +
+                                   "' holds a non-decimal digit");
+        }
+        value = value * 10 + (c - '0');
+        any = true;
+        if (value > (1LL << 40)) {
+          return FailAt(token, "constant '" + text + "' is too large");
+        }
+      }
+      if (!any) {
+        return FailAt(token, "malformed constant '" + text + "'");
+      }
+      for (int k = 39; k >= 0; --k) {
+        bits.push_back(((value >> k) & 1LL) != 0);
+      }
+    } else {
+      return FailAt(token, "constant '" + text +
+                               "' has an unsupported base '" +
+                               std::string(1, base) + "'");
+    }
+    if (bits.empty()) {
+      return FailAt(token, "malformed constant '" + text + "'");
+    }
+    if (static_cast<int>(bits.size()) > size) {
+      bits.erase(bits.begin(),
+                 bits.begin() + (bits.size() - size));
+    }
+    while (static_cast<int>(bits.size()) < size) {
+      bits.insert(bits.begin(), false);
+    }
+    out->kind = BridgeExprNode::Kind::kConstant;
+    out->const_bits = bits;
+    return std::nullopt;
+  }
+
+  std::optional<Status> ParseExpr(BridgeExprNode* out) {
+    if (AtEnd()) {
+      return Status::Error(ErrorCode::kInvalidArgument,
+                           "mapped Verilog " + path_ +
+                               ": unterminated expression");
+    }
+    const VerilogToken& token = Peek();
+    if (token.text == "{") {
+      ++pos_;
+      out->kind = BridgeExprNode::Kind::kConcat;
+      while (true) {
+        BridgeExprNode part;
+        if (auto bad = ParseExpr(&part)) return *bad;
+        out->parts.push_back(std::move(part));
+        if (AtEnd()) {
+          return Status::Error(ErrorCode::kInvalidArgument,
+                               "mapped Verilog " + path_ +
+                                   ": unterminated concatenation");
+        }
+        if (Peek().text == ",") {
+          ++pos_;
+          continue;
+        }
+        if (Peek().text == "}") {
+          ++pos_;
+          return std::nullopt;
+        }
+        return FailAt(Peek(), "expected ',' or '}' in concatenation");
+      }
+    }
+    if (token.text.find('\'') != std::string::npos) {
+      ++pos_;
+      return ParseConstant(token, out);
+    }
+    if (token.text == "(" || token.text == ")" || token.text == "," ||
+        token.text == ";" || token.text == "." || token.text == "=" ||
+        token.text == "[" || token.text == "]" || token.text == "}" ||
+        token.text == ":") {
+      return FailAt(token, "expected a net name, a constant, or "
+                           "'{' in a connection");
+    }
+    out->kind = BridgeExprNode::Kind::kName;
+    out->name = token.text;
+    ++pos_;
+    if (!AtEnd() && Peek().text == "[") {
+      ++pos_;
+      if (AtEnd()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path_ +
+                                 ": unterminated select");
+      }
+      if (auto bad = ParseIndex(Peek(), &out->a)) return *bad;
+      ++pos_;
+      if (!AtEnd() && Peek().text == ":") {
+        ++pos_;
+        if (AtEnd()) {
+          return Status::Error(ErrorCode::kInvalidArgument,
+                               "mapped Verilog " + path_ +
+                                   ": unterminated select");
+        }
+        if (auto bad = ParseIndex(Peek(), &out->b)) return *bad;
+        ++pos_;
+        out->select = 2;
+      } else {
+        out->select = 1;
+      }
+      if (auto bad = Expect("]")) return *bad;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<Status> ParseDeclaration(BridgeModule* module) {
+    const VerilogToken& kind_token = Peek();
+    const int direction = kind_token.text == "input"    ? -1
+                          : kind_token.text == "output" ? 1
+                                                        : 0;
+    ++pos_;
+    bool ranged = false;
+    int first = 0;
+    int second = 0;
+    if (!AtEnd() && Peek().text == "[") {
+      ++pos_;
+      if (AtEnd()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path_ +
+                                 ": unterminated range");
+      }
+      if (auto bad = ParseIndex(Peek(), &first)) return *bad;
+      ++pos_;
+      if (auto bad = Expect(":")) return *bad;
+      if (AtEnd()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path_ +
+                                 ": unterminated range");
+      }
+      if (auto bad = ParseIndex(Peek(), &second)) return *bad;
+      ++pos_;
+      if (auto bad = Expect("]")) return *bad;
+      ranged = true;
+    }
+    while (true) {
+      if (AtEnd()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path_ +
+                                 ": unterminated declaration");
+      }
+      const VerilogToken& name_token = Peek();
+      const std::string name = name_token.text;
+      ++pos_;
+      auto found = module->decls.find(name);
+      if (found == module->decls.end()) {
+        BridgeDecl decl;
+        decl.direction = direction;
+        decl.ranged = ranged;
+        decl.first = first;
+        decl.second = second;
+        module->decls[name] = decl;
+        module->decl_order.push_back(name);
+      } else {
+        // The Yosys backend declares every port twice, once
+        // as a port and once as a wire; the merged record
+        // keeps the direction and the range. Anything that
+        // disagrees is a conflict, named here.
+        BridgeDecl& decl = found->second;
+        if (decl.ranged != ranged || decl.first != first ||
+            decl.second != second) {
+          return FailAt(name_token,
+                        "conflicting declarations of net '" + name +
+                            "'");
+        }
+        if (decl.direction != 0 && direction != 0 &&
+            decl.direction != direction) {
+          return FailAt(name_token, "net '" + name +
+                                        "' is declared as both "
+                                        "input and output");
+        }
+        if (decl.direction == 0) decl.direction = direction;
+      }
+      if (AtEnd()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path_ +
+                                 ": unterminated declaration");
+      }
+      if (Peek().text == ";") {
+        ++pos_;
+        return std::nullopt;
+      }
+      if (Peek().text != ",") {
+        return FailAt(Peek(), "expected ',' or ';' in declaration");
+      }
+      ++pos_;
+    }
+  }
+
+  std::optional<Status> ParseInstance(BridgeModule* module,
+                                      std::set<std::string>* instances) {
+    const VerilogToken& type_token = Peek();
+    BridgeRawInstance instance;
+    instance.is_module =
+        cell_set_.count(type_token.text) == 0 &&
+        module_names_.count(type_token.text) != 0;
+    instance.type = type_token.text;
+    instance.line = type_token.line;
+    ++pos_;
+    if (AtEnd()) {
+      return Status::Error(ErrorCode::kInvalidArgument,
+                           "mapped Verilog " + path_ + ": instance '" +
+                               instance.type + "' has no name");
+    }
+    instance.instance = Peek().text;
+    ++pos_;
+    if (!instances->insert(instance.instance).second) {
+      return Status::Error(
+          ErrorCode::kInvalidArgument,
+          "mapped Verilog " + path_ + ": duplicate instance '" +
+              instance.instance + "' in module '" + module->name +
+              "'");
+    }
+    if (auto bad = Expect("(")) return *bad;
+    while (true) {
+      if (AtEnd() || Peek().text != ".") {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "mapped Verilog " + path_ + ": instance '" +
+                instance.instance +
+                "' expects a '.pin(net)' connection");
+      }
+      ++pos_;
+      if (AtEnd()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path_ + ": instance '" +
+                                 instance.instance +
+                                 "' has an unterminated pin");
+      }
+      const std::string pin = Peek().text;
+      ++pos_;
+      if (auto bad = Expect("(")) return *bad;
+      BridgeExprNode expr;
+      if (!AtEnd() && Peek().text == ")") {
+        // An unconnected pin: an empty expression, which the
+        // width checks refuse for gates and ports alike.
+        expr.kind = BridgeExprNode::Kind::kConcat;
+      } else {
+        if (auto bad = ParseExpr(&expr)) return *bad;
+      }
+      if (auto bad = Expect(")")) return *bad;
+      instance.pins.push_back({pin, std::move(expr)});
+      if (AtEnd()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path_ + ": instance '" +
+                                 instance.instance + "' is unterminated");
+      }
+      if (Peek().text == ",") {
+        ++pos_;
+        continue;
+      }
+      if (Peek().text == ")") {
+        ++pos_;
+        break;
+      }
+      return FailAt(Peek(), "expected ',' or ')' in instance '" +
+                                instance.instance + "'");
+    }
+    if (auto bad = Expect(";")) return *bad;
+    module->raw_instances.push_back(std::move(instance));
+    return std::nullopt;
+  }
+
+  std::optional<Status> ParseAssign(BridgeModule* module) {
+    const VerilogToken& assign_token = Peek();
+    ++pos_;
+    if (AtEnd()) {
+      return Status::Error(ErrorCode::kInvalidArgument,
+                           "mapped Verilog " + path_ +
+                               ": unterminated assign");
+    }
+    const VerilogToken& lhs = Peek();
+    // ABC's writer emits `assign po_username<N> = <net>;` for
+    // every driven output; the name is never declared, and the
+    // net is the real output net. Skip those lines.
+    if (lhs.text.rfind("po_username", 0) == 0) {
+      ++pos_;
+      if (auto bad = Expect("=")) return *bad;
+      if (AtEnd()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path_ +
+                                 ": unterminated assign");
+      }
+      ++pos_;
+      if (auto bad = Expect(";")) return *bad;
+      return std::nullopt;
+    }
+    BridgeRawAssign assign;
+    assign.line = assign_token.line;
+    if (auto bad = ParseExpr(&assign.lhs)) return *bad;
+    if (assign.lhs.kind == BridgeExprNode::Kind::kConstant) {
+      return FailAt(lhs, "unsupported assign left side: the "
+                         "bridge takes net aliases and constants "
+                         "only");
+    }
+    if (auto bad = Expect("=")) return *bad;
+    if (auto bad = ParseExpr(&assign.rhs)) return *bad;
+    if (auto bad = Expect(";")) return *bad;
+    module->raw_assigns.push_back(std::move(assign));
+    return std::nullopt;
+  }
+
+  std::optional<Status> ParseModule(BridgeModule* module) {
+    ++pos_;  // 'module', checked by the caller.
+    if (AtEnd()) {
+      return Status::Error(ErrorCode::kInvalidArgument,
+                           "mapped Verilog " + path_ +
+                               ": module has no name");
+    }
+    module->name = Peek().text;
+    ++pos_;
+    if (auto bad = Expect("(")) return *bad;
+    // The header port list: names only; the declarations in
+    // the body are the record the reader trusts.
+    if (!AtEnd() && Peek().text == ")") {
+      ++pos_;
+    } else {
+      while (true) {
+        if (AtEnd()) {
+          return Status::Error(ErrorCode::kInvalidArgument,
+                               "mapped Verilog " + path_ +
+                                   ": unterminated module header");
+        }
+        ++pos_;  // One port name.
+        if (AtEnd()) {
+          return Status::Error(ErrorCode::kInvalidArgument,
+                               "mapped Verilog " + path_ +
+                                   ": unterminated module header");
+        }
+        if (Peek().text == ")") {
+          ++pos_;
+          break;
+        }
+        if (Peek().text != ",") {
+          return FailAt(Peek(), "expected ',' or ')' in module header");
+        }
+        ++pos_;
+      }
+    }
+    if (auto bad = Expect(";")) return *bad;
+    std::set<std::string> instances;
+    while (true) {
+      if (AtEnd()) {
+        return Status::Error(ErrorCode::kInvalidArgument,
+                             "mapped Verilog " + path_ +
+                                 ": no endmodule");
+      }
+      const VerilogToken& token = Peek();
+      if (token.text == "endmodule") {
+        ++pos_;
+        return std::nullopt;
+      }
+      if (token.text == "input" || token.text == "output" ||
+          token.text == "wire") {
+        if (auto bad = ParseDeclaration(module)) return *bad;
+        continue;
+      }
+      if (token.text == "assign") {
+        if (auto bad = ParseAssign(module)) return *bad;
+        continue;
+      }
+      if (cell_set_.count(token.text) != 0 ||
+          module_names_.count(token.text) != 0) {
+        if (auto bad = ParseInstance(module, &instances)) {
+          return *bad;
+        }
+        continue;
+      }
+      return FailAt(token, "unexpected statement '" + token.text +
+                               "': not a mapped netlist statement");
+    }
+  }
+
+  // Expands one expression against the module's declarations,
+  // validating every net reference. Context names the
+  // statement in error messages.
+  std::optional<Status> ExpandExpr(const BridgeModule& module,
+                                   const BridgeExprNode& node,
+                                   const std::string& context,
+                                   int line, BridgeExpr* out) {
+    if (node.kind == BridgeExprNode::Kind::kConstant) {
+      for (const bool bit : node.const_bits) {
+        BridgeExprBit expr_bit;
+        expr_bit.constant = true;
+        expr_bit.value = bit;
+        out->push_back(expr_bit);
+      }
+      return std::nullopt;
+    }
+    if (node.kind == BridgeExprNode::Kind::kConcat) {
+      for (const BridgeExprNode& part : node.parts) {
+        if (auto bad = ExpandExpr(module, part, context, line, out)) {
+          return *bad;
+        }
+      }
+      return std::nullopt;
+    }
+    const auto found = module.decls.find(node.name);
+    if (found == module.decls.end()) {
+      return Status::Error(ErrorCode::kInvalidArgument,
+                           "mapped Verilog " + path_ + " line " +
+                               std::to_string(line) + ": " + context +
+                               " connects undeclared net '" + node.name +
+                               "'");
+    }
+    const BridgeDecl& decl = found->second;
+    std::vector<int> indices;
+    if (node.select == 0) {
+      indices = BridgeDeclBits(decl);
+    } else if (node.select == 1) {
+      if (!BridgeDeclHasBit(decl, node.a)) {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "mapped Verilog " + path_ + " line " +
+                std::to_string(line) + ": " + context +
+                " selects bit " + std::to_string(node.a) +
+                " of net '" + node.name +
+                "', which does not declare it");
+      }
+      indices.push_back(node.a);
+    } else {
+      if (!BridgeDeclHasBit(decl, node.a) ||
+          !BridgeDeclHasBit(decl, node.b)) {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "mapped Verilog " + path_ + " line " +
+                std::to_string(line) + ": " + context +
+                " selects bits " + std::to_string(node.a) + ":" +
+                std::to_string(node.b) + " of net '" + node.name +
+                "', which does not declare them");
+      }
+      const int step = node.a <= node.b ? 1 : -1;
+      for (int i = node.a;; i += step) {
+        indices.push_back(i);
+        if (i == node.b) break;
+      }
+    }
+    for (const int index : indices) {
+      BridgeExprBit expr_bit;
+      expr_bit.net.name = node.name;
+      expr_bit.net.index = index;
+      out->push_back(expr_bit);
+    }
+    return std::nullopt;
+  }
+
+  std::optional<Status> ExpandModule(BridgeModule* module) {
+    for (const BridgeRawInstance& raw : module->raw_instances) {
+      BridgeInstance instance;
+      instance.is_module = raw.is_module;
+      instance.type = raw.type;
+      instance.instance = raw.instance;
+      instance.line = raw.line;
+      const std::string context =
+          (raw.is_module ? "instance '" : "gate '") + raw.instance +
+          "'";
+      for (const auto& pin : raw.pins) {
+        BridgeExpr expr;
+        if (auto bad = ExpandExpr(*module, pin.second, context,
+                                  raw.line, &expr)) {
+          return *bad;
+        }
+        instance.pins.push_back({pin.first, std::move(expr)});
+      }
+      module->instances.push_back(std::move(instance));
+    }
+    for (const BridgeRawAssign& raw : module->raw_assigns) {
+      BridgeAssign assign;
+      assign.line = raw.line;
+      if (auto bad = ExpandExpr(*module, raw.lhs, "assign", raw.line,
+                                &assign.lhs)) {
+        return *bad;
+      }
+      // The left side may be a name, a select, or a
+      // concatenation of those (the backend writes all
+      // three); every expanded bit must be a net bit.
+      for (const BridgeExprBit& bit : assign.lhs) {
+        if (bit.constant) {
+          return Status::Error(
+              ErrorCode::kInvalidArgument,
+              "mapped Verilog " + path_ + " line " +
+                  std::to_string(raw.line) +
+                  ": assign left side holds a constant: the "
+                  "bridge takes net aliases and constants only");
+        }
+      }
+      if (auto bad = ExpandExpr(*module, raw.rhs, "assign", raw.line,
+                                &assign.rhs)) {
+        return *bad;
+      }
+      if (assign.lhs.size() != assign.rhs.size()) {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "mapped Verilog " + path_ + " line " +
+                std::to_string(raw.line) +
+                ": assign left side has " +
+                std::to_string(assign.lhs.size()) +
+                " bits, right side has " +
+                std::to_string(assign.rhs.size()));
+      }
+      module->assigns.push_back(std::move(assign));
+    }
+    return std::nullopt;
+  }
+
+  // The flattener recurses into submodule instances, so a
+  // module that instantiates itself, directly or through a
+  // cycle, is refused here, naming the cycle.
+  std::optional<Status> CheckCycles(
+      const std::map<std::string, BridgeModule>& modules) {
+    std::map<std::string, int> state;  // 0 unseen, 1 on stack, 2 done.
+    for (const auto& entry : modules) {
+      if (state[entry.first] != 0) continue;
+      // Iterative DFS; the stack is the current module path.
+      std::vector<std::string> stack{entry.first};
+      std::vector<std::size_t> next_child{0};
+      state[entry.first] = 1;
+      while (!stack.empty()) {
+        const BridgeModule& module = modules.at(stack.back());
+        std::size_t& cursor = next_child.back();
+        bool descended = false;
+        while (cursor < module.instances.size()) {
+          const BridgeInstance& instance =
+              module.instances[cursor++];
+          if (!instance.is_module) continue;
+          const std::string& child = instance.type;
+          if (state[child] == 1) {
+            std::string cycle;
+            bool in_cycle = false;
+            for (const std::string& step : stack) {
+              if (step == child) in_cycle = true;
+              if (in_cycle) {
+                if (!cycle.empty()) cycle += " -> ";
+                cycle += step;
+              }
+            }
+            cycle += " -> " + child;
+            return Status::Error(
+                ErrorCode::kInvalidArgument,
+                "mapped Verilog " + path_ +
+                    ": module instantiation cycle: " + cycle);
+          }
+          if (state[child] == 0) {
+            state[child] = 1;
+            stack.push_back(child);
+            next_child.push_back(0);
+            descended = true;
+            break;
+          }
+        }
+        if (!descended && cursor >= module.instances.size()) {
+          state[stack.back()] = 2;
+          stack.pop_back();
+          next_child.pop_back();
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  const std::vector<VerilogToken>& tokens_;
+  const std::string& path_;
+  const std::set<std::string>& cell_set_;
+  std::set<std::string> module_names_;
+  std::size_t pos_ = 0;
+};
+
+// Flattens the parsed modules rooted at the session top into
+// the flat netlist WriteMappedDef consumes. See the bridge
+// header comment for the naming and constant rules.
+class BridgeFlattener {
+ public:
+  BridgeFlattener(const std::map<std::string, BridgeModule>& modules,
+                  const std::string& path)
+      : modules_(modules), path_(path) {}
+
+  Result<MappedNetlist> Flatten(const std::string& top_name) {
+    const BridgeModule& top = modules_.at(top_name);
+    const std::map<std::pair<std::string, int>, int> no_ports;
+    if (auto bad = FlattenModule(top, "", no_ports, true)) {
+      return *bad;
+    }
+    return BuildNetlist(top, top_name);
+  }
+
+ private:
+  struct FlatNode {
+    std::string rendered;
+    int depth = 0;
+    int seq = 0;
+    bool is_top_port = false;
+    bool connected = false;
+    int assign_seq = -1;
+  };
+
+  struct FlatGate {
+    std::string cell;
+    std::string instance;
+    std::vector<std::pair<std::string, int>> pins;  // Pin to node.
+  };
+
+  struct ConstantMark {
+    bool value = false;
+    std::string name;  // The assign left side that set it.
+    int line = 0;
+  };
+
+  int Find(int id) {
+    int root = id;
+    while (parent_[root] != root) root = parent_[root];
+    while (parent_[id] != root) {
+      const int next = parent_[id];
+      parent_[id] = root;
+      id = next;
+    }
+    return root;
+  }
+
+  void Union(int a, int b) {
+    a = Find(a);
+    b = Find(b);
+    if (a != b) parent_[b] = a;
+  }
+
+  int NodeFor(const std::string& path, const std::string& name,
+              bool ranged, int bit, bool is_top_port) {
+    const std::string key =
+        path + '\x1f' + name + '\x1f' + std::to_string(bit);
+    const auto found = node_ids_.find(key);
+    if (found != node_ids_.end()) return found->second;
+    FlatNode node;
+    node.rendered = (path.empty() ? std::string() : path + "/") +
+                    (ranged ? name + "[" + std::to_string(bit) + "]"
+                            : name);
+    node.depth = 0;
+    for (const char c : path) {
+      if (c == '/') ++node.depth;
+    }
+    if (!path.empty()) ++node.depth;
+    node.seq = static_cast<int>(nodes_.size());
+    node.is_top_port = is_top_port;
+    const int id = static_cast<int>(nodes_.size());
+    nodes_.push_back(std::move(node));
+    parent_.push_back(id);
+    node_ids_[key] = id;
+    return id;
+  }
+
+  // A fresh unnamed node carrying one constant bit.
+  int ConstantNode(bool value, const std::string& name, int line) {
+    const int id = static_cast<int>(nodes_.size());
+    FlatNode node;
+    node.seq = id;
+    nodes_.push_back(std::move(node));
+    parent_.push_back(id);
+    ConstantMark mark;
+    mark.value = value;
+    mark.name = name;
+    mark.line = line;
+    constants_[id] = mark;
+    return id;
+  }
+
+  // Resolves one net bit of a module instance to its flat
+  // node: a child module's port bit is the parent node its
+  // connection mapped it to; anything else is a node of this
+  // instance, created on first use.
+  std::optional<Status> ResolveBit(
+      const BridgeModule& module, const std::string& path,
+      const std::map<std::pair<std::string, int>, int>& port_map,
+      bool is_top, const BridgeBitRef& ref, int line, int* out) {
+    const BridgeDecl& decl = module.decls.at(ref.name);
+    if (!is_top && decl.direction != 0) {
+      const auto found = port_map.find({ref.name, ref.index});
+      if (found == port_map.end()) {
+        return Status::Error(
+            ErrorCode::kInvalidArgument,
+            "mapped Verilog " + path_ + " line " +
+                std::to_string(line) + ": port '" +
+                (decl.ranged
+                     ? ref.name + "[" + std::to_string(ref.index) + "]"
+                     : ref.name) +
+                "' of module '" + module.name +
+                "' is used but not connected by instance '" + path +
+                "'");
+      }
+      *out = found->second;
+      return std::nullopt;
+    }
+    *out = NodeFor(path, ref.name, decl.ranged, ref.index,
+                   is_top && decl.direction != 0);
+    return std::nullopt;
+  }
+
+  std::optional<Status> FlattenModule(
+      const BridgeModule& module, const std::string& path,
+      const std::map<std::pair<std::string, int>, int>& port_map,
+      bool is_top) {
+    // Every declared net of this instance gets its nodes in
+    // declaration order, so flattened wire order follows the
+    // file. A child module's ports get no nodes: they are the
+    // parent's nets.
+    for (const std::string& name : module.decl_order) {
+      const BridgeDecl& decl = module.decls.at(name);
+      if (!is_top && decl.direction != 0) continue;
+      for (const int bit : BridgeDeclBits(decl)) {
+        NodeFor(path, name, decl.ranged, bit,
+                is_top && decl.direction != 0);
+      }
+    }
+    for (const BridgeAssign& assign : module.assigns) {
+      const int seq = assign_counter_++;
+      std::vector<int> lhs_ids;
+      for (const BridgeExprBit& bit : assign.lhs) {
+        int id = 0;
+        if (auto bad = ResolveBit(module, path, port_map, is_top,
+                                  bit.net, assign.line, &id)) {
+          return *bad;
+        }
+        lhs_ids.push_back(id);
+      }
+      for (std::size_t k = 0; k < assign.rhs.size(); ++k) {
+        const BridgeExprBit& bit = assign.rhs[k];
+        const int lhs = lhs_ids[k];
+        if (nodes_[lhs].assign_seq < 0) {
+          nodes_[lhs].assign_seq = seq;
+        }
+        if (bit.constant) {
+          constants_[lhs] = ConstantMark{
+              bit.value, nodes_[lhs].rendered, assign.line};
+          continue;
+        }
+        int rhs = 0;
+        if (auto bad = ResolveBit(module, path, port_map, is_top,
+                                  bit.net, assign.line, &rhs)) {
+          return *bad;
+        }
+        Union(lhs, rhs);
+      }
+    }
+    for (const BridgeInstance& instance : module.instances) {
+      const std::string instance_path =
+          path.empty() ? instance.instance
+                       : path + "/" + instance.instance;
+      if (!instance.is_module) {
+        FlatGate gate;
+        gate.cell = instance.type;
+        gate.instance = instance_path;
+        for (const auto& pin : instance.pins) {
+          const BridgeExpr& expr = pin.second;
+          if (expr.size() != 1) {
+            return Status::Error(
+                ErrorCode::kInvalidArgument,
+                "mapped Verilog " + path_ + " line " +
+                    std::to_string(instance.line) + ": gate '" +
+                    instance_path + "' pin '" + pin.first +
+                    "' connects " + std::to_string(expr.size()) +
+                    " nets: the bridge takes one scalar net per "
+                    "gate pin");
+          }
+          const BridgeExprBit& bit = expr.front();
+          if (bit.constant) {
+            return Status::Error(
+                ErrorCode::kInvalidArgument,
+                "mapped Verilog " + path_ + " line " +
+                    std::to_string(instance.line) + ": gate '" +
+                    instance_path + "' pin '" + pin.first +
+                    "' is tied to a constant: the bridge takes "
+                    "gate netlists only, tie constants off in "
+                    "the RTL");
+          }
+          int id = 0;
+          if (auto bad = ResolveBit(module, path, port_map, is_top,
+                                    bit.net, instance.line, &id)) {
+            return *bad;
+          }
+          nodes_[id].connected = true;
+          gate.pins.push_back({pin.first, id});
+        }
+        gates_.push_back(std::move(gate));
+        continue;
+      }
+      const BridgeModule& child = modules_.at(instance.type);
+      std::map<std::pair<std::string, int>, int> child_ports;
+      for (const auto& pin : instance.pins) {
+        const auto decl_found = child.decls.find(pin.first);
+        if (decl_found == child.decls.end() ||
+            decl_found->second.direction == 0) {
+          return Status::Error(
+              ErrorCode::kInvalidArgument,
+              "mapped Verilog " + path_ + " line " +
+                  std::to_string(instance.line) + ": instance '" +
+                  instance_path + "' connects '" + pin.first +
+                  "', which module '" + instance.type +
+                  "' does not declare as a port");
+        }
+        const BridgeDecl& child_decl = decl_found->second;
+        const std::vector<int> child_bits = BridgeDeclBits(child_decl);
+        if (pin.second.size() != child_bits.size()) {
+          return Status::Error(
+              ErrorCode::kInvalidArgument,
+              "mapped Verilog " + path_ + " line " +
+                  std::to_string(instance.line) + ": instance '" +
+                  instance_path + "' port '" + pin.first +
+                  "' connects " +
+                  std::to_string(pin.second.size()) +
+                  " nets to a " + std::to_string(child_bits.size()) +
+                  "-bit port");
+        }
+        for (std::size_t k = 0; k < child_bits.size(); ++k) {
+          const BridgeExprBit& bit = pin.second[k];
+          int id = 0;
+          if (bit.constant) {
+            id = ConstantNode(bit.value, "", instance.line);
+          } else {
+            if (auto bad = ResolveBit(module, path, port_map, is_top,
+                                      bit.net, instance.line, &id)) {
+              return *bad;
+            }
+            nodes_[id].connected = true;
+          }
+          child_ports[{pin.first, child_bits[k]}] = id;
+        }
+      }
+      if (auto bad = FlattenModule(child, instance_path, child_ports,
+                                   false)) {
+        return *bad;
+      }
+    }
+    return std::nullopt;
+  }
+
+  Result<MappedNetlist> BuildNetlist(const BridgeModule& top,
+                                     const std::string& top_name) {
+    // Alias groups, and each group's constant value if any
+    // member bit was assigned one.
+    std::map<int, std::vector<int>> groups;
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+      groups[Find(static_cast<int>(i))].push_back(
+          static_cast<int>(i));
+    }
+    std::map<int, ConstantMark> group_constant;
+    for (const auto& entry : groups) {
+      std::optional<ConstantMark> mark;
+      for (const int member : entry.second) {
+        const auto found = constants_.find(member);
+        if (found == constants_.end()) continue;
+        if (mark.has_value() && mark->value != found->second.value) {
+          return Status::Error(
+              ErrorCode::kInvalidArgument,
+              "mapped Verilog " + path_ + ": net '" +
+                  (mark->name.empty() ? found->second.name
+                                      : mark->name) +
+                  "' is tied to conflicting constants");
+        }
+        if (!mark.has_value()) mark = found->second;
+      }
+      if (mark.has_value()) group_constant[entry.first] = *mark;
+    }
+    auto constant_error = [&](const ConstantMark& mark,
+                              const std::string& fallback) {
+      return Status::Error(
+          ErrorCode::kInvalidArgument,
+          "mapped Verilog " + path_ + " line " +
+              std::to_string(mark.line) + ": net '" +
+              (mark.name.empty() ? fallback : mark.name) +
+              "' is tied to a constant: the bridge takes gate "
+              "netlists only, tie constants off in the RTL");
+    };
+    // A constant that feeds a gate pin or a top output is a
+    // live constant: refused. A constant feeding nothing is
+    // dropped with its group below.
+    std::set<int> referenced;
+    for (const FlatGate& gate : gates_) {
+      for (const auto& pin : gate.pins) {
+        const int root = Find(pin.second);
+        referenced.insert(root);
+        const auto found = group_constant.find(root);
+        if (found != group_constant.end()) {
+          return constant_error(found->second,
+                                nodes_[pin.second].rendered);
+        }
+      }
+    }
+    // Canonical name per group: a top port's name first, then
+    // the name written at a connection, then the first assign
+    // left side that formed the group; ties break toward the
+    // shallower path, then declaration order.
+    std::map<int, std::string> canonical;
+    std::map<int, int> canonical_seq;
+    for (const auto& entry : groups) {
+      const FlatNode* best = nullptr;
+      int best_key = 0;
+      for (const int member : entry.second) {
+        const FlatNode& node = nodes_[member];
+        const int key = node.is_top_port ? 0
+                        : node.connected ? 1
+                        : node.assign_seq >= 0 ? 2
+                                               : 3;
+        if (best == nullptr || key < best_key ||
+            (key == best_key &&
+             (node.depth < best->depth ||
+              (node.depth == best->depth && node.seq < best->seq)))) {
+          best = &node;
+          best_key = key;
+        }
+      }
+      canonical[entry.first] = best->rendered;
+      canonical_seq[entry.first] = best->seq;
+    }
+    MappedNetlist netlist;
+    netlist.top = top_name;
+    for (const std::string& name : top.decl_order) {
+      const BridgeDecl& decl = top.decls.at(name);
+      if (decl.direction == 0) continue;
+      for (const int bit : BridgeDeclBits(decl)) {
+        const int id = node_ids_.at(
+            std::string() + '\x1f' + name + '\x1f' +
+            std::to_string(bit));
+        const int root = Find(id);
+        if (decl.direction > 0) {
+          const auto found = group_constant.find(root);
+          if (found != group_constant.end()) {
+            return constant_error(found->second, nodes_[id].rendered);
+          }
+          netlist.outputs.push_back(canonical[root]);
+        } else {
+          netlist.inputs.push_back(canonical[root]);
+        }
+      }
+    }
+    for (const FlatGate& gate : gates_) {
+      MappedGate out;
+      out.cell = gate.cell;
+      out.instance = gate.instance;
+      for (const auto& pin : gate.pins) {
+        out.pins.push_back({pin.first, canonical[Find(pin.second)]});
+      }
+      netlist.gates.push_back(std::move(out));
+    }
+    std::vector<std::pair<int, std::string>> wires;
+    for (const auto& entry : groups) {
+      if (group_constant.count(entry.first) != 0) continue;
+      if (referenced.count(entry.first) == 0) continue;
+      bool is_port_group = false;
+      for (const int member : entry.second) {
+        if (nodes_[member].is_top_port) {
+          is_port_group = true;
+          break;
+        }
+      }
+      if (is_port_group) continue;
+      wires.push_back(
+          {canonical_seq[entry.first], canonical[entry.first]});
+    }
+    std::sort(wires.begin(), wires.end());
+    for (const auto& wire : wires) netlist.wires.push_back(wire.second);
+    if (netlist.inputs.empty() && netlist.outputs.empty() &&
+        netlist.gates.empty()) {
+      return Status::Error(ErrorCode::kInvalidArgument,
+                           "mapped Verilog " + path_ +
+                               ": empty netlist");
+    }
+    return netlist;
+  }
+
+  const std::map<std::string, BridgeModule>& modules_;
+  const std::string& path_;
+  std::vector<FlatNode> nodes_;
+  std::vector<int> parent_;
+  std::map<std::string, int> node_ids_;
+  std::map<int, ConstantMark> constants_;
+  std::vector<FlatGate> gates_;
+  int assign_counter_ = 0;
+};
+
+// Reads one mapped Verilog file (ABC format or Yosys format)
+// and flattens it rooted at the session top into the flat
+// netlist WriteMappedDef consumes. cell_set is the genlib
+// cell list from the mapping run: a statement whose first
+// token is a genlib cell is a gate instantiation, one naming
+// a module in the file is a submodule instantiation, and any
+// other statement shape is an error.
 Result<MappedNetlist> ParseMappedVerilog(
-    const std::string& path, const std::set<std::string>& cell_set) {
+    const std::string& path, const std::set<std::string>& cell_set,
+    const std::string& top_name) {
   std::ifstream in(path);
   if (!in) {
     return Status::Error(ErrorCode::kIoError,
@@ -628,252 +1930,18 @@ Result<MappedNetlist> ParseMappedVerilog(
   const Result<std::vector<VerilogToken>> tokenized =
       TokenizeVerilog(buffer.str(), path);
   if (!tokenized.ok()) return tokenized.status();
-  const std::vector<VerilogToken>& tokens = tokenized.value();
-  std::size_t pos = 0;
-  auto at_end = [&]() { return pos >= tokens.size(); };
-  auto peek = [&]() -> const VerilogToken& { return tokens[pos]; };
-  auto fail_at = [&](const VerilogToken& token,
-                     const std::string& message) {
-    return Status::Error(
-        ErrorCode::kInvalidArgument,
-        "mapped Verilog " + path + " line " +
-            std::to_string(token.line) + ": " + message);
-  };
-  auto expect = [&](const std::string& text)
-      -> std::optional<Status> {
-    if (at_end() || peek().text != text) {
-      const std::string got =
-          at_end() ? std::string("end of file") : peek().text;
-      const int line = at_end() ? 0 : peek().line;
-      return Status::Error(
-          ErrorCode::kInvalidArgument,
-          "mapped Verilog " + path +
-              (line > 0 ? " line " + std::to_string(line) : "") +
-              ": expected '" + text + "', found '" + got + "'");
-    }
-    ++pos;
-    return std::nullopt;
-  };
-  auto read_list = [&](std::vector<std::string>* out,
-                       std::vector<std::size_t>* positions,
-                       const std::string& terminator)
-      -> std::optional<Status> {
-    // Reads identifiers separated by commas up to the terminator
-    // (';' for declarations, ')' for the module header list,
-    // which the caller then closes with ';'), recording each
-    // name's token position for error messages.
-    while (true) {
-      if (at_end()) {
-        return Status::Error(
-            ErrorCode::kInvalidArgument,
-            "mapped Verilog " + path + ": unterminated list");
-      }
-      positions->push_back(pos);
-      out->push_back(peek().text);
-      ++pos;
-      if (at_end()) {
-        return Status::Error(
-            ErrorCode::kInvalidArgument,
-            "mapped Verilog " + path + ": unterminated list");
-      }
-      if (peek().text == terminator) {
-        ++pos;
-        return std::nullopt;
-      }
-      if (peek().text != ",") {
-        return fail_at(peek(), "expected ',' or '" + terminator +
-                                   "' in list");
-      }
-      ++pos;
-    }
-  };
-
-  MappedNetlist netlist;
-  if (auto bad = expect("module")) return *bad;
-  if (at_end()) {
+  BridgeParser parser(tokenized.value(), path, cell_set);
+  const Result<std::map<std::string, BridgeModule>> modules =
+      parser.Parse();
+  if (!modules.ok()) return modules.status();
+  if (modules.value().count(top_name) == 0) {
     return Status::Error(ErrorCode::kInvalidArgument,
                          "mapped Verilog " + path +
-                             ": module has no name");
+                             ": no module named '" + top_name +
+                             "' in the file");
   }
-  netlist.top = peek().text;
-  ++pos;
-  if (auto bad = expect("(")) return *bad;
-  {
-    std::vector<std::string> header_ports;
-    std::vector<std::size_t> header_positions;
-    if (auto bad = read_list(&header_ports, &header_positions, ")")) {
-      return *bad;
-    }
-    if (auto bad = expect(";")) return *bad;
-    if (header_ports.empty()) {
-      return Status::Error(ErrorCode::kInvalidArgument,
-                           "mapped Verilog " + path +
-                               ": module has no ports");
-    }
-  }
-  std::set<std::string> declared;
-  auto declare = [&](const std::string& name, const VerilogToken& token)
-      -> std::optional<Status> {
-    if (!declared.insert(name).second) {
-      return fail_at(token, "duplicate net '" + name + "'");
-    }
-    return std::nullopt;
-  };
-  bool saw_endmodule = false;
-  while (!at_end() && !saw_endmodule) {
-    const VerilogToken& token = peek();
-    if (token.text == "endmodule") {
-      ++pos;
-      saw_endmodule = true;
-      break;
-    }
-    if (token.text == "input" || token.text == "output" ||
-        token.text == "wire") {
-      const std::string kind = token.text;
-      ++pos;
-      std::vector<std::string> names;
-      std::vector<std::size_t> positions;
-      if (auto bad = read_list(&names, &positions, ";")) return *bad;
-      for (std::size_t k = 0; k < names.size(); ++k) {
-        if (auto bad = declare(names[k], tokens[positions[k]])) {
-          return *bad;
-        }
-      }
-      if (kind == "input") {
-        netlist.inputs.insert(netlist.inputs.end(), names.begin(),
-                              names.end());
-      } else if (kind == "output") {
-        netlist.outputs.insert(netlist.outputs.end(), names.begin(),
-                               names.end());
-      } else {
-        netlist.wires.insert(netlist.wires.end(), names.begin(),
-                             names.end());
-      }
-      continue;
-    }
-    if (token.text == "assign") {
-      ++pos;
-      if (at_end()) {
-        return Status::Error(ErrorCode::kInvalidArgument,
-                             "mapped Verilog " + path +
-                                 ": unterminated assign");
-      }
-      const VerilogToken& lhs = peek();
-      ++pos;
-      // ABC's writer emits `assign po_username<N> = <net>;` for
-      // every driven output; the name is never declared, and the
-      // net is the real output net. Skip those lines.
-      if (lhs.text.rfind("po_username", 0) == 0) {
-        if (auto bad = expect("=")) return *bad;
-        if (at_end()) {
-          return Status::Error(ErrorCode::kInvalidArgument,
-                               "mapped Verilog " + path +
-                                   ": unterminated assign");
-        }
-        ++pos;
-        if (auto bad = expect(";")) return *bad;
-        continue;
-      }
-      return fail_at(lhs, "constant or unexpected assign for net '" +
-                              lhs.text +
-                              "': the bridge takes gate netlists "
-                              "only, tie constants off in the RTL");
-    }
-    if (cell_set.count(token.text) != 0) {
-      MappedGate gate;
-      gate.cell = token.text;
-      ++pos;
-      if (at_end()) {
-        return Status::Error(ErrorCode::kInvalidArgument,
-                             "mapped Verilog " + path +
-                                 ": gate has no instance name");
-      }
-      gate.instance = peek().text;
-      ++pos;
-      if (auto bad = expect("(")) return *bad;
-      while (true) {
-        if (at_end() || peek().text != ".") {
-          return Status::Error(
-              ErrorCode::kInvalidArgument,
-              "mapped Verilog " + path + ": gate '" + gate.instance +
-                  "' expects a '.pin(net)' connection");
-        }
-        ++pos;
-        if (at_end()) {
-          return Status::Error(ErrorCode::kInvalidArgument,
-                               "mapped Verilog " + path + ": gate '" +
-                                   gate.instance +
-                                   "' has an unterminated pin");
-        }
-        const std::string pin = peek().text;
-        ++pos;
-        if (auto bad = expect("(")) return *bad;
-        if (at_end()) {
-          return Status::Error(ErrorCode::kInvalidArgument,
-                               "mapped Verilog " + path + ": gate '" +
-                                   gate.instance +
-                                   "' has an unterminated pin");
-        }
-        const std::string net = peek().text;
-        ++pos;
-        if (auto bad = expect(")")) return *bad;
-        gate.pins.push_back({pin, net});
-        if (at_end()) {
-          return Status::Error(ErrorCode::kInvalidArgument,
-                               "mapped Verilog " + path + ": gate '" +
-                                   gate.instance +
-                                   "' is unterminated");
-        }
-        if (peek().text == ",") {
-          ++pos;
-          continue;
-        }
-        if (peek().text == ")") {
-          ++pos;
-          break;
-        }
-        return fail_at(peek(), "expected ',' or ')' in gate '" +
-                                   gate.instance + "'");
-      }
-      if (auto bad = expect(";")) return *bad;
-      netlist.gates.push_back(std::move(gate));
-      continue;
-    }
-    return fail_at(token, "unexpected statement '" + token.text +
-                              "': not an ABC mapped netlist");
-  }
-  if (!saw_endmodule) {
-    return Status::Error(ErrorCode::kInvalidArgument,
-                         "mapped Verilog " + path +
-                             ": no endmodule");
-  }
-  if (!at_end()) {
-    return fail_at(peek(), "unexpected content after endmodule");
-  }
-  if (netlist.inputs.empty() && netlist.outputs.empty() &&
-      netlist.gates.empty()) {
-    return Status::Error(ErrorCode::kInvalidArgument,
-                         "mapped Verilog " + path +
-                             ": empty netlist");
-  }
-  std::set<std::string> instances;
-  for (const MappedGate& gate : netlist.gates) {
-    if (!instances.insert(gate.instance).second) {
-      return Status::Error(ErrorCode::kInvalidArgument,
-                           "mapped Verilog " + path +
-                               ": duplicate instance '" + gate.instance +
-                               "'");
-    }
-    for (const auto& pin : gate.pins) {
-      if (declared.count(pin.second) == 0) {
-        return Status::Error(
-            ErrorCode::kInvalidArgument,
-            "mapped Verilog " + path + ": gate '" + gate.instance +
-                "' connects undeclared net '" + pin.second + "'");
-      }
-    }
-  }
-  return netlist;
+  BridgeFlattener flattener(modules.value(), path);
+  return flattener.Flatten(top_name);
 }
 
 // One LEF macro: its size in microns and its signal pins with
@@ -11942,16 +13010,27 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             start = comma + 1;
           }
         }
-        const Result<MappedNetlist> parsed =
-            ParseMappedVerilog(source, cell_set);
-        if (!parsed.ok()) return FromStatus(parsed.status());
-        if (parsed.value().top != ctx.synth.top_cell) {
-          return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
-              "mapped netlist top '" + parsed.value().top +
-                  "' is not the session top '" + ctx.synth.top_cell +
-                  "'");
+        // The sequential half of the mapping run's cell list:
+        // mapped_genlib_cells holds the combinational genlib
+        // cells only, so a mapped flop's statement would
+        // otherwise read as an unknown statement. synth_map's
+        // own scan set is built the same way, from the same
+        // enumeration of the mapped Liberty's sequential
+        // cells. A liberty that cannot be enumerated leaves
+        // the genlib set as it is: the ABC path's files hold
+        // no sequential cells, and a sequential mapping run
+        // already enumerated this Liberty successfully.
+        if (!ctx.synth.mapped_liberty.empty()) {
+          const foundation::Result<synth::AbcBlackboxStubs> stubs =
+              synth::AbcEngine::BlackboxStubs(ctx.synth.mapped_liberty);
+          if (stubs.ok()) {
+            cell_set.insert(stubs.value().cell_names.begin(),
+                            stubs.value().cell_names.end());
+          }
         }
+        const Result<MappedNetlist> parsed = ParseMappedVerilog(
+            source, cell_set, ctx.synth.top_cell);
+        if (!parsed.ok()) return FromStatus(parsed.status());
         const Result<LefData> lef = ParseLefMacros(lef_path);
         if (!lef.ok()) return FromStatus(lef.status());
         const Result<int> dbu = ParseLefDbu(tlef_path);
@@ -11959,9 +13038,19 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const Result<DefWriteResult> written = WriteMappedDef(
             dest, parsed.value(), lef.value(), dbu.value(), die_area);
         if (!written.ok()) return FromStatus(written.status());
+        // The payload counts the flattened netlist the DEF
+        // was written from, not the file: the two agree on a
+        // flat ABC netlist, and on a hierarchical Yosys
+        // netlist the payload must describe the DEF (cells
+        // in modules the top never instantiates are not in
+        // it). ScanMappedCells still serves the synth_map
+        // and synth_opt payloads, whose subject is the file.
         std::map<std::string, int> by_type;
-        int total_cells = 0;
-        ScanMappedCells(source, cell_set, &by_type, &total_cells);
+        for (const MappedGate& gate : parsed.value().gates) {
+          ++by_type[gate.cell];
+        }
+        const int total_cells =
+            static_cast<int>(parsed.value().gates.size());
         const std::string types = CellTypesText(by_type);
         auto area_text = [](const std::array<int, 4>& area) {
           return std::to_string(area[0]) + "," +

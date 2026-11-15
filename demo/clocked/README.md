@@ -123,9 +123,17 @@ eos::synth_stats
 eos::synth_generic
 ```
 
-`synth_map` is deliberately absent from this sequence: it does
-not complete on this design (see "Known limitation" below). Do
-not append it to the demo and expect success.
+`synth_map` completes on this design since PR 141 (see
+"synth_map and the DEF bridge" below), and the flow continues
+through the bridge into a DEF the PD stages load:
+
+```
+eos::synth_map -target area
+eos::write_def clk_top.def -lef ../../src/pd/rsz/tests/mock/eos_mock.lef -tlef ../../src/pd/rsz/tests/mock/eos_mock.tlef
+eos::read_lef ../../src/pd/rsz/tests/mock/eos_mock.tlef
+eos::read_lef ../../src/pd/rsz/tests/mock/eos_mock.lef
+eos::read_def clk_top.def
+```
 
 ## GUI walkthrough
 
@@ -231,38 +239,44 @@ than a slack number:
   no cells in it.
 
 The path to real slack is the mapped netlist through
-`synth_map`, which is blocked by the limitation below. This
-is engine work, outside this demo's scope. Do not "fix" the
-demo by collapsing the seven files into one: the multi-file
-layout is the design, and hiding the limitation would
-mislead the F5 and clock-network units this demo exists for.
+`synth_map` and the DEF bridge (next section), loaded as
+the timing design source; that wiring is engine work,
+outside this demo's scope. Do not "fix" the demo by
+collapsing the seven files into one: the multi-file layout
+is the design, and hiding the limitation would mislead the
+F5 and clock-network units this demo exists for.
 
-### synth_map on sequential designs
+### synth_map and the DEF bridge
 
-`synth_map` does NOT complete on this design, and the reason
-is an engine limitation, not a demo bug. The measured failure
-is:
+`synth_map` completes on this design since PR 141 (the
+synth_map-sequential unit): mapping runs inside Yosys
+(dfflibmap first, then abc -dff -liberty), so the mapped
+Verilog is Yosys-format, one module per leaf. The
+mapped-netlist bridge unit then taught `write_def`'s reader
+that format, flattening inside the reader, so the F5
+acceptance sequence (`synth_map`, `write_def`, `read_def`,
+`floorplan`, `place`, `cts -clock <mapped net>`) runs end
+to end on this design.
 
-```
-error: EOS io_error: ABC command failed (mapping-time optimization): strash
-Line 872: Cannot find the model for subcircuit $_DFF_PN0_.
-Reading network from file has failed.
-Error: Empty network.
-```
+Measured on the sequence above (`synth_map -target area`):
 
-Note the failure mode: `synth_map`'s sequential guard checks
-the top module's own sequential count (`Stats(top)`), which
-is 0 for a hierarchical design whose flops live in leaves,
-so the guard lets this design through and it dies later in
-ABC. The guard needs the design-wide count (`DesignTotals`,
-as `synth_generic` already uses) to fail fast here. That
-fix belongs to the synth_map-on-sequential unit, not this
-demo. The F5 acceptance sequence in the design doc
-(`synth_map`, `write_def`, `read_def`, `floorplan`, `place`,
-`cts -clock <mapped net>`) does not run until that unit
-lands. No mapped net names are recorded here because no
-mapped netlist exists yet; the F5 unit records them after
-the first run.
+- `write_def` payload: `source=mapped design=clk_top
+  cells=168 pins=29`, with `EM_DFFR_X1:31` in `types=`. The
+  31 flops are the instantiated ones (u_div 1, u_ctrl 6,
+  u_bank 8, u_acc 8, u_cnt 8); the mapped file's design-wide
+  census of 39 also counts clk_cap's 8, in a module the
+  elaborated design no longer instantiates, so the bridge
+  drops them and the DEF reports the design that exists.
+- The two mapped clock nets F5 passes to `cts -clock` are
+  named `clk` and `div_q` (clk_top's own wire for the
+  divider flop's output, instance `u_div/_17_` in the
+  pinned Yosys 0.70 backend's numbering).
+- CTS sink expectations on this design are 23 sinks on the
+  `clk` net and 8 on the `div_q` net (EM_DFFR_X1 clock pins
+  reached), superseding the designed 21 and 16 under the
+  discrepancy rule above: the 21-to-23 difference is
+  u_ctrl's one-hot recode, and the 16-to-8 difference is
+  u_cap's pruning at elaborate.
 
 ### The clock table in a read_sdc-only session (F2 caveat, fixed)
 
@@ -296,15 +310,13 @@ are:
   the instance because its only output is unconnected (by
   design, above), so the 39-flop total in "The design"
   counts a module the elaborated hierarchy no longer
-  instantiates. Second, the mapped stage is not reachable
-  on this design yet: the DEF bridge's netlist reader
-  understands the ABC-written mapped format only, and
-  sequential `synth_map` writes Yosys-format Verilog, so
-  `write_def` fails and the query keeps reporting the
-  constraint rows with a note. Per pin on the mapped
-  netlist, the surviving domains hold 23 clock pins on
-  `clk` and 8 on `clk_div`. Latency reads `-` at every
-  stage: it is a post-CTS STA result, delivered by F5.
+  instantiates. Second, the mapped stage walks the
+  bridged DEF per pin since the mapped-netlist bridge
+  unit taught the DEF bridge's reader the Yosys format:
+  23 clock pins on `clk` and 8 on `clk_div`, the divider
+  flop flagged as the sink that generates `clk_div`.
+  Latency reads `-` at every stage: it is a post-CTS STA
+  result, delivered by F5.
 
 ### Mock guardrail
 

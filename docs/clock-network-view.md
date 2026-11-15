@@ -107,7 +107,12 @@ the mapped netlist that does exist, the domains hold 23
 clock pins on `clk` and 8 on `clk_div`: the 39-flop total
 PR 141 measured counts the orphaned clk_cap module's cells
 design-wide, and mapping preserves each surviving flop's
-domain, not the pruned instance's.
+domain, not the pruned instance's. The mapped-netlist
+bridge unit (ahead of F5) has since taught the bridge's
+reader the Yosys format, flattening inside the reader, so
+the mapped stage is now reachable on this design and
+reports the per-pin counts above: 23 sinks on `clk`, 8 on
+`clk_div`, the divider flagged as generating `clk_div`.
 
 ## The Clocks tab
 
