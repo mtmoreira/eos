@@ -73,6 +73,23 @@ void AppendPayloadToLog(std::vector<SessionView::LogEntry>& log,
   }
 }
 
+// True when the session constraint set holds any clock row:
+// an SDC clock row, a generated clock, or a bind_clock
+// construction record. Mirrors the registry's clocks-only
+// timing_summary gate (clock-network design section 2.7): the
+// Timing panel keeps its model for a clocks-only summary
+// instead of clearing it.
+bool SessionHasClockRows(const CommandContext& context) {
+  for (const db::Constraint& constraint :
+       context.project.constraints.all()) {
+    if (constraint.kind == db::ConstraintKind::kClock ||
+        constraint.kind == db::ConstraintKind::kGeneratedClock) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // The timing inputs as one string: everything the timing
 // model shows depends on. A refresh whose key matches the
 // last build skips the query, so a plain refresh never pays
@@ -475,7 +492,12 @@ void SessionView::RefreshIssues() {
 }
 
 void SessionView::RefreshTiming() {
-  if (context_.timing.last_results.empty()) {
+  // The clear is gated on the clock rows as well as the stored
+  // results: a session holding clocks but no timing run shows
+  // the clocks-only timing_summary (clock-network design
+  // section 2.7), not an empty panel.
+  if (context_.timing.last_results.empty() &&
+      !SessionHasClockRows(context_)) {
     timing_.Clear();
     timing_key_.clear();
     return;
@@ -505,6 +527,15 @@ void SessionView::RefreshPlacement() {
   if (!result.ok || !placement_.LoadPayload(result.payload)) {
     NoteUnguardedRefreshFailure(messages_, "place_summary", result,
                                 placement_.Empty());
+  }
+}
+
+void SessionView::RefreshClockNetwork() {
+  const CommandResult result =
+      registry_.Dispatch(context_, "clock_network_summary", {});
+  if (!result.ok || !clock_network_.LoadPayload(result.payload)) {
+    NoteUnguardedRefreshFailure(messages_, "clock_network_summary",
+                                result, !clock_network_.Loaded());
   }
 }
 

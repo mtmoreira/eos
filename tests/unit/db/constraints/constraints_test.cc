@@ -194,5 +194,66 @@ TEST(Constraints, StateRoundTripPreservesParams) {
   EXPECT_EQ(c->Param("from").value_or(""), "a b");
 }
 
+// AddUnresolved stores the row exactly as given: no design
+// exists at store time, so the status is kUnresolved with a
+// null bound object and the params intact.
+TEST(Constraints, AddUnresolvedStoresRow) {
+  ConstraintSet set;
+  const ConstraintId id = set.AddUnresolved(
+      ConstraintKind::kClock, "clk", "clk",
+      {{"period_ns", "5"}, {"source_file", "clk_top.sdc"}});
+  const Constraint* c = set.Find(id);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->status, BindingStatus::kUnresolved);
+  EXPECT_TRUE(c->bound_object.is_null());
+  EXPECT_EQ(c->target_spec, "clk");
+  EXPECT_EQ(c->Param("period_ns").value_or(""), "5");
+  EXPECT_EQ(c->Param("source_file").value_or(""), "clk_top.sdc");
+}
+
+// A targetless row (a virtual clock) stores as kEmpty, the
+// same status Resolve gives an empty spec.
+TEST(Constraints, AddUnresolvedEmptySpecIsEmpty) {
+  ConstraintSet set;
+  const ConstraintId id = set.AddUnresolved(
+      ConstraintKind::kClock, "vclk", "", {{"period_ns", "1.25"}});
+  const Constraint* c = set.Find(id);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->status, BindingStatus::kEmpty);
+  EXPECT_TRUE(c->bound_object.is_null());
+}
+
+// The stored row takes its chance at the next RebindAll: with
+// a design present it binds like any other row.
+TEST(Constraints, AddUnresolvedRebindsLater) {
+  Fixture f;
+  ConstraintSet set;
+  const ConstraintId id = set.AddUnresolved(
+      ConstraintKind::kClock, "clk", "clk", {{"period_ns", "5"}});
+  ASSERT_EQ(set.Find(id)->status, BindingStatus::kUnresolved);
+  set.RebindAll(f.design);
+  const Constraint* c = set.Find(id);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->status, BindingStatus::kBound);
+  EXPECT_EQ(c->bound_object, f.clk_port);
+}
+
+// An unresolved row round-trips through project state like
+// any other row: status and provenance params intact.
+TEST(Constraints, StateRoundTripsUnresolved) {
+  ConstraintSet set;
+  const ConstraintId id = set.AddUnresolved(
+      ConstraintKind::kGeneratedClock, "clk_div", "u_div/q",
+      {{"source", "clk"}, {"source_file", "clk_top.sdc"}});
+  const ConstraintState state = set.ExportState();
+  foundation::Result<ConstraintSet> restored =
+      ConstraintSet::FromState(state);
+  ASSERT_TRUE(restored.ok()) << restored.status().message();
+  const Constraint* c = restored.value().Find(id);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(c->status, BindingStatus::kUnresolved);
+  EXPECT_EQ(c->Param("source_file").value_or(""), "clk_top.sdc");
+}
+
 }  // namespace
 }  // namespace eos::db

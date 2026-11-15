@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,12 @@ struct OdbMasterPin {
   std::string name;
   bool is_input = false;
   bool is_output = false;
+  // The LEF pin is declared USE CLOCK (the term's signal type
+  // is CLOCK). Supply pins are filtered out of MasterPins
+  // entirely, so this is false for every pin of a master whose
+  // LEF carries no clock use (the mock clock buffers, for
+  // example, declare none).
+  bool is_clock = false;
 };
 
 // One connection on a net. A top-level port connection has an
@@ -165,6 +172,13 @@ class OdbDatabase {
   // the net is unknown.
   std::vector<OdbNetConnection> NetConnections(
       const std::string& net_name) const;
+  // The net one pin attaches to: the instance pin when
+  // `instance` names an instance, or the top-level port when
+  // `instance` is empty (the OdbNetConnection convention).
+  // nullopt when the instance, port, or pin does not exist or
+  // the pin is unconnected.
+  std::optional<std::string> NetForPin(const std::string& instance,
+                                       const std::string& pin) const;
 
   // Swaps an instance to another master. Fails with kNotFound for
   // an unknown instance or master, and with kInvalidArgument when

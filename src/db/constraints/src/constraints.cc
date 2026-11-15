@@ -59,6 +59,22 @@ ConstraintId ConstraintSet::Add(ConstraintKind kind, const std::string& name,
   return constraints_.back().id;
 }
 
+ConstraintId ConstraintSet::AddUnresolved(
+    ConstraintKind kind, const std::string& name,
+    const std::string& target_spec,
+    std::vector<std::pair<std::string, std::string>> params) {
+  Constraint constraint;
+  constraint.id = next_id_++;
+  constraint.kind = kind;
+  constraint.name = name;
+  constraint.target_spec = target_spec;
+  constraint.params = std::move(params);
+  constraint.status = target_spec.empty() ? BindingStatus::kEmpty
+                                          : BindingStatus::kUnresolved;
+  constraints_.push_back(std::move(constraint));
+  return constraints_.back().id;
+}
+
 bool ConstraintSet::Remove(ConstraintId id) {
   for (auto it = constraints_.begin(); it != constraints_.end(); ++it) {
     if (it->id == id) {

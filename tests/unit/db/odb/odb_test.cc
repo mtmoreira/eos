@@ -467,5 +467,48 @@ TEST(Odb, WriteDefBeforeAnyDefIsInvalidState) {
   EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
 }
 
+// is_clock carries the LEF pin's USE CLOCK through the facade:
+// the mock flop EM_DFFR_X1 declares CK as USE CLOCK and its
+// data pins as USE SIGNAL, and the mock clock buffer declares
+// no clock use at all, so it reports no clock pin.
+TEST(Odb, MasterPinsReportsClockUse) {
+  OdbDatabase db;
+  const std::string mock = EOS_MOCK_PDK_DIR;
+  ASSERT_TRUE(db.ReadLef(mock + "/eos_mock.tlef").ok());
+  ASSERT_TRUE(db.ReadLef(mock + "/eos_mock.lef").ok());
+  const std::vector<OdbMasterPin> flop = db.MasterPins("EM_DFFR_X1");
+  ASSERT_FALSE(flop.empty());
+  bool saw_ck = false;
+  for (const OdbMasterPin& pin : flop) {
+    if (pin.name == "CK") {
+      saw_ck = true;
+      EXPECT_TRUE(pin.is_clock) << "CK must carry USE CLOCK";
+    } else {
+      EXPECT_FALSE(pin.is_clock) << pin.name << " is USE SIGNAL";
+    }
+  }
+  EXPECT_TRUE(saw_ck);
+  const std::vector<OdbMasterPin> buffer = db.MasterPins("EM_CLKBUF_X1");
+  ASSERT_FALSE(buffer.empty());
+  for (const OdbMasterPin& pin : buffer) {
+    EXPECT_FALSE(pin.is_clock) << pin.name;
+  }
+}
+
+// NetForPin resolves instance pins and top-level ports (the
+// empty-instance convention) to their nets.
+TEST(Odb, NetForPinFindsNet) {
+  TempDir dir;
+  OdbDatabase db;
+  LoadFixture(db, dir);
+  EXPECT_EQ(db.NetForPin("u1", "Y").value_or(""), "n_mid");
+  EXPECT_EQ(db.NetForPin("u2", "A").value_or(""), "n_mid");
+  EXPECT_EQ(db.NetForPin("", "in1").value_or(""), "n_in");
+  EXPECT_EQ(db.NetForPin("", "out1").value_or(""), "n_out");
+  EXPECT_FALSE(db.NetForPin("u1", "ZZZ").has_value());
+  EXPECT_FALSE(db.NetForPin("nope", "Y").has_value());
+  EXPECT_FALSE(db.NetForPin("", "nope").has_value());
+}
+
 }  // namespace
 }  // namespace eos::db

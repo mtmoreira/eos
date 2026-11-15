@@ -129,6 +129,16 @@ class ConstraintSet {
   ConstraintId Add(ConstraintKind kind, const std::string& name,
                    const std::string& target_spec, const Design& design,
                    std::vector<std::pair<std::string, std::string>> params);
+  // Stores a row with no design to bind against: status
+  // kUnresolved (kEmpty when target_spec is empty), bound
+  // object null. RebindAll gives it its chance when a design
+  // appears. read_sdc wires file clocks through here when no
+  // session design is open, so file state survives until one
+  // is.
+  ConstraintId AddUnresolved(
+      ConstraintKind kind, const std::string& name,
+      const std::string& target_spec,
+      std::vector<std::pair<std::string, std::string>> params);
 
   // Removes the constraint with this id, if present. Used by the
   // clock commands' replace-by-default semantics: redefining a named

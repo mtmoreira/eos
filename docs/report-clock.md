@@ -87,16 +87,21 @@ are derived from its master, by pure arithmetic on stored data.
 `-skew` adds a `Skew` column reporting the stored clock
 uncertainty of each clock, following the manual's rule that
 `-skew` reports the uncertainty of the clocks. EOS has no
-`set_clock_uncertainty` command yet, so the value is `none`
-for every clock today, and the report says so in a footer
-line naming the missing command:
+interactive `set_clock_uncertainty` command, but `read_sdc`
+wires a file's `set_clock_uncertainty` statements onto the
+clock rows (as `uncertainty_setup_ns` params), and the column
+reports that value for clocks that carry one. A clock with
+no stored uncertainty reads `none`. While no clock carries
+one, the report says so in a footer line naming the missing
+command:
 
 ```text
 skew: no clock uncertainty is defined for any clock (set_clock_uncertainty is not an EOS command yet)
 ```
 
-When `set_clock_uncertainty` lands, the column populates
-without a change to this command's interface.
+Once any clock carries an uncertainty the footer no longer
+prints: the column speaks for itself, with `none` marking
+the clocks without one.
 
 ## Construction records
 
@@ -112,12 +117,13 @@ A design with no clocks at all reports `clocks=0`.
 
 ## Boundary
 
-- `report_clock` reports clocks defined with `eos::`
-  commands. It does not read the SDC file recorded by
-  `read_sdc`: that path stores the file path only, so clocks
-  defined in an SDC file do not appear. The session-constraint
-  boundary is the same as for `check_timing`; see
-  `docs/sdc-commands.md`.
+- `report_clock` reports the clocks in the session
+  constraint set: clocks defined with `eos::` commands and
+  clocks `read_sdc` wired in from an SDC file (the
+  clock-network unit's F2 fix; the file's rows carry a
+  `source_file` provenance param). It does not parse SDC
+  files itself. The session-constraint boundary is the same
+  as for `check_timing`; see `docs/sdc-commands.md`.
 - `create_generated_clock` supports `-divide_by`,
   `-multiply_by`, `-invert`, and `-combinational`. It does not
   support `-edges`: that option fails fast as unknown, and a

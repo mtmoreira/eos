@@ -18,6 +18,7 @@
 #include "eos/db/odb.h"
 #include "eos/db/waivers.h"
 #include "eos/eco/timing_eco.h"
+#include "eos/io/sdc.h"
 #include "odb/db.h"
 #include "eos/session/flow.h"
 #include "eos/synth/abc.h"
@@ -3671,10 +3672,11 @@ WaiverEvaluations EvaluateWaivers(CommandContext& ctx) {
 // docs/sdc-commands.md). The report never invents a number: a
 // period or waveform that cannot be derived from stored data
 // renders as "-", and the -skew column reports the stored clock
-// uncertainty, which is "none" for every clock today because EOS
-// has no set_clock_uncertainty command yet. Does NOT include
-// report_clock_timing (clock-network summary and skew); that is
-// a separate item.
+// uncertainty: "none" unless read_sdc wired a
+// set_clock_uncertainty value onto the clock's rows (there is
+// still no interactive set_clock_uncertainty command). Does NOT
+// include report_clock_timing (clock-network summary and
+// skew); that is a separate item.
 
 // One clock entry in the report_clock main table: stored rows that
 // render identically (same name, same kind, same effective period
@@ -3689,6 +3691,11 @@ struct ReportClockEntry {
   std::optional<double> period_ns;
   std::optional<double> rise_ns;
   std::optional<double> fall_ns;
+  // The setup uncertainty stored on the group's rows
+  // (uncertainty_setup_ns, wired by read_sdc from
+  // set_clock_uncertainty), or nullopt when no row carries
+  // one: rendered "none".
+  std::optional<double> uncertainty_setup_ns;
 };
 
 // One row of the generated-clock table: a generated-clock
@@ -3888,6 +3895,15 @@ std::vector<ReportClockEntry> ReportClockEntries(
         entry->fall_ns = fall_ns;
       }
       if (c.status != db::BindingStatus::kBound) entry->unresolved = true;
+      if (!entry->uncertainty_setup_ns.has_value()) {
+        if (const std::optional<std::string> uncertainty =
+                c.Param("uncertainty_setup_ns")) {
+          double value = 0.0;
+          if (ParseDouble(*uncertainty, value)) {
+            entry->uncertainty_setup_ns = value;
+          }
+        }
+      }
       ReportClockAddSource(entry->sources, c.target_spec);
     } else if (c.kind == db::ConstraintKind::kGeneratedClock) {
       // Derive from this row's own definition, not from the name:
@@ -3916,6 +3932,15 @@ std::vector<ReportClockEntry> ReportClockEntries(
         entry->fall_ns = fall_ns;
       }
       if (c.status != db::BindingStatus::kBound) entry->unresolved = true;
+      if (!entry->uncertainty_setup_ns.has_value()) {
+        if (const std::optional<std::string> uncertainty =
+                c.Param("uncertainty_setup_ns")) {
+          double value = 0.0;
+          if (ParseDouble(*uncertainty, value)) {
+            entry->uncertainty_setup_ns = value;
+          }
+        }
+      }
       ReportClockAddSource(entry->sources, c.target_spec);
     }
   }
@@ -5136,6 +5161,1223 @@ bool MemberTargetNames(const CommandContext& ctx,
   }
   out.push_back(name);
   return true;
+}
+
+// True when the session constraint set holds any clock row: an
+// SDC clock row (kClock with period_ns), a generated clock, or
+// a kClock row without period_ns (a bind_clock construction
+// record). timing_summary's clocks-only mode and the GUI's
+// RefreshTiming gate both key on exactly this set (clock-
+// network design section 2.7).
+bool SessionHasClockRows(const CommandContext& ctx) {
+  for (const db::Constraint& c : ctx.project.constraints.all()) {
+    if (c.kind == db::ConstraintKind::kClock ||
+        c.kind == db::ConstraintKind::kGeneratedClock) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The clock rows of a timing_summary payload: the SDC clock
+// entries, the generated-clock entries, and the bind records,
+// in that order, each row prefixed with a newline. Shared by
+// the full payload (after run_timing) and the clocks-only mode
+// (no timing results yet), so the two can never drift. Skew
+// reads the setup uncertainty read_sdc wired onto the rows,
+// "none" when no statement set one.
+std::string TimingSummaryClockRows(const db::ConstraintSet& constraints) {
+  std::string rows;
+  const std::vector<ReportClockEntry> clocks =
+      ReportClockEntries(constraints);
+  for (const ReportClockEntry& entry : clocks) {
+    std::string attrs;
+    if (entry.generated) attrs += "G";
+    if (entry.unresolved) attrs += "u";
+    rows += "\nclock name=" + entry.name +
+            " generated=" + (entry.generated ? "1" : "0") +
+            " period=" +
+            (entry.period_ns.has_value() ? FormatNum(*entry.period_ns)
+                                         : std::string("-")) +
+            " rise=" +
+            (entry.rise_ns.has_value() ? FormatNum(*entry.rise_ns)
+                                       : std::string("-")) +
+            " fall=" +
+            (entry.fall_ns.has_value() ? FormatNum(*entry.fall_ns)
+                                       : std::string("-")) +
+            " attrs=" + attrs +
+            " skew=" +
+            (entry.uncertainty_setup_ns.has_value()
+                 ? FormatNum(*entry.uncertainty_setup_ns)
+                 : std::string("none")) +
+            " sources=" + ReportClockBrace(entry.sources);
+  }
+  const std::vector<ReportGeneratedEntry> generated =
+      ReportGeneratedEntries(constraints);
+  for (const ReportGeneratedEntry& entry : generated) {
+    // The brace groups carry the source lists and the
+    // modification: both may contain spaces, so they ride
+    // as one brace-valued token each.
+    rows += "\ngenclock name=" + entry.name +
+            " master_clock=" +
+            (entry.master_clock.empty() ? std::string("-")
+                                        : entry.master_clock) +
+            " modification=" +
+            (entry.modification.empty()
+                 ? std::string("-")
+                 : "{" + entry.modification + "}") +
+            " master_source={" + entry.master_source + "}" +
+            " sources=" + ReportClockBrace(entry.sources);
+  }
+  for (const db::Constraint& c : constraints.all()) {
+    if (c.kind != db::ConstraintKind::kClock ||
+        c.Param("period_ns").has_value()) {
+      continue;
+    }
+    rows += "\nbindclock name=" + c.name + " target={" + c.target_spec + "}";
+  }
+  return rows;
+}
+
+// ----------------------------------------------------------------
+// read_sdc wiring (clock-network design section 2.3): the file's
+// clock statements become ordinary rows in the session
+// constraint set, stored with the interactive handlers' exact
+// param names plus a source_file provenance param, last. The
+// rules, in order: replacement (a re-read drops the file's
+// previous rows), name collisions (an interactive definition
+// wins over the file's), master resolution, and uncertainty
+// folding. Wiring never creates a session design and never
+// binds against an engine: with a design open the rows go
+// through ConstraintSet::Add, without one through AddUnresolved,
+// and RebindAll gives them their chance later.
+
+struct SdcWireCounts {
+  int clocks = 0;       // create_clock definitions wired
+  int generated = 0;    // create_generated_clock definitions wired
+  int uncertainty = 0;  // stored rows that received an uncertainty
+  int skipped = 0;      // definitions skipped (interactive wins)
+  int masterless = 0;   // generated definitions stored masterless
+  // Wiring-stage unwired entries (the parser's carry line 0:
+  // the parser's records do not carry def line numbers).
+  std::vector<io::SdcUnwired> unwired;
+};
+
+using SdcParams = std::vector<std::pair<std::string, std::string>>;
+
+// The stored name for a file definition: the -name when the
+// file gave one, else the normalized single target. The parser
+// records the single target as written in the name field when
+// no -name was given, which the comparison detects.
+std::string FileClockName(const std::string& parsed_name,
+                          const std::vector<std::string>& raw_targets,
+                          const std::vector<std::string>& targets) {
+  if (raw_targets.size() == 1 && parsed_name == raw_targets.front() &&
+      !targets.empty()) {
+    return targets.front();
+  }
+  return parsed_name;
+}
+
+// True when a row of this kind and name exists with no
+// source_file provenance: an interactive definition, which wins
+// a name collision over the file's definition.
+bool HasInteractiveRow(const db::ConstraintSet& set,
+                       db::ConstraintKind kind, const std::string& name) {
+  for (const db::Constraint& c : set.all()) {
+    if (c.kind == kind && c.name == name &&
+        !c.Param("source_file").has_value()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Stores one wired row: bound through the existing Add path
+// when a session design is open, unresolved otherwise.
+void StoreWiredRow(CommandContext& ctx, db::ConstraintKind kind,
+                   const std::string& name, const std::string& target,
+                   SdcParams params) {
+  if (ctx.HasDesign()) {
+    ctx.project.constraints.Add(kind, name, target, *ctx.project.design,
+                                std::move(params));
+  } else {
+    ctx.project.constraints.AddUnresolved(kind, name, target,
+                                          std::move(params));
+  }
+}
+
+// What one uncertainty statement targets: every clock (an
+// [all_clocks] target or no target at all), or a set of clock
+// names (bare or through [get_clocks ...]).
+struct UncertaintyTargets {
+  bool all = false;
+  std::set<std::string> names;
+};
+
+// Classifies an uncertainty statement's targets. Returns an
+// unwired reason when a target is not a clock reference at all.
+std::optional<std::string> ClassifyUncertaintyTargets(
+    const io::SdcUncertaintyDef& def, UncertaintyTargets& out) {
+  if (def.targets.empty()) {
+    out.all = true;
+    return std::nullopt;
+  }
+  for (const std::string& target : def.targets) {
+    if (target == "[all_clocks]") {
+      out.all = true;
+      continue;
+    }
+    if (target.rfind("[get_clocks", 0) == 0) {
+      // The bracket text minus its wrapper, words after the
+      // command word are clock names.
+      std::string inner = target.substr(1, target.size() - 2);
+      std::istringstream words(inner);
+      std::string word;
+      bool first = true;
+      while (words >> word) {
+        if (first) {
+          first = false;
+          continue;
+        }
+        if (!word.empty() && word.front() != '-') out.names.insert(word);
+      }
+      continue;
+    }
+    if (!target.empty() && target.front() == '[') {
+      return "uncertainty target is not a clock reference: " + target;
+    }
+    out.names.insert(target);
+  }
+  return std::nullopt;
+}
+
+// The folded uncertainty for one clock name: statements in
+// file order, last statement wins per setup and per hold
+// separately.
+struct FoldedUncertainty {
+  std::optional<double> setup;
+  std::optional<double> hold;
+};
+
+// Wires one parsed SDC file into the session set and reports
+// the counts the read_sdc payload carries.
+SdcWireCounts WireSdcClocks(CommandContext& ctx,
+                            const io::SdcClockFile& file,
+                            const std::string& path) {
+  SdcWireCounts counts;
+  db::ConstraintSet& set = ctx.project.constraints;
+
+  // Rule 1, replacement: every stored row whose provenance is
+  // this file goes away first, whatever kind it is.
+  {
+    std::vector<db::ConstraintId> doomed;
+    for (const db::Constraint& c : set.all()) {
+      if (c.Param("source_file").value_or("") == path) {
+        doomed.push_back(c.id);
+      }
+    }
+    for (const db::ConstraintId id : doomed) set.Remove(id);
+  }
+
+  // Prepare the definitions: normalize targets with the
+  // registry's own normalization and derive the stored names.
+  struct PreparedClock {
+    const io::SdcClockDef* def;
+    std::string name;
+    std::vector<std::string> targets;
+  };
+  struct PreparedGenerated {
+    const io::SdcGeneratedClockDef* def;
+    std::string name;
+    std::vector<std::string> targets;
+    std::string source;
+  };
+  std::vector<PreparedClock> clocks;
+  std::set<std::string> defined_names;
+  for (const io::SdcClockDef& def : file.clocks) {
+    std::vector<std::string> targets;
+    if (auto bad = NormalizeTargets(def.targets, "read_sdc", ctx, targets)) {
+      counts.unwired.push_back(
+          io::SdcUnwired{0, "create_clock", bad->message});
+      defined_names.insert(def.name);
+      continue;
+    }
+    PreparedClock prepared;
+    prepared.def = &def;
+    prepared.name = FileClockName(def.name, def.targets, targets);
+    prepared.targets = std::move(targets);
+    defined_names.insert(prepared.name);
+    clocks.push_back(std::move(prepared));
+  }
+  std::vector<PreparedGenerated> generated;
+  for (const io::SdcGeneratedClockDef& def : file.generated) {
+    std::vector<std::string> targets;
+    if (auto bad = NormalizeTargets(def.targets, "read_sdc", ctx, targets)) {
+      counts.unwired.push_back(
+          io::SdcUnwired{0, "create_generated_clock", bad->message});
+      defined_names.insert(def.name);
+      continue;
+    }
+    std::vector<std::string> source_targets;
+    if (def.source.empty() ||
+        NormalizeTargets({def.source}, "read_sdc", ctx, source_targets)
+                .has_value() ||
+        source_targets.size() != 1) {
+      counts.unwired.push_back(io::SdcUnwired{
+          0, "create_generated_clock",
+          "generated clock " + def.name + " has no single -source to wire"});
+      defined_names.insert(def.name);
+      continue;
+    }
+    PreparedGenerated prepared;
+    prepared.def = &def;
+    prepared.name = FileClockName(def.name, def.targets, targets);
+    prepared.targets = std::move(targets);
+    prepared.source = source_targets.front();
+    defined_names.insert(prepared.name);
+    generated.push_back(std::move(prepared));
+  }
+
+  // Rule 5, uncertainty folding, computed before any row is
+  // stored: the params ride on the rows themselves.
+  std::vector<UncertaintyTargets> classified;
+  for (const io::SdcUncertaintyDef& def : file.uncertainties) {
+    UncertaintyTargets targets;
+    if (auto reason = ClassifyUncertaintyTargets(def, targets)) {
+      counts.unwired.push_back(
+          io::SdcUnwired{0, "set_clock_uncertainty", *reason});
+      classified.push_back(UncertaintyTargets());
+      continue;
+    }
+    if (!targets.all && !targets.names.empty()) {
+      bool any_defined = false;
+      for (const std::string& name : targets.names) {
+        if (defined_names.count(name) != 0) any_defined = true;
+      }
+      if (!any_defined) {
+        // The statement names only clocks this file does not
+        // define: there is no param-update API to reach rows
+        // stored earlier, so it is reported, not folded.
+        counts.unwired.push_back(io::SdcUnwired{
+            0, "set_clock_uncertainty",
+            "names a clock the file does not define"});
+        classified.push_back(UncertaintyTargets());
+        continue;
+      }
+    }
+    classified.push_back(std::move(targets));
+  }
+  const auto folded_for = [&](const std::string& name) {
+    FoldedUncertainty folded;
+    for (std::size_t i = 0; i < file.uncertainties.size(); ++i) {
+      const UncertaintyTargets& targets = classified[i];
+      if (!targets.all && targets.names.count(name) == 0) continue;
+      const io::SdcUncertaintyDef& def = file.uncertainties[i];
+      if (def.has_setup) folded.setup = def.setup_ns;
+      if (def.has_hold) folded.hold = def.hold_ns;
+    }
+    return folded;
+  };
+  const auto append_uncertainty = [&](const std::string& name,
+                                      SdcParams& params) {
+    const FoldedUncertainty folded = folded_for(name);
+    if (folded.setup.has_value()) {
+      params.push_back({"uncertainty_setup_ns", FormatNum(*folded.setup)});
+    }
+    if (folded.hold.has_value()) {
+      params.push_back({"uncertainty_hold_ns", FormatNum(*folded.hold)});
+    }
+    return folded.setup.has_value() || folded.hold.has_value();
+  };
+
+  // Clocks first, so generated-clock master resolution below
+  // sees this file's own clocks already stored.
+  for (const PreparedClock& prepared : clocks) {
+    const io::SdcClockDef& def = *prepared.def;
+    // Rule 2: an interactive definition of the same name wins.
+    if (HasInteractiveRow(set, db::ConstraintKind::kClock, prepared.name)) {
+      counts.skipped += 1;
+      continue;
+    }
+    SdcParams base;
+    base.push_back({"period_ns", FormatNum(def.period_ns)});
+    if (def.has_waveform) {
+      base.push_back({"waveform_rise_ns", FormatNum(def.waveform_rise_ns)});
+      base.push_back({"waveform_fall_ns", FormatNum(def.waveform_fall_ns)});
+    }
+    const bool has_uncertainty = append_uncertainty(prepared.name, base);
+    base.push_back({"source_file", path});
+    if (prepared.targets.empty()) {
+      // A targetless create_clock is a virtual clock: one row,
+      // empty target spec.
+      StoreWiredRow(ctx, db::ConstraintKind::kClock, prepared.name, "",
+                    base);
+      if (has_uncertainty) counts.uncertainty += 1;
+    } else {
+      for (const std::string& target : prepared.targets) {
+        StoreWiredRow(ctx, db::ConstraintKind::kClock, prepared.name,
+                      target, base);
+        if (has_uncertainty) counts.uncertainty += 1;
+      }
+    }
+    counts.clocks += 1;
+  }
+  for (const PreparedGenerated& prepared : generated) {
+    const io::SdcGeneratedClockDef& def = *prepared.def;
+    if (HasInteractiveRow(set, db::ConstraintKind::kGeneratedClock,
+                          prepared.name)) {
+      counts.skipped += 1;
+      continue;
+    }
+    SdcParams base;
+    base.push_back({"source", prepared.source});
+    // Rule 4, master resolution: the -master_clock value as
+    // written, else the clock row whose target is this clock's
+    // source, else no master param at all (counted masterless).
+    std::optional<std::string> master;
+    if (def.has_master_clock) {
+      master = def.master_clock;
+    } else {
+      for (const db::Constraint& c : set.all()) {
+        if (c.kind == db::ConstraintKind::kClock &&
+            c.target_spec == prepared.source) {
+          master = c.name;
+          break;
+        }
+      }
+    }
+    if (master.has_value()) {
+      base.push_back({"master_clock", *master});
+    } else {
+      counts.masterless += 1;
+    }
+    if (def.divide_by != 0) {
+      base.push_back({"divide_by", std::to_string(def.divide_by)});
+    }
+    if (def.multiply_by != 0) {
+      base.push_back({"multiply_by", std::to_string(def.multiply_by)});
+    }
+    if (def.invert) base.push_back({"invert", "1"});
+    if (def.combinational) base.push_back({"combinational", "1"});
+    const bool has_uncertainty = append_uncertainty(prepared.name, base);
+    base.push_back({"source_file", path});
+    if (prepared.targets.empty()) {
+      StoreWiredRow(ctx, db::ConstraintKind::kGeneratedClock, prepared.name,
+                    "", base);
+      if (has_uncertainty) counts.uncertainty += 1;
+    } else {
+      for (const std::string& target : prepared.targets) {
+        StoreWiredRow(ctx, db::ConstraintKind::kGeneratedClock,
+                      prepared.name, target, base);
+        if (has_uncertainty) counts.uncertainty += 1;
+      }
+    }
+    counts.generated += 1;
+  }
+  return counts;
+}
+
+// ----------------------------------------------------------------
+// clock_network_summary (clock-network design sections 3 and
+// 4): the per-clock tree of the design the session holds, in
+// three stages. Constraints: the stored rows only. Elaborated:
+// per-leaf sink groups walked over the Yosys facade's hierarchy,
+// block diagrams, and per-module sequential counts. Mapped:
+// a per-pin walk over the ODB facade, classifying each load by
+// its master's pins. Latency is "-" at every stage: per-sink
+// latency exists only after CTS, from post-CTS STA, and this
+// view never presents structure as latency.
+
+struct ClockNodeLine {
+  int depth = 0;
+  std::string kind;  // source, leaf, divider, buffer, sink
+  std::string name;
+  std::string pin;              // mapped stage only; "" renders "-"
+  std::optional<long> count;    // leaf groups: sequential cells
+  std::string generates;        // divider/sink: the generated clock
+};
+
+struct ClockTreeResult {
+  std::string tree = "none";  // none, leaves, pins
+  std::optional<long> sinks;
+  std::vector<ClockNodeLine> nodes;
+  std::vector<std::string> notes;
+  // Sink identities for the shared computation: instance paths
+  // at the elaborated stage, instance names at the mapped one.
+  std::set<std::string> sink_ids;
+  // Mapped stage: every net the walk visited, so the
+  // structural source resolution can tell a generated output
+  // net from one of the master's own nets.
+  std::set<std::string> walked_nets;
+};
+
+// The depth of an instance path: the top module is depth 0,
+// its children depth 1, and so on.
+int PathDepth(const std::string& path) {
+  return static_cast<int>(std::count(path.begin(), path.end(), '/'));
+}
+
+std::string ParentPath(const std::string& path) {
+  const std::size_t slash = path.rfind('/');
+  return slash == std::string::npos ? std::string() : path.substr(0, slash);
+}
+
+std::string LeafName(const std::string& path) {
+  const std::size_t slash = path.rfind('/');
+  return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+// Splits an instance/pin target at its last slash. Returns
+// false when the target has no slash.
+bool SplitTargetPin(const std::string& target, std::string& instance,
+                    std::string& pin) {
+  const std::size_t slash = target.rfind('/');
+  if (slash == std::string::npos) return false;
+  instance = target.substr(0, slash);
+  pin = target.substr(slash + 1);
+  return true;
+}
+
+// Cached facade access for one elaborated walk: block diagrams
+// and sequential counts are per module, fetched once.
+struct ElabTraversal {
+  synth::YosysEngine& engine;
+  std::map<std::string, synth::YosysEngine::BlockDiagramData> diagrams;
+  std::map<std::string, int> sequential;
+
+  const synth::YosysEngine::BlockDiagramData* Diagram(
+      const std::string& module) {
+    const auto it = diagrams.find(module);
+    if (it != diagrams.end()) return &it->second;
+    foundation::Result<synth::YosysEngine::BlockDiagramData> result =
+        engine.BlockDiagram(module);
+    if (!result.ok()) return nullptr;
+    const auto inserted = diagrams.emplace(module, result.value());
+    return &inserted.first->second;
+  }
+
+  int Sequential(const std::string& module) {
+    const auto it = sequential.find(module);
+    if (it != sequential.end()) return it->second;
+    int count = 0;
+    const foundation::Result<synth::YosysNetlistStats> result =
+        engine.Stats(module);
+    if (result.ok()) count = result.value().sequential_cells;
+    sequential[module] = count;
+    return count;
+  }
+};
+
+// One owned net inside one module instance, the worklist unit
+// of the elaborated walk.
+struct OwnedNet {
+  std::string path;    // instance path of the owning module
+  std::string module;  // the module at that path
+  std::string net;     // net name inside the module
+};
+
+// Walks clock ownership from the seed nets: a net is owned when
+// the clock enters it, and ownership propagates into a child
+// block when an owned net touches its port (the net inside the
+// child module whose terminals include that port is owned). A
+// leaf instance on an owned net is a sink group whose count is
+// its module's sequential cells, counted per instance.
+ClockTreeResult WalkElaborated(ElabTraversal& trav,
+                               const std::vector<OwnedNet>& seeds,
+                               const std::string& source_text,
+                               const std::map<std::string, std::string>&
+                                   dividers) {
+  ClockTreeResult out;
+  ClockNodeLine source;
+  source.depth = 0;
+  source.kind = "source";
+  source.name = source_text;
+  out.nodes.push_back(source);
+  std::set<std::pair<std::string, std::string>> visited;
+  std::vector<OwnedNet> work = seeds;
+  std::set<std::string> emitted;
+  long total = 0;
+  while (!work.empty()) {
+    const OwnedNet owned = work.back();
+    work.pop_back();
+    if (!visited.insert({owned.path, owned.net}).second) continue;
+    const synth::YosysEngine::BlockDiagramData* diagram =
+        trav.Diagram(owned.module);
+    if (diagram == nullptr) continue;
+    const synth::YosysEngine::BlockNet* net = nullptr;
+    for (const synth::YosysEngine::BlockNet& candidate : diagram->nets) {
+      if (candidate.name == owned.net) {
+        net = &candidate;
+        break;
+      }
+    }
+    if (net == nullptr) continue;
+    for (const synth::YosysEngine::BlockNetEndpoint& endpoint :
+         net->endpoints) {
+      const synth::YosysEngine::BlockInstance* block = nullptr;
+      for (const synth::YosysEngine::BlockInstance& candidate :
+           diagram->blocks) {
+        if (candidate.instance == endpoint.block) {
+          block = &candidate;
+          break;
+        }
+      }
+      if (block == nullptr) continue;
+      // A block whose touched port is an output drives this
+      // net: it is the clock's source side, never a sink of
+      // the clock on this net (the generated clock's divider
+      // is the case that matters), and ownership does not
+      // flow into a block through its output port.
+      bool drives = false;
+      for (const synth::YosysEngine::BlockPort& port : block->ports) {
+        if (port.name == endpoint.port) drives = port.direction == "out";
+      }
+      if (drives) continue;
+      const std::string child_path = owned.path + "/" + block->instance;
+      const synth::YosysEngine::BlockDiagramData* child =
+          trav.Diagram(block->module);
+      if (child == nullptr) continue;
+      if (child->blocks.empty()) {
+        // A leaf instance on an owned net: a sink group.
+        if (!emitted.insert(child_path).second) continue;
+        const int count = trav.Sequential(block->module);
+        ClockNodeLine node;
+        node.depth = PathDepth(child_path);
+        const auto divider = dividers.find(child_path);
+        node.kind = divider == dividers.end() ? "leaf" : "divider";
+        node.name = child_path + " (" + block->module + ")";
+        node.count = count;
+        if (divider != dividers.end()) node.generates = divider->second;
+        out.nodes.push_back(node);
+        out.sink_ids.insert(child_path);
+        total += count;
+        continue;
+      }
+      // Propagate: the net inside the child whose terminals
+      // include the touched port is owned.
+      for (const synth::YosysEngine::BlockNet& inner : child->nets) {
+        for (const std::string& terminal : inner.terminals) {
+          if (terminal == endpoint.port) {
+            work.push_back(OwnedNet{child_path, block->module, inner.name});
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (!out.sink_ids.empty()) {
+    out.tree = "leaves";
+    out.sinks = total;
+  }
+  return out;
+}
+
+// Finds the net inside a module whose terminals include a
+// port: the seed for a clock entering through that port.
+std::optional<std::string> NetTouchingTerminal(
+    const synth::YosysEngine::BlockDiagramData& diagram,
+    const std::string& port) {
+  for (const synth::YosysEngine::BlockNet& net : diagram.nets) {
+    for (const std::string& terminal : net.terminals) {
+      if (terminal == port) return net.name;
+    }
+  }
+  return std::nullopt;
+}
+
+// Finds the net inside a module touched by an endpoint
+// (instance, port): the seed for a clock leaving an instance.
+std::optional<std::string> NetTouchingEndpoint(
+    const synth::YosysEngine::BlockDiagramData& diagram,
+    const std::string& instance, const std::string& port) {
+  for (const synth::YosysEngine::BlockNet& net : diagram.nets) {
+    for (const synth::YosysEngine::BlockNetEndpoint& endpoint :
+         net.endpoints) {
+      if (endpoint.block == instance && endpoint.port == port) {
+        return net.name;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+// Cached master-pin access for one mapped walk.
+struct MappedTraversal {
+  const db::OdbDatabase& odb;
+  std::map<std::string, std::vector<db::OdbMasterPin>> pins;
+
+  const std::vector<db::OdbMasterPin>& Pins(const std::string& master) {
+    const auto it = pins.find(master);
+    if (it != pins.end()) return it->second;
+    const auto inserted = pins.emplace(master, odb.MasterPins(master));
+    return inserted.first->second;
+  }
+
+  const db::OdbMasterPin* FindPin(const std::string& master,
+                                  const std::string& pin) {
+    for (const db::OdbMasterPin& candidate : Pins(master)) {
+      if (candidate.name == pin) return &candidate;
+    }
+    return nullptr;
+  }
+
+  bool MasterHasOutput(const std::string& master) {
+    for (const db::OdbMasterPin& pin : Pins(master)) {
+      if (pin.is_output) return true;
+    }
+    return false;
+  }
+};
+
+// The per-pin mapped walk: breadth first from the source net.
+// A load whose master pin is a clock pin is a sink; a load on
+// an input pin of an instance with an output pin is a buffer,
+// and the walk continues into each of its output nets; a load
+// that is neither is counted for the note, never absorbed.
+ClockTreeResult WalkMapped(MappedTraversal& trav,
+                           const std::string& source_net,
+                           const std::string& source_text,
+                           const std::map<std::string, std::string>&
+                               generates_for) {
+  ClockTreeResult out;
+  ClockNodeLine source;
+  source.depth = 0;
+  source.kind = "source";
+  source.name = source_text;
+  out.nodes.push_back(source);
+  std::set<std::string> visited;
+  std::vector<std::pair<std::string, int>> work;
+  work.push_back({source_net, 0});
+  long sinks = 0;
+  long data_loads = 0;
+  while (!work.empty()) {
+    const auto [net_name, depth] = work.back();
+    work.pop_back();
+    if (!visited.insert(net_name).second) continue;
+    out.walked_nets.insert(net_name);
+    for (const db::OdbNetConnection& conn :
+         trav.odb.NetConnections(net_name)) {
+      if (conn.is_port) continue;  // port loads are skipped
+      if (conn.is_driver) continue;
+      db::OdbInstanceInfo info;
+      if (!trav.odb.FindInstance(conn.instance, &info)) continue;
+      const db::OdbMasterPin* pin = trav.FindPin(info.master, conn.pin);
+      ClockNodeLine node;
+      node.depth = depth + 1;
+      node.name = conn.instance;
+      node.pin = conn.pin;
+      if (pin != nullptr && pin->is_clock) {
+        node.kind = "sink";
+        const auto generates = generates_for.find(conn.instance);
+        if (generates != generates_for.end()) {
+          node.generates = generates->second;
+        }
+        out.nodes.push_back(node);
+        out.sink_ids.insert(conn.instance);
+        sinks += 1;
+        continue;
+      }
+      if (pin != nullptr && pin->is_input &&
+          trav.MasterHasOutput(info.master)) {
+        node.kind = "buffer";
+        out.nodes.push_back(node);
+        for (const db::OdbMasterPin& out_pin : trav.Pins(info.master)) {
+          if (!out_pin.is_output) continue;
+          const std::optional<std::string> next =
+              trav.odb.NetForPin(conn.instance, out_pin.name);
+          if (next.has_value()) work.push_back({*next, depth + 1});
+        }
+        continue;
+      }
+      data_loads += 1;
+    }
+  }
+  if (sinks > 0) {
+    out.tree = "pins";
+    out.sinks = sinks;
+  }
+  if (data_loads > 0) {
+    out.notes.push_back(std::to_string(data_loads) +
+                        " load(s) on this clock's nets are not clock "
+                        "pins or buffers and are not shown as sinks");
+  }
+  return out;
+}
+
+// The three stage notes: what the panel prints under the
+// clocks, naming what the stage cannot show.
+std::string ClockNetworkStageNote(const std::string& stage) {
+  if (stage == "constraints") {
+    return "sink counts appear after elaborate; per-pin trees after "
+           "synth_map. Latency comes from post-CTS STA and is not "
+           "shown by this view.";
+  }
+  return "latency comes from post-CTS STA and is not shown by this "
+         "view.";
+}
+
+// Assembles the clock_network_summary payload for the session:
+// header, one clock block per report_clock entry, shared
+// lines, and the notes.
+std::string ClockNetworkPayload(CommandContext& ctx) {
+  const db::ConstraintSet& constraints = ctx.project.constraints;
+  const std::vector<ReportClockEntry> entries =
+      ReportClockEntries(constraints);
+  const std::vector<ReportGeneratedEntry> generated_entries =
+      ReportGeneratedEntries(constraints);
+
+  // Stage, in order: mapped when the ODB facade holds a
+  // database with a top block; elaborated when the synth
+  // session holds the elaborated design unreplaced; else
+  // constraints.
+  const bool have_odb = ctx.timing.odb.has_value() &&
+                        ctx.timing.odb->RawDatabase() != nullptr &&
+                        ctx.timing.odb->has_top_block();
+  std::string stage = "constraints";
+  if (have_odb) {
+    stage = "mapped";
+  } else if (ctx.synth.elaborated && !ctx.synth.generic_optimized &&
+             !ctx.synth.mapped) {
+    stage = "elaborated";
+  }
+
+  std::string payload = "stage=" + stage + " clocks=" +
+                        std::to_string(entries.size());
+  std::vector<std::string> notes;
+  if (entries.empty()) {
+    payload += "\nnote text={" + ClockNetworkStageNote(stage) + "}";
+    return payload;
+  }
+
+  // Generated clock facts by name: master and modification for
+  // the clock lines, and the master of each generated clock.
+  std::map<std::string, const ReportGeneratedEntry*> generated_by_name;
+  for (const ReportGeneratedEntry& entry : generated_entries) {
+    generated_by_name.emplace(entry.name, &entry);
+  }
+
+  std::vector<ClockTreeResult> trees(entries.size());
+
+  if (stage == "elaborated") {
+    synth::YosysEngine engine;
+    ElabTraversal trav{engine};
+    const foundation::Result<synth::YosysEngine::HierarchyNode> hierarchy =
+        engine.Hierarchy(ctx.synth.top_cell);
+    std::map<std::string, std::string> path_module;
+    std::vector<std::string> top_ports;
+    if (hierarchy.ok()) {
+      std::vector<const synth::YosysEngine::HierarchyNode*> stack;
+      stack.push_back(&hierarchy.value());
+      while (!stack.empty()) {
+        const synth::YosysEngine::HierarchyNode* node = stack.back();
+        stack.pop_back();
+        path_module[node->path] = node->module;
+        for (const synth::YosysEngine::HierarchyNode& child :
+             node->children) {
+          stack.push_back(&child);
+        }
+      }
+      top_ports = hierarchy.value().ports;
+    }
+    const std::string top_path =
+        hierarchy.ok() ? hierarchy.value().path : ctx.synth.top_cell;
+    const std::string top_module =
+        hierarchy.ok() ? hierarchy.value().module : ctx.synth.top_cell;
+    // Dividers per master clock: the generated clock's target
+    // instance path, full (the walk compares full paths).
+    std::map<std::string, std::map<std::string, std::string>> dividers_of;
+    for (const ReportGeneratedEntry& gen : generated_entries) {
+      if (gen.master_clock.empty()) continue;
+      for (const std::string& target : gen.sources) {
+        std::string instance;
+        std::string pin;
+        if (!SplitTargetPin(target, instance, pin)) continue;
+        const std::string full =
+            instance.rfind(top_path, 0) == 0
+                ? instance
+                : (instance.empty() ? top_path
+                                    : top_path + "/" + instance);
+        dividers_of[gen.master_clock][full] = gen.name;
+      }
+    }
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      const ReportClockEntry& entry = entries[i];
+      ClockTreeResult& tree = trees[i];
+      if (entry.sources.size() == 1 && entry.sources.front().empty()) {
+        continue;  // virtual: tree=none, note added below
+      }
+      std::vector<OwnedNet> seeds;
+      std::string source_text;
+      if (!entry.generated) {
+        source_text = entry.sources.front();
+        const synth::YosysEngine::BlockDiagramData* top_diagram =
+            trav.Diagram(top_module);
+        if (top_diagram != nullptr) {
+          if (std::find(top_ports.begin(), top_ports.end(), source_text) !=
+              top_ports.end()) {
+            if (const std::optional<std::string> net =
+                    NetTouchingTerminal(*top_diagram, source_text)) {
+              seeds.push_back(OwnedNet{top_path, top_module, *net});
+            }
+          } else {
+            std::string instance;
+            std::string pin;
+            if (SplitTargetPin(source_text, instance, pin)) {
+              const std::string full = top_path + "/" + instance;
+              const auto module_it = path_module.find(full);
+              if (module_it != path_module.end()) {
+                const synth::YosysEngine::BlockDiagramData* inside =
+                    trav.Diagram(module_it->second);
+                if (inside != nullptr) {
+                  if (const std::optional<std::string> net =
+                          NetTouchingTerminal(*inside, pin)) {
+                    seeds.push_back(OwnedNet{full, module_it->second, *net});
+                  }
+                }
+              }
+              if (const std::optional<std::string> net =
+                      NetTouchingEndpoint(*top_diagram, instance, pin)) {
+                seeds.push_back(OwnedNet{top_path, top_module, *net});
+              }
+            }
+          }
+        }
+      } else {
+        // A generated clock's source is its target, an
+        // instance pin: the nets inside the source instance
+        // and in its parent that the pin touches.
+        const ReportGeneratedEntry* gen = nullptr;
+        const auto gen_it = generated_by_name.find(entry.name);
+        if (gen_it != generated_by_name.end()) gen = gen_it->second;
+        const std::string target =
+            gen != nullptr && !gen->sources.empty() ? gen->sources.front()
+                                                    : entry.sources.front();
+        source_text = target;
+        std::string instance;
+        std::string pin;
+        if (SplitTargetPin(target, instance, pin)) {
+          const std::string full =
+              instance.rfind(top_path, 0) == 0
+                  ? instance
+                  : top_path + "/" + instance;
+          const auto module_it = path_module.find(full);
+          if (module_it != path_module.end()) {
+            const synth::YosysEngine::BlockDiagramData* inside =
+                trav.Diagram(module_it->second);
+            if (inside != nullptr) {
+              if (const std::optional<std::string> net =
+                      NetTouchingTerminal(*inside, pin)) {
+                seeds.push_back(OwnedNet{full, module_it->second, *net});
+              }
+            }
+            const std::string parent = ParentPath(full);
+            const auto parent_it = path_module.find(parent);
+            if (parent_it != path_module.end()) {
+              const synth::YosysEngine::BlockDiagramData* parent_diagram =
+                  trav.Diagram(parent_it->second);
+              if (parent_diagram != nullptr) {
+                if (const std::optional<std::string> net =
+                        NetTouchingEndpoint(*parent_diagram,
+                                            LeafName(full), pin)) {
+                  seeds.push_back(
+                      OwnedNet{parent, parent_it->second, *net});
+                }
+              }
+            }
+          }
+        }
+      }
+      const auto dividers_it = dividers_of.find(entry.name);
+      static const std::map<std::string, std::string> kNoDividers;
+      tree = WalkElaborated(trav, seeds, source_text,
+                            dividers_it == dividers_of.end()
+                                ? kNoDividers
+                                : dividers_it->second);
+    }
+  }
+
+  if (stage == "mapped") {
+    MappedTraversal trav{*ctx.timing.odb};
+    // Generated source instances, resolved exactly or by
+    // unique suffix first: the master's sink flag and the
+    // structural fallback both key on them.
+    std::map<std::string, std::string> gen_source_instance;
+    std::map<std::string, std::string> gen_source_net;
+    std::map<std::string, std::string> gen_source_text;
+    std::map<std::string, std::string> gen_target;
+    for (const ReportGeneratedEntry& gen : generated_entries) {
+      if (gen.sources.empty()) continue;
+      const std::string target = gen.sources.front();
+      gen_target[gen.name] = target;
+      std::string instance;
+      std::string pin;
+      if (!SplitTargetPin(target, instance, pin)) continue;
+      if (const std::optional<std::string> net =
+              trav.odb.NetForPin(instance, pin)) {
+        gen_source_instance[gen.name] = instance;
+        gen_source_net[gen.name] = *net;
+        gen_source_text[gen.name] = target;
+        continue;
+      }
+      std::string suffix_match;
+      int matches = 0;
+      for (const db::OdbInstanceInfo& inst : trav.odb.Instances()) {
+        if (inst.name == instance ||
+            (inst.name.size() > instance.size() &&
+             inst.name.compare(inst.name.size() - instance.size() - 1,
+                               std::string::npos,
+                               "/" + instance) == 0)) {
+          suffix_match = inst.name;
+          matches += 1;
+        }
+      }
+      if (matches == 1) {
+        if (const std::optional<std::string> net =
+                trav.odb.NetForPin(suffix_match, pin)) {
+          gen_source_instance[gen.name] = suffix_match;
+          gen_source_net[gen.name] = *net;
+          gen_source_text[gen.name] = target;
+        }
+      }
+    }
+    // Walk the plain clocks first, flagging divider sinks.
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      const ReportClockEntry& entry = entries[i];
+      if (entry.generated) continue;
+      ClockTreeResult& tree = trees[i];
+      if (entry.sources.size() == 1 && entry.sources.front().empty()) {
+        continue;
+      }
+      std::map<std::string, std::string> generates_for;
+      for (const ReportGeneratedEntry& gen : generated_entries) {
+        if (gen.master_clock != entry.name) continue;
+        const auto source_it = gen_source_instance.find(gen.name);
+        if (source_it != gen_source_instance.end()) {
+          generates_for[source_it->second] = gen.name;
+        }
+      }
+      std::optional<std::string> source_net;
+      std::string source_text;
+      for (const std::string& spec : entry.sources) {
+        source_text = spec;
+        if (const std::optional<std::string> net =
+                trav.odb.NetForPin("", spec)) {
+          source_net = net;
+          break;
+        }
+        std::string instance;
+        std::string pin;
+        if (SplitTargetPin(spec, instance, pin)) {
+          if (const std::optional<std::string> net =
+                  trav.odb.NetForPin(instance, pin)) {
+            source_net = net;
+            break;
+          }
+        }
+        if (trav.odb.HasNet(spec)) {
+          source_net = spec;
+          break;
+        }
+      }
+      if (!source_net.has_value()) {
+        tree.notes.push_back("source " + source_text +
+                             " not found in the mapped design");
+        continue;
+      }
+      tree = WalkMapped(trav, *source_net, source_text, generates_for);
+    }
+    // Then the generated clocks: exact/suffix sources walk
+    // directly; the rest fall back to the structural rule over
+    // the master's sinks, and failing that stay tree=none with
+    // the not-found note, never a guessed tree.
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      const ReportClockEntry& entry = entries[i];
+      if (!entry.generated) continue;
+      ClockTreeResult& tree = trees[i];
+      const auto net_it = gen_source_net.find(entry.name);
+      if (net_it != gen_source_net.end()) {
+        tree = WalkMapped(trav, net_it->second,
+                          gen_source_text[entry.name], {});
+        continue;
+      }
+      const ReportGeneratedEntry* gen = nullptr;
+      const auto gen_it = generated_by_name.find(entry.name);
+      if (gen_it != generated_by_name.end()) gen = gen_it->second;
+      bool resolved = false;
+      if (gen != nullptr && !gen->master_clock.empty()) {
+        // The master's sink instances: exactly one may have an
+        // output net other than the master's own nets carrying
+        // a clock-pin load.
+        std::set<std::string> master_sinks;
+        std::set<std::string> master_nets;
+        for (std::size_t m = 0; m < entries.size(); ++m) {
+          if (entries[m].name != gen->master_clock) continue;
+          master_sinks = trees[m].sink_ids;
+          master_nets = trees[m].walked_nets;
+        }
+        std::string divider;
+        std::string divider_net;
+        std::string divider_pin;
+        int candidates = 0;
+        for (const std::string& sink : master_sinks) {
+          db::OdbInstanceInfo info;
+          if (!trav.odb.FindInstance(sink, &info)) continue;
+          for (const db::OdbMasterPin& out_pin :
+               trav.Pins(info.master)) {
+            if (!out_pin.is_output) continue;
+            const std::optional<std::string> out_net =
+                trav.odb.NetForPin(sink, out_pin.name);
+            if (!out_net.has_value()) continue;
+            if (master_nets.count(*out_net) != 0) continue;
+            bool carries_clock = false;
+            for (const db::OdbNetConnection& conn :
+                 trav.odb.NetConnections(*out_net)) {
+              if (conn.is_port || conn.is_driver) continue;
+              db::OdbInstanceInfo load;
+              if (!trav.odb.FindInstance(conn.instance, &load)) continue;
+              const db::OdbMasterPin* load_pin =
+                  trav.FindPin(load.master, conn.pin);
+              if (load_pin != nullptr && load_pin->is_clock) {
+                carries_clock = true;
+                break;
+              }
+            }
+            if (carries_clock) {
+              divider = sink;
+              divider_net = *out_net;
+              divider_pin = out_pin.name;
+              candidates += 1;
+            }
+          }
+        }
+        if (candidates == 1) {
+          gen_source_instance[entry.name] = divider;
+          tree = WalkMapped(trav, divider_net,
+                            divider + "/" + divider_pin, {});
+          resolved = true;
+          // Flag the divider on the master's tree, now that
+          // its identity is proven.
+          for (std::size_t m = 0; m < entries.size(); ++m) {
+            if (entries[m].name != gen->master_clock) continue;
+            for (ClockNodeLine& node : trees[m].nodes) {
+              if (node.kind == "sink" && node.name == divider) {
+                node.generates = entry.name;
+              }
+            }
+          }
+        }
+      }
+      if (!resolved) {
+        const auto target_it = gen_target.find(entry.name);
+        tree.notes.push_back(
+            "source " +
+            (target_it == gen_target.end() ? entry.sources.front()
+                                           : target_it->second) +
+            " not found in the mapped design");
+      }
+    }
+  }
+
+  if (stage == "constraints") {
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      ClockTreeResult& tree = trees[i];
+      for (const std::string& spec : entries[i].sources) {
+        if (spec.empty()) continue;
+        ClockNodeLine node;
+        node.depth = 0;
+        node.kind = "source";
+        node.name = spec;
+        tree.nodes.push_back(node);
+      }
+    }
+  }
+
+  // Serialize.
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    const ReportClockEntry& entry = entries[i];
+    const ClockTreeResult& tree = trees[i];
+    std::string master = "-";
+    std::string modification = "-";
+    if (entry.generated) {
+      const auto gen_it = generated_by_name.find(entry.name);
+      if (gen_it != generated_by_name.end()) {
+        if (!gen_it->second->master_clock.empty()) {
+          master = gen_it->second->master_clock;
+        }
+        if (!gen_it->second->modification.empty()) {
+          modification = gen_it->second->modification;
+        }
+      }
+    }
+    payload += "\nclock name=" + entry.name +
+               " generated=" + (entry.generated ? "1" : "0") +
+               " period=" +
+               (entry.period_ns.has_value() ? FormatNum(*entry.period_ns)
+                                            : std::string("-")) +
+               " rise=" +
+               (entry.rise_ns.has_value() ? FormatNum(*entry.rise_ns)
+                                          : std::string("-")) +
+               " fall=" +
+               (entry.fall_ns.has_value() ? FormatNum(*entry.fall_ns)
+                                          : std::string("-")) +
+               " skew=" +
+               (entry.uncertainty_setup_ns.has_value()
+                    ? FormatNum(*entry.uncertainty_setup_ns)
+                    : std::string("none")) +
+               " source=" + ReportClockBrace(entry.sources) +
+               " sinks=" +
+               (tree.sinks.has_value() ? std::to_string(*tree.sinks)
+                                       : std::string("-")) +
+               " latency=- master=" + master + " modification=" +
+               (modification == "-"
+                    ? std::string("-")
+                    : "{" + modification + "}") +
+               " tree=" + tree.tree;
+    for (const ClockNodeLine& node : tree.nodes) {
+      payload += "\nnode clock=" + entry.name +
+                 " depth=" + std::to_string(node.depth) +
+                 " kind=" + node.kind + " name={" + node.name + "}" +
+                 " pin=" + (node.pin.empty() ? std::string("-") : node.pin) +
+                 " count=" +
+                 (node.count.has_value() ? std::to_string(*node.count)
+                                         : std::string("-")) +
+                 " generates=" +
+                 (node.generates.empty() ? std::string("-")
+                                         : node.generates);
+    }
+    for (const std::string& note : tree.notes) notes.push_back(note);
+    if (entry.sources.size() == 1 && entry.sources.front().empty()) {
+      notes.push_back(entry.name +
+                      " is a virtual clock: it has no source net and "
+                      "no sinks.");
+    }
+  }
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    for (std::size_t j = i + 1; j < entries.size(); ++j) {
+      long shared = 0;
+      for (const std::string& id : trees[i].sink_ids) {
+        if (trees[j].sink_ids.count(id) != 0) shared += 1;
+      }
+      if (shared > 0) {
+        payload += "\nshared clock=" + entries[i].name +
+                   " other=" + entries[j].name +
+                   " count=" + std::to_string(shared);
+      }
+    }
+  }
+  for (const std::string& note : notes) {
+    payload += "\nnote text={" + note + "}";
+  }
+  if (stage == "constraints" && ctx.synth.mapped) {
+    payload += "\nnote text={the live design was replaced by synth_map; "
+               "showing the constraint rows only.}";
+  } else if (stage == "constraints" && ctx.synth.generic_optimized) {
+    payload += "\nnote text={the live design was replaced by "
+               "synth_generic; showing the constraint rows only.}";
+  }
+  payload += "\nnote text={" + ClockNetworkStageNote(stage) + "}";
+  return payload;
 }
 
 }  // namespace
@@ -6681,9 +7923,10 @@ void RegisterCoreCommands(CommandRegistry& registry) {
   // Clock, Period, Waveform, Attrs, Sources table plus the
   // generated-clock table (Timing Constraints U-2022.12 ch. 2).
   // -skew adds a Skew column reporting the stored clock
-  // uncertainty, which is "none" for every clock today because
-  // EOS has no set_clock_uncertainty command yet; the gap is
-  // named in the payload instead of hidden. Construction records
+  // uncertainty: read_sdc wires set_clock_uncertainty values
+  // onto the clock rows, and clocks without one read "none";
+  // while no clock carries one, a footer names the gap instead
+  // of hiding it. Construction records
   // (bind_clock) carry no period, so they are listed separately
   // after the tables instead of in them. The command needs no
   // design beyond the constraint set and never mutates session
@@ -6765,7 +8008,11 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             if (entry.unresolved) attrs += "u";
             row.push_back(attrs);
             row.push_back(ReportClockBrace(entry.sources));
-            if (skew) row.push_back("none");
+            if (skew) {
+              row.push_back(entry.uncertainty_setup_ns.has_value()
+                                ? FormatNum(*entry.uncertainty_setup_ns)
+                                : "none");
+            }
             rows.push_back(std::move(row));
           }
           payload += ReportClockRenderTable(std::move(rows));
@@ -6803,9 +8050,21 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           payload += ReportClockRenderTable(std::move(rows));
         }
         if (skew && !entries.empty()) {
-          payload += "skew: no clock uncertainty is defined for any "
-                     "clock (set_clock_uncertainty is not an EOS "
-                     "command yet)\n";
+          // The footer prints only while no entry carries an
+          // uncertainty: once one does, the column speaks for
+          // itself and "none" marks the clocks without one.
+          bool any_uncertainty = false;
+          for (const ReportClockEntry& entry : entries) {
+            if (entry.uncertainty_setup_ns.has_value()) {
+              any_uncertainty = true;
+              break;
+            }
+          }
+          if (!any_uncertainty) {
+            payload += "skew: no clock uncertainty is defined for any "
+                       "clock (set_clock_uncertainty is not an EOS "
+                       "command yet)\n";
+          }
         }
         return CommandResult::Ok(payload);
       });
@@ -8495,6 +9754,21 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                      " worst_slack_ns=" + FormatNumber(slack.second);
         }
         return CommandResult::Ok(payload);
+      });
+
+  // The clock-network view's query (clock-network design
+  // section 3): the per-clock tree of the design the session
+  // holds, as the GUI's Clocks tab consumes it. It never fails
+  // for a missing database or a missing design: the stage line
+  // says what the session holds, and with no clocks defined
+  // the payload is the header alone plus the stage note.
+  add("clock_network_summary", "clock_network_summary",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "clock_network_summary")) {
+          return *bad;
+        }
+        return CommandResult::Ok(ClockNetworkPayload(ctx));
       });
 
   add("cts",
@@ -10931,6 +12205,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(payload);
       });
 
+  // Reads an SDC file: the path is recorded for the timing
+  // commands, and the file's clock statements are wired into
+  // the session constraint set as ordinary rows with a
+  // source_file provenance param (clock-network design section
+  // 2, the F2 fix: before it, this command recorded only the
+  // path and report_clock showed clocks=0 for a file-only
+  // session). Re-reading the same path replaces the file's
+  // rows rather than stacking them.
   add("read_sdc", "read_sdc <path>",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
@@ -10939,7 +12221,33 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         if (auto bad = CheckReadable(args[0])) return *bad;
         ctx.timing.sdc_path = args[0];
-        return CommandResult::Ok("sdc=" + args[0]);
+        std::ifstream in(args[0]);
+        std::stringstream buffer;
+        buffer << in.rdbuf();
+        const foundation::Result<io::SdcClockFile> parsed =
+            io::ParseSdcClocks(buffer.str());
+        if (!parsed.ok()) return FromStatus(parsed.status());
+        const SdcWireCounts counts =
+            WireSdcClocks(ctx, parsed.value(), args[0]);
+        std::vector<io::SdcUnwired> unwired = parsed.value().unwired;
+        unwired.insert(unwired.end(), counts.unwired.begin(),
+                       counts.unwired.end());
+        std::string payload = "sdc=" + args[0] +
+                              " clocks=" + std::to_string(counts.clocks) +
+                              " generated=" +
+                              std::to_string(counts.generated) +
+                              " uncertainty=" +
+                              std::to_string(counts.uncertainty) +
+                              " skipped=" + std::to_string(counts.skipped) +
+                              " unwired=" + std::to_string(unwired.size());
+        if (counts.masterless > 0) {
+          payload += " masterless=" + std::to_string(counts.masterless);
+        }
+        for (const io::SdcUnwired& entry : unwired) {
+          payload += "\nunwired line=" + std::to_string(entry.line) + " " +
+                     entry.statement + ": " + entry.reason;
+        }
+        return CommandResult::Ok(payload);
       });
 
   add("set_spef", "set_spef <path>",
@@ -13839,9 +15147,29 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           max_paths = static_cast<std::size_t>(parsed);
         }
         if (ctx.timing.last_results.empty()) {
-          return CommandResult::Fail(
-              Diag::kInvalidConfiguration,
-              "no timing results: run eos::run_timing first");
+          // Clocks-only mode (clock-network design section
+          // 2.7): the constraint set holds clock rows, so the
+          // summary is the header plus the clock rows, with no
+          // engine session behind it. With no clock rows the
+          // failure is the pre-unit behavior, byte-identical.
+          if (!SessionHasClockRows(ctx)) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "no timing results: run eos::run_timing first");
+          }
+          if (opts.Seen("-scene")) {
+            return CommandResult::Fail(
+                Diag::kInvalidConfiguration,
+                "timing_summary: scene has no timing results: " +
+                    *opts.Value("-scene"));
+          }
+          std::string payload =
+              std::string("source=") +
+              (ctx.timing.odb.has_value() ? "odb" : "verilog") +
+              " scenes=0 revision=" +
+              std::to_string(ctx.project.ledger.current_revision());
+          payload += TimingSummaryClockRows(ctx.project.constraints);
+          return CommandResult::Ok(payload);
         }
         bool from_odb = false;
         std::vector<analysis::SceneAnalysis> scenes;
@@ -13957,57 +15285,9 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                                   ctx.project.ledger.current_revision());
         // The clock table, from the session constraint set: the
         // same entries report_clock renders, as machine-readable
-        // rows. Skew reads none on every clock: no clock
-        // uncertainty is defined yet
-        // (set_clock_uncertainty is not an EOS command).
-        const std::vector<ReportClockEntry> clocks =
-            ReportClockEntries(ctx.project.constraints);
-        for (const ReportClockEntry& entry : clocks) {
-          std::string attrs;
-          if (entry.generated) attrs += "G";
-          if (entry.unresolved) attrs += "u";
-          payload += "\nclock name=" + entry.name +
-                     " generated=" + (entry.generated ? "1" : "0") +
-                     " period=" +
-                     (entry.period_ns.has_value()
-                          ? FormatNum(*entry.period_ns)
-                          : std::string("-")) +
-                     " rise=" +
-                     (entry.rise_ns.has_value()
-                          ? FormatNum(*entry.rise_ns)
-                          : std::string("-")) +
-                     " fall=" +
-                     (entry.fall_ns.has_value()
-                          ? FormatNum(*entry.fall_ns)
-                          : std::string("-")) +
-                     " attrs=" + attrs + " skew=none sources=" +
-                     ReportClockBrace(entry.sources);
-        }
-        const std::vector<ReportGeneratedEntry> generated =
-            ReportGeneratedEntries(ctx.project.constraints);
-        for (const ReportGeneratedEntry& entry : generated) {
-          // The brace groups carry the source lists and the
-          // modification: both may contain spaces, so they ride
-          // as one brace-valued token each.
-          payload += "\ngenclock name=" + entry.name +
-                     " master_clock=" +
-                     (entry.master_clock.empty() ? std::string("-")
-                                                 : entry.master_clock) +
-                     " modification=" +
-                     (entry.modification.empty()
-                          ? std::string("-")
-                          : "{" + entry.modification + "}") +
-                     " master_source={" + entry.master_source + "}" +
-                     " sources=" + ReportClockBrace(entry.sources);
-        }
-        for (const db::Constraint& c : ctx.project.constraints.all()) {
-          if (c.kind != db::ConstraintKind::kClock ||
-              c.Param("period_ns").has_value()) {
-            continue;
-          }
-          payload += "\nbindclock name=" + c.name +
-                     " target={" + c.target_spec + "}";
-        }
+        // rows. Shared with the clocks-only mode above so the
+        // two payloads can never drift.
+        payload += TimingSummaryClockRows(ctx.project.constraints);
         // One class row per constraint class, mirroring
         // report_constraint's worst-violator tier: the worst
         // violator, its slack, the exact cost, weight 1, and

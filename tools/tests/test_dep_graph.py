@@ -312,7 +312,8 @@ def test_real_repo_check_passes_and_rules_hold():
     # The gui exit-hang unit adds ui.gui.quit, the 68th ctest entry.
     # The waiver model unit adds db.waivers, the 69th ctest entry.
     # The F13 DRC engine unit adds pv.drc, the 70th ctest entry.
-    assert len(all_tests) == 70
+    # The clock-network unit adds io.sdc, the 71st ctest entry.
+    assert len(all_tests) == 71
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),

@@ -7,7 +7,15 @@ commands that store real constraint rows in the session, visible to
 `list_constraints`, `constraint_coverage`, `rebind_constraints`, and
 checkpoints. It does not cover the SDC file parser used by
 `read_sdc` and `run_timing`; see `docs/read-sdc-audit.md` for that
-side.
+side. One boundary moved with the clock-network unit: `read_sdc`
+now also parses the file's `create_clock`,
+`create_generated_clock`, and `set_clock_uncertainty` statements
+(with the scoped parser in the L1 `io/sdc` module) and wires them
+into the session set as ordinary rows of the kinds below, carrying
+a `source_file` provenance param. An interactively defined clock
+wins a name collision over the file's row. Statements outside
+that subset are reported as unwired in the `read_sdc` output,
+never silently dropped; see `docs/clock-network-view.md`.
 
 ## Migration: the construction record is now `bind_clock`
 

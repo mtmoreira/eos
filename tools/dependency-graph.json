@@ -707,6 +707,7 @@
         "route",
         "rsz",
         "scenarios",
+        "sdc",
         "session",
         "signoff",
         "sta",
@@ -794,6 +795,10 @@
           "include"
         ],
         "scenarios": [
+          "cmake-link",
+          "include"
+        ],
+        "sdc": [
           "cmake-link",
           "include"
         ],
@@ -951,10 +956,17 @@
       }
     },
     "sdc": {
-      "depends_on": [],
+      "depends_on": [
+        "errors"
+      ],
       "layer": "L1",
       "path": "src/io/sdc",
-      "via": {}
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ]
+      }
     },
     "session": {
       "depends_on": [
@@ -1295,6 +1307,14 @@
       ],
       "sources": [
         "tests/unit/foundation/ids/ids_test.cc"
+      ]
+    },
+    "io.sdc": {
+      "modules": [
+        "sdc"
+      ],
+      "sources": [
+        "tests/unit/io/sdc/sdc_test.cc"
       ]
     },
     "pd.cts": {

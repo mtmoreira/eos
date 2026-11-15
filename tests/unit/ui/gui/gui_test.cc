@@ -1,11 +1,14 @@
 // gui: SessionView unit tests (Qt-free except the guarded
 // splash timing tests below; no engines needed).
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "eos/ui/gui.h"
+#include "eos/ui/clock_network.h"
 #include "eos/ui/console_entry.h"
 #include "eos/ui/diagram.h"
 #include "eos/ui/floorplan.h"
@@ -97,6 +100,8 @@ using eos::ui::SignoffModel;
 using eos::ui::StepStatus;
 using eos::ui::SymbolForType;
 using eos::ui::TimingClock;
+using eos::ui::ClockNetworkClock;
+using eos::ui::ClockNetworkModel;
 using eos::ui::TimingModel;
 using eos::ui::TimingScene;
 using eos::ui::kSchematicColumnGap;
@@ -2131,6 +2136,22 @@ void RegisterSummaryCommand(CommandRegistry& registry,
   EXPECT_TRUE(status.ok());
 }
 
+// The clock_network_summary stub for the view tests: returns
+// the payload while ok, fails like a broken query otherwise.
+void RegisterClockNetworkCommand(CommandRegistry& registry,
+                                 const std::string& payload, bool ok) {
+  auto status = registry.Register(
+      "clock_network_summary", "clock_network_summary",
+      [payload, ok](CommandContext&, const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "query broken");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
 void FillPanelsContext(CommandContext& context) {
   context.synth.parsed = true;
   context.synth.top_cell = "optloop";
@@ -3272,10 +3293,12 @@ TEST(TimingModel, RejectsMalformedPayloads) {
       "max_transition_ns=0 max_transition_violations=0 "
       "max_capacitance_pf=0 max_capacitance_violations=0 max_fanout=0 "
       "max_fanout_violations=0\n",
-      // A clock with a skew value: skew is always none.
+      // A clock with a non-numeric skew: skew is a number or
+      // none (a wired set_clock_uncertainty value loads; see
+      // AcceptsNumericSkew below).
       "source=verilog scenes=1 revision=3\n"
       "clock name=vclk generated=0 period=1.25 rise=0 fall=0.625 "
-      "attrs= skew=0.1 sources={-}\n",
+      "attrs= skew=abc sources={-}\n",
       // A path naming a scene the payload never summarized.
       "source=verilog scenes=1 revision=3\n"
       "scene=func_tt mode=func corner=tt parasitics=estimate "
@@ -3339,6 +3362,197 @@ TEST(TimingModel, RejectsMalformedPayloads) {
   EXPECT_FALSE(model.LoadPayload(missing_class));
   EXPECT_EQ(model.Scenes().size(), 1u);
 }
+
+// The skew column carries the setup uncertainty read_sdc
+// wired onto the clock rows: a number loads, "none" loads, a
+// non-number is malformed (clock-network design section 2.5).
+TEST(TimingModel, AcceptsNumericSkew) {
+  const auto with_skew = [](const std::string& skew) {
+    std::string payload = kTimingPayload;
+    const std::string token = "skew=none";
+    const std::size_t at = payload.find(token);
+    EXPECT_NE(at, std::string::npos);
+    if (at != std::string::npos) {
+      payload.replace(at, token.size(), "skew=" + skew);
+    }
+    return payload;
+  };
+  TimingModel model;
+  ASSERT_TRUE(model.LoadPayload(with_skew("0.1")));
+  ASSERT_EQ(model.Clocks().size(), 1u);
+  EXPECT_EQ(model.Clocks()[0].skew, "0.1");
+  ASSERT_TRUE(model.LoadPayload(with_skew("none")));
+  EXPECT_EQ(model.Clocks()[0].skew, "none");
+  EXPECT_FALSE(model.LoadPayload(with_skew("abc")));
+  // The failed load kept the previous model.
+  EXPECT_EQ(model.Clocks()[0].skew, "none");
+}
+
+// The A6 elaborated-stage payload for the clocked design, as
+// clock_network_summary emits it (measured sink counts: 23
+// and 16, design S14).
+const char kClockNetworkPayload[] =
+    "stage=elaborated clocks=2\n"
+    "clock name=clk generated=0 period=5 rise=0 fall=2.5 skew=0.1 "
+    "source={clk} sinks=23 latency=- master=- modification=- "
+    "tree=leaves\n"
+    "node clock=clk depth=0 kind=source name={clk} pin=- count=- "
+    "generates=-\n"
+    "node clock=clk depth=1 kind=divider name={clk_top/u_div "
+    "(clk_div)} pin=- count=1 generates=clk_div\n"
+    "node clock=clk depth=1 kind=leaf name={clk_top/u_ctrl "
+    "(clk_ctrl)} pin=- count=6 generates=-\n"
+    "node clock=clk depth=1 kind=leaf name={clk_top/u_bank "
+    "(clk_bank)} pin=- count=8 generates=-\n"
+    "node clock=clk depth=1 kind=leaf name={clk_top/u_acc "
+    "(clk_acc)} pin=- count=8 generates=-\n"
+    "clock name=clk_div generated=1 period=10 rise=0 fall=5 "
+    "skew=0.1 source={u_div/q} sinks=16 latency=- master=clk "
+    "modification={divide_by(2)} tree=leaves\n"
+    "node clock=clk_div depth=0 kind=source name={u_div/q} pin=- "
+    "count=- generates=-\n"
+    "node clock=clk_div depth=1 kind=leaf name={clk_top/u_cnt "
+    "(clk_cnt)} pin=- count=8 generates=-\n"
+    "node clock=clk_div depth=1 kind=leaf name={clk_top/u_cap "
+    "(clk_cap)} pin=- count=8 generates=-\n"
+    "note text={latency comes from post-CTS STA and is not shown "
+    "by this view.}\n";
+
+// A mapped-stage payload: per-pin trees, a buffer node, and
+// a shared-sinks line.
+const char kClockNetworkMappedPayload[] =
+    "stage=mapped clocks=2\n"
+    "clock name=clk generated=0 period=5 rise=0 fall=2.5 skew=0.1 "
+    "source={clk} sinks=3 latency=- master=- modification=- "
+    "tree=pins\n"
+    "node clock=clk depth=0 kind=source name={clk} pin=- count=- "
+    "generates=-\n"
+    "node clock=clk depth=1 kind=buffer name={u_buf} pin=A "
+    "count=- generates=-\n"
+    "node clock=clk depth=2 kind=sink name={u_f1} pin=CK count=- "
+    "generates=-\n"
+    "node clock=clk depth=2 kind=sink name={u_f2} pin=CK count=- "
+    "generates=clk_div\n"
+    "clock name=clk_div generated=1 period=10 rise=0 fall=5 "
+    "skew=0.1 source={u_f2/Q} sinks=1 latency=- master=clk "
+    "modification={divide_by(2)} tree=pins\n"
+    "node clock=clk_div depth=0 kind=source name={u_f2/Q} pin=- "
+    "count=- generates=-\n"
+    "node clock=clk_div depth=1 kind=sink name={u_g1} pin=CK "
+    "count=- generates=-\n"
+    "shared clock=clk_div other=clk count=1\n"
+    "note text={latency comes from post-CTS STA and is not shown "
+    "by this view.}\n";
+
+TEST(ClockNetworkModel, ParsesFullPayload) {
+  ClockNetworkModel model;
+  ASSERT_TRUE(model.LoadPayload(kClockNetworkMappedPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.stage(), "mapped");
+  ASSERT_EQ(model.clocks().size(), 2u);
+  const ClockNetworkClock& clk = model.clocks()[0];
+  EXPECT_EQ(clk.name, "clk");
+  EXPECT_FALSE(clk.generated);
+  EXPECT_EQ(clk.period, "5");
+  EXPECT_EQ(clk.skew, "0.1");
+  EXPECT_EQ(clk.sources, "{clk}");
+  EXPECT_EQ(clk.sinks, "3");
+  EXPECT_EQ(clk.tree, "pins");
+  ASSERT_EQ(clk.nodes.size(), 4u);
+  EXPECT_EQ(clk.nodes[1].kind, "buffer");
+  EXPECT_EQ(clk.nodes[1].name, "u_buf");
+  EXPECT_EQ(clk.nodes[1].pin, "A");
+  EXPECT_EQ(clk.nodes[3].kind, "sink");
+  EXPECT_EQ(clk.nodes[3].generates, "clk_div");
+  const ClockNetworkClock& div = model.clocks()[1];
+  EXPECT_TRUE(div.generated);
+  EXPECT_EQ(div.master, "clk");
+  EXPECT_EQ(div.modification, "{divide_by(2)}");
+  EXPECT_EQ(div.sinks, "1");
+  ASSERT_EQ(model.shared().size(), 1u);
+  EXPECT_EQ(model.shared()[0].clock, "clk_div");
+  EXPECT_EQ(model.shared()[0].other, "clk");
+  EXPECT_EQ(model.shared()[0].count, 1u);
+  ASSERT_EQ(model.notes().size(), 1u);
+  EXPECT_EQ(model.notes()[0],
+            "latency comes from post-CTS STA and is not shown by "
+            "this view.");
+  // The elaborated payload parses too.
+  ASSERT_TRUE(model.LoadPayload(kClockNetworkPayload));
+  EXPECT_EQ(model.stage(), "elaborated");
+  ASSERT_EQ(model.clocks()[0].nodes.size(), 5u);
+  EXPECT_EQ(model.clocks()[0].nodes[1].kind, "divider");
+}
+
+TEST(ClockNetworkModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      // No header.
+      "clock name=clk generated=0 period=5 rise=0 fall=2.5 "
+      "skew=none source={clk} sinks=- latency=- master=- "
+      "modification=- tree=none\n",
+      // Clock count mismatch (truncated payload).
+      "stage=elaborated clocks=2\n"
+      "clock name=clk generated=0 period=5 rise=0 fall=2.5 "
+      "skew=none source={clk} sinks=- latency=- master=- "
+      "modification=- tree=none\n",
+      // Unknown line kind.
+      "stage=constraints clocks=0\n"
+      "bogus x=1\n",
+      // A clock line missing a key.
+      "stage=constraints clocks=1\n"
+      "clock name=clk generated=0 period=5 rise=0 fall=2.5 "
+      "skew=none source={clk} sinks=- latency=- master=- "
+      "modification=-\n",
+      // A bad number.
+      "stage=constraints clocks=1\n"
+      "clock name=clk generated=0 period=abc rise=0 fall=2.5 "
+      "skew=none source={clk} sinks=- latency=- master=- "
+      "modification=- tree=none\n",
+      // A node for a clock the payload never defined.
+      "stage=constraints clocks=0\n"
+      "node clock=ghost depth=0 kind=source name={x} pin=- "
+      "count=- generates=-\n",
+      // An unknown stage.
+      "stage=placed clocks=0\n",
+  };
+  for (const char* payload : bad) {
+    ClockNetworkModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+  // A malformed load keeps the previous model.
+  ClockNetworkModel model;
+  ASSERT_TRUE(model.LoadPayload(kClockNetworkPayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.clocks().size(), 2u);
+}
+
+// Writes one SDC text to a fresh temp file and removes it on
+// destruction: the session tests below read it through the
+// real registry.
+struct ClockTempSdc {
+  std::string path;
+  explicit ClockTempSdc(const std::string& text) {
+    path = (std::filesystem::temp_directory_path() /
+            "eos_gui_clock_test.sdc")
+               .string();
+    std::ofstream out(path);
+    out << text;
+  }
+  ~ClockTempSdc() {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+};
+
+// The clocked demo's SDC statements as text (the demo file's
+// substance), for the real-registry session tests.
+const char kClockedSdcText[] =
+    "create_clock -name clk -period 5 -waveform {0 2.5} "
+    "[get_ports clk]\n"
+    "create_generated_clock -name clk_div -source [get_ports clk] "
+    "-divide_by 2 [get_pins u_div/q]\n"
+    "set_clock_uncertainty -setup 0.1 [all_clocks]\n";
 
 TEST(TimingModel, ReloadReplacesPreviousTiming) {
   TimingModel model;
@@ -5191,20 +5405,59 @@ TEST(CenterView, HighlightGateForwardsToSchematicOnlyWhenLeaf) {
             "No schematic for this level.");
 }
 
-TEST(PanelsView, HasSevenTabsWithSignoff) {
+// The clock-network unit adds the Clocks tab beside Timing
+// (was HasSevenTabsWithSignoff before it).
+TEST(PanelsView, HasEightTabsWithClocksAndSignoff) {
   OutlineTestApp();
   CommandRegistry registry;
   CommandContext context;
   SessionView view(registry, context);
   PanelsView panels(view);
-  ASSERT_EQ(panels.count(), 7);
+  ASSERT_EQ(panels.count(), 8);
   EXPECT_EQ(panels.tabText(0).toStdString(), "Issues");
   EXPECT_EQ(panels.tabText(1).toStdString(), "Sources");
   EXPECT_EQ(panels.tabText(2).toStdString(), "Results");
   EXPECT_EQ(panels.tabText(3).toStdString(), "Timing");
-  EXPECT_EQ(panels.tabText(4).toStdString(), "Opt log");
-  EXPECT_EQ(panels.tabText(5).toStdString(), "Messages");
-  EXPECT_EQ(panels.tabText(6).toStdString(), "Signoff");
+  EXPECT_EQ(panels.tabText(4).toStdString(), "Clocks");
+  EXPECT_EQ(panels.tabText(5).toStdString(), "Opt log");
+  EXPECT_EQ(panels.tabText(6).toStdString(), "Messages");
+  EXPECT_EQ(panels.tabText(7).toStdString(), "Signoff");
+}
+
+// The Clocks tab renders the elaborated-stage model: the
+// section 3.3 text with the divider line and the latency
+// dash.
+TEST(PanelsView, ClocksTabShowsElaboratedNetwork) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterClockNetworkCommand(registry, kClockNetworkPayload, true);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshClockNetwork();
+  PanelsView panels(view);
+  auto* clocks = qobject_cast<QPlainTextEdit*>(panels.widget(4));
+  ASSERT_NE(clocks, nullptr);
+  const std::string text = clocks->toPlainText().toStdString();
+  EXPECT_NE(text.find("clk: period 5 ns, waveform {0 2.5}, sources "
+                      "{clk}, skew 0.1 ns, sinks 23, latency -"),
+            std::string::npos);
+  EXPECT_NE(text.find("source: port clk"), std::string::npos);
+  EXPECT_NE(text.find("u_div (clk_div), 1 sink, generates clk_div"),
+            std::string::npos);
+  EXPECT_NE(text.find("clk_div (generated): period 10 ns, waveform "
+                      "{0 5}, sources {u_div/q}, skew 0.1 ns, sinks "
+                      "16, latency -"),
+            std::string::npos);
+  EXPECT_NE(text.find("generated from clk by divide_by(2), master "
+                      "source {clk}"),
+            std::string::npos);
+  EXPECT_NE(text.find("source: u_div/q"), std::string::npos);
+  EXPECT_NE(text.find("clk_div is generated from u_div/q, a sink of "
+                      "clk. The two trees share 0 sinks."),
+            std::string::npos);
+  EXPECT_NE(text.find("Note: latency comes from post-CTS STA and is "
+                      "not shown by this view."),
+            std::string::npos);
 }
 
 // F1: the Results tab carries the mapped synthesis section from
@@ -5605,6 +5858,83 @@ TEST(GuiSessionView, RefreshTimingKeepsModelWhenQueryStartsFailing) {
   ASSERT_EQ(view.Messages().size(), 1u);
   EXPECT_EQ(view.Messages()[0],
             "timing_summary: EOS invalid_configuration: no timing results");
+}
+
+// The clock-network refresh dispatches on every refresh with
+// no echo: a session that read the clocked SDC through the
+// real registry populates the model at the constraints stage.
+TEST(GuiSessionView, RefreshClockNetworkPopulatesWithoutEcho) {
+  CommandRegistry registry;
+  eos::ui::RegisterCoreCommands(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  ClockTempSdc sdc(kClockedSdcText);
+  const CommandResult read =
+      registry.Dispatch(context, "read_sdc", {sdc.path});
+  ASSERT_TRUE(read.ok) << read.message;
+  view.RefreshClockNetwork();
+  EXPECT_TRUE(view.ClockNetwork().Loaded());
+  EXPECT_EQ(view.ClockNetwork().stage(), "constraints");
+  ASSERT_EQ(view.ClockNetwork().clocks().size(), 2u);
+  EXPECT_EQ(view.ClockNetwork().clocks()[0].name, "clk");
+  EXPECT_EQ(view.ClockNetwork().clocks()[0].skew, "0.1");
+  EXPECT_EQ(view.ClockNetwork().clocks()[1].name, "clk_div");
+  EXPECT_TRUE(view.EchoLog().empty());
+}
+
+// A failure after a successful load keeps the last good model
+// and logs through the unguarded-refresh path.
+TEST(GuiSessionView, RefreshClockNetworkKeepsModelOnFailure) {
+  CommandRegistry registry;
+  bool ok = true;
+  auto status = registry.Register(
+      "clock_network_summary", "clock_network_summary",
+      [&ok](CommandContext&, const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "query broken");
+        }
+        return CommandResult::Ok(kClockNetworkPayload);
+      });
+  ASSERT_TRUE(status.ok());
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshClockNetwork();
+  ASSERT_TRUE(view.ClockNetwork().Loaded());
+  ASSERT_EQ(view.ClockNetwork().clocks().size(), 2u);
+  ok = false;
+  view.RefreshClockNetwork();
+  EXPECT_TRUE(view.ClockNetwork().Loaded());
+  EXPECT_EQ(view.ClockNetwork().clocks().size(), 2u);
+  ASSERT_EQ(view.Messages().size(), 1u);
+  EXPECT_EQ(view.Messages()[0],
+            "clock_network_summary: EOS invalid_configuration: "
+            "query broken");
+}
+
+// A4: with clocks wired but no timing run, RefreshTiming
+// populates the Timing model from the clocks-only summary:
+// the two clock rows agree with the Clocks tab, and no scene
+// rows are invented.
+TEST(GuiSessionView, RefreshTimingShowsClocksWithoutResults) {
+  CommandRegistry registry;
+  eos::ui::RegisterCoreCommands(registry);
+  CommandContext context;
+  SessionView view(registry, context);
+  ClockTempSdc sdc(kClockedSdcText);
+  const CommandResult read =
+      registry.Dispatch(context, "read_sdc", {sdc.path});
+  ASSERT_TRUE(read.ok) << read.message;
+  ASSERT_TRUE(context.timing.last_results.empty());
+  view.RefreshTiming();
+  EXPECT_TRUE(view.Timing().Loaded());
+  EXPECT_TRUE(view.Timing().Scenes().empty());
+  ASSERT_EQ(view.Timing().Clocks().size(), 2u);
+  EXPECT_EQ(view.Timing().Clocks()[0].name, "clk");
+  EXPECT_EQ(view.Timing().Clocks()[0].skew, "0.1");
+  EXPECT_EQ(view.Timing().Clocks()[1].name, "clk_div");
+  ASSERT_EQ(view.Timing().GeneratedClocks().size(), 1u);
+  EXPECT_EQ(view.Timing().GeneratedClocks()[0].master_clock, "clk");
 }
 
 TEST(GuiSessionView, RefreshPlacementPopulatesModelWithoutEcho) {
