@@ -397,6 +397,7 @@ void ResetProject(CommandContext& ctx) {
   ctx.timing = CommandContext::TimingSession();
   ctx.synth = CommandContext::SynthSession();
   ctx.place = CommandContext::PlaceSession();
+  ctx.cts = CommandContext::CtsSession();
   ctx.signoff = CommandContext::SignoffSession();
   ctx.drc = CommandContext::DrcSession();
   ctx.wire_rc_overrides.clear();
@@ -6973,6 +6974,43 @@ ClockTreeResult WalkMapped(MappedTraversal& trav,
   return out;
 }
 
+// Whether a net carries the clock onward: some load is a
+// clock pin, or some load is a buffer (an input pin on an
+// instance with an output pin, the walk's own buffer shape)
+// whose output nets carry the clock onward. The second case
+// is the post-CTS shape: once CTS inserts a root buffer on
+// a generated clock's net, the divider's output net's only
+// load is that buffer's input pin, and a rule that counts
+// only clock pins resolves no source for the generated
+// clock at all. A clock buffer's input pin is therefore
+// clock-carrying when the buffer passes the clock on to
+// clock pins. The visited set keeps buffer cycles from
+// looping.
+bool NetCarriesClock(MappedTraversal& trav, const std::string& net_name,
+                     std::set<std::string>& visited) {
+  if (!visited.insert(net_name).second) return false;
+  for (const db::OdbNetConnection& conn :
+       trav.odb.NetConnections(net_name)) {
+    if (conn.is_port || conn.is_driver) continue;
+    db::OdbInstanceInfo load;
+    if (!trav.odb.FindInstance(conn.instance, &load)) continue;
+    const db::OdbMasterPin* load_pin = trav.FindPin(load.master, conn.pin);
+    if (load_pin == nullptr) continue;
+    if (load_pin->is_clock) return true;
+    if (load_pin->is_input && trav.MasterHasOutput(load.master)) {
+      for (const db::OdbMasterPin& out_pin : trav.Pins(load.master)) {
+        if (!out_pin.is_output) continue;
+        const std::optional<std::string> next =
+            trav.odb.NetForPin(conn.instance, out_pin.name);
+        if (next.has_value() && NetCarriesClock(trav, *next, visited)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 // The three stage notes: what the panel prints under the
 // clocks, naming what the stage cannot show.
 std::string ClockNetworkStageNote(const std::string& stage) {
@@ -7276,7 +7314,9 @@ std::string ClockNetworkPayload(CommandContext& ctx) {
       if (gen != nullptr && !gen->master_clock.empty()) {
         // The master's sink instances: exactly one may have an
         // output net other than the master's own nets carrying
-        // a clock-pin load.
+        // the clock onward (NetCarriesClock: a clock-pin load,
+        // or a clock buffer whose outputs reach clock pins,
+        // which is the shape CTS leaves on the divider's net).
         std::set<std::string> master_sinks;
         std::set<std::string> master_nets;
         for (std::size_t m = 0; m < entries.size(); ++m) {
@@ -7298,19 +7338,9 @@ std::string ClockNetworkPayload(CommandContext& ctx) {
                 trav.odb.NetForPin(sink, out_pin.name);
             if (!out_net.has_value()) continue;
             if (master_nets.count(*out_net) != 0) continue;
-            bool carries_clock = false;
-            for (const db::OdbNetConnection& conn :
-                 trav.odb.NetConnections(*out_net)) {
-              if (conn.is_port || conn.is_driver) continue;
-              db::OdbInstanceInfo load;
-              if (!trav.odb.FindInstance(conn.instance, &load)) continue;
-              const db::OdbMasterPin* load_pin =
-                  trav.FindPin(load.master, conn.pin);
-              if (load_pin != nullptr && load_pin->is_clock) {
-                carries_clock = true;
-                break;
-              }
-            }
+            std::set<std::string> visited;
+            const bool carries_clock =
+                NetCarriesClock(trav, *out_net, visited);
             if (carries_clock) {
               divider = sink;
               divider_net = *out_net;
@@ -10947,29 +10977,136 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         // synthesis loop uses). CTS itself succeeds whether or not
         // the session is configured for timing; when it is not,
         // the payload says so with the reason instead of
-        // inventing a number.
+        // inventing a number. The per-scene slacks are collected
+        // here into scene_slacks as well, so the CTS record
+        // stored below carries the same numbers the payload
+        // reports; when the STA leg cannot analyze, sta_note
+        // carries the payload's unavailable statement verbatim
+        // instead (the place record has no such field because
+        // place_summary prints no slack lines at all in that
+        // case, while the CTS record's contract is that
+        // cts_summary agrees with the payload).
         bool from_odb = false;
         std::vector<analysis::SceneAnalysis> scenes;
+        std::vector<std::pair<std::string, double>> scene_slacks;
+        std::string sta_note;
         if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
-          payload += " sta_slack_ns=unavailable (" + bad->message + ")";
+          sta_note = "sta_slack_ns=unavailable (" + bad->message + ")";
+          payload += " " + sta_note;
         } else if (!from_odb) {
-          payload += " sta_slack_ns=unavailable (timing source is "
-                     "Verilog, not the CTS database)";
+          sta_note =
+              "sta_slack_ns=unavailable (timing source is "
+              "Verilog, not the CTS database)";
+          payload += " " + sta_note;
         } else {
           analysis::TimingService service;
           const Result<std::vector<analysis::SceneResult>> analyzed =
               service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
                               scenes);
           if (!analyzed.ok()) {
-            payload += " sta_slack_ns=unavailable (" +
+            sta_note = "sta_slack_ns=unavailable (" +
                        analyzed.status().message() + ")";
+            payload += " " + sta_note;
           } else {
             for (const analysis::SceneResult& result :
                  analyzed.value()) {
               payload += " scene=" + result.scenario.name +
                          " worst_slack_ns=" +
                          MetricText(result.metrics, "worst_slack_ns");
+              const auto slack =
+                  result.metrics.find("worst_slack_ns");
+              if (slack != result.metrics.end()) {
+                scene_slacks.push_back(
+                    {result.scenario.name, slack->second.value});
+              }
             }
+          }
+        }
+        // The CTS record (full-flow GUI unit F5): the numbers
+        // the cts_summary query reports. Only a successful run
+        // stores it; a failed run leaves the previous record
+        // untouched, like run_timing and last_results. The
+        // entry for this net is replaced by the latest run;
+        // entries keep first-run order. clock_sinks is walked
+        // on the database the run just built, with the clock
+        // view's own walk, so the record and the view can be
+        // cross-checked against each other: it counts the
+        // flop clock pins among the net's loads, where the
+        // engine's sinks counts every load pin.
+        CommandContext::CtsSession::NetResult entry;
+        entry.net = options.clock_nets.front();
+        entry.roots = report.clock_root_count;
+        entry.buffers = report.buffers_inserted;
+        entry.sinks = report.sink_count;
+        entry.subnets = report.clock_subnet_count;
+        entry.liberty_corner = liberty_corner;
+        entry.scene_slacks = std::move(scene_slacks);
+        entry.sta_note = std::move(sta_note);
+        {
+          MappedTraversal trav{*ctx.timing.odb};
+          const ClockTreeResult walked =
+              WalkMapped(trav, entry.net, entry.net, {});
+          entry.clock_sinks =
+              walked.sinks.has_value()
+                  ? static_cast<int>(*walked.sinks)
+                  : entry.sinks;
+        }
+        bool replaced = false;
+        for (CommandContext::CtsSession::NetResult& existing :
+             ctx.cts.nets) {
+          if (existing.net == entry.net) {
+            existing = std::move(entry);
+            replaced = true;
+            break;
+          }
+        }
+        if (!replaced) ctx.cts.nets.push_back(std::move(entry));
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- cts_summary (full-flow GUI unit F5) -------------------
+  // The structured CTS query the GUI's Clocks tab reads: the
+  // session CTS record, one net line per recorded run with
+  // the engine's counts (sinks counts every load pin on the
+  // net; clock_sinks counts the flop clock pins among them,
+  // the clock view's sink count for the net), each followed
+  // by the run's post-CTS slack lines, or by its sta_note
+  // line when the run's STA leg could not analyze (the cts
+  // payload's unavailable statement, verbatim). It is a
+  // query, not a report: it runs no engine, writes no file,
+  // and changes no session state. Its whole content is the
+  // record, and ResetProject clears the record with the
+  // design, so it does not require the database; with an
+  // empty record it fails fast, mirroring place_summary's
+  // "no placement" posture.
+  add("cts_summary", "cts_summary",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "cts_summary")) {
+          return *bad;
+        }
+        if (ctx.cts.nets.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no clock tree: eos::cts first");
+        }
+        std::string payload =
+            "cts nets=" + std::to_string(ctx.cts.nets.size());
+        for (const CommandContext::CtsSession::NetResult& net :
+             ctx.cts.nets) {
+          payload += "\nnet name=" + net.net +
+                     " roots=" + std::to_string(net.roots) +
+                     " buffers=" + std::to_string(net.buffers) +
+                     " sinks=" + std::to_string(net.sinks) +
+                     " clock_sinks=" + std::to_string(net.clock_sinks) +
+                     " subnets=" + std::to_string(net.subnets) +
+                     " liberty_corner=" + net.liberty_corner;
+          for (const auto& slack : net.scene_slacks) {
+            payload += "\nslack scene=" + slack.first +
+                       " worst_slack_ns=" + FormatNumber(slack.second);
+          }
+          if (!net.sta_note.empty()) {
+            payload += "\nsta_note " + net.sta_note;
           }
         }
         return CommandResult::Ok(payload);

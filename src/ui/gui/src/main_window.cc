@@ -63,8 +63,10 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   // elaboration is done, and shows the Results tab's synthesis
   // section. Place is a button too: it stays disabled until a
   // placement is loaded, and shows the placement canvas.
-  // Signoff is a button too: it stays disabled until
-  // signoff verdicts are loaded, and shows the Signoff tab.
+  // CTS is a button too: it stays disabled until a CTS run is
+  // recorded, and shows the Clocks tab. Signoff is a button
+  // too: it stays disabled until signoff verdicts are loaded,
+  // and shows the Signoff tab.
   // Elaboration, Floorplan, and Place are flat buttons, not labels: the
   // user switches the center between the hierarchy views and
   // the floorplan or placement canvas there. The other later stages stay
@@ -114,6 +116,19 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       connect(placement_button_, &QPushButton::clicked, [this]() {
         view_.ShowFloorplan(false);
         view_.ShowPlacement(true);
+        Refresh();
+      });
+      continue;
+    }
+    if (std::string(stage) == "CTS") {
+      cts_button_ = new QPushButton(stage, stages);
+      cts_button_->setFlat(true);
+      cts_button_->setEnabled(false);
+      stages_layout->addWidget(cts_button_);
+      connect(cts_button_, &QPushButton::clicked, [this]() {
+        // PanelsView is created below; clicks only happen after
+        // construction, so it is set by then.
+        panels_->ShowTab(4);
         Refresh();
       });
       continue;
@@ -287,6 +302,10 @@ bool MainWindow::SynthesisEnabled() const {
   return synthesis_button_ != nullptr && synthesis_button_->isEnabled();
 }
 
+bool MainWindow::CtsEnabled() const {
+  return cts_button_ != nullptr && cts_button_->isEnabled();
+}
+
 bool MainWindow::SignoffEnabled() const {
   return signoff_button_ != nullptr && signoff_button_->isEnabled();
 }
@@ -381,6 +400,9 @@ void MainWindow::Refresh() {
     case SessionView::ResultDestination::kTiming:
       panels_->ShowTab(3);
       break;
+    case SessionView::ResultDestination::kClocks:
+      panels_->ShowTab(4);
+      break;
     case SessionView::ResultDestination::kOptLog:
       panels_->ShowTab(4);
       break;
@@ -401,6 +423,7 @@ void MainWindow::Refresh() {
   view_.RefreshFloorplan();
   view_.RefreshPlacement();
   view_.RefreshClockNetwork();
+  view_.RefreshCts();
   view_.RefreshSignoff();
   view_.RefreshLog();
   browser_->Refresh();
@@ -454,6 +477,13 @@ void MainWindow::RefreshSteps() {
     placement_button_->setEnabled(view_.Placement().Loaded());
     placement_button_->setStyleSheet(
         view_.ShowingPlacement() ? "font-weight: bold;" : "");
+  }
+  // CTS stays disabled until a CTS run is recorded, and stays
+  // enabled once it is: the flag comes from the live model,
+  // so a later refresh never disables it while the record is
+  // still loaded.
+  if (cts_button_ != nullptr) {
+    cts_button_->setEnabled(view_.Cts().Loaded());
   }
   // Signoff stays disabled until verdicts are loaded, and stays
   // enabled once they are: the flag comes from the live model,

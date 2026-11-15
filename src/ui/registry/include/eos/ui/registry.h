@@ -273,6 +273,46 @@ struct CommandContext {
   };
   PlaceSession place;
 
+  // CTS session state (full-flow GUI unit F5): the record of
+  // the successful eos::cts runs, one entry per clock net, so
+  // the cts_summary query can report each run's numbers (the
+  // engine's counts, the Liberty corner, the run's post-CTS
+  // STA outcome) without re-running the engine or re-walking
+  // the database. Like the place session, this is interface
+  // session state, not project state: it is cleared when the
+  // design closes (ResetProject), and a restore does not
+  // bring it back. Only a successful cts run updates it; a
+  // failed run leaves the previous record untouched, exactly
+  // like a failed place leaves the place record. Entries
+  // keep first-run order; a later successful run on the same
+  // net replaces that net's entry. The sinks count is the
+  // engine's: every electrical load pin on the net.
+  // clock_sinks counts the flop clock pins among those
+  // loads, walked on the database at record time (the clock
+  // view's sink count for the net): the two differ when a
+  // net also feeds a non-clock load, as the generated
+  // clock's net feeds the divider's toggle-feedback
+  // inverter input beside its eight clock pins.
+  // scene_slacks holds the post-CTS worst slack per scene
+  // the run analyzed; when the run's STA leg could not
+  // analyze, sta_note holds the payload's unavailable
+  // statement verbatim instead and scene_slacks is empty.
+  struct CtsSession {
+    struct NetResult {
+      std::string net;
+      int roots = 0;
+      int buffers = 0;
+      int sinks = 0;
+      int clock_sinks = 0;
+      int subnets = 0;
+      std::string liberty_corner;
+      std::vector<std::pair<std::string, double>> scene_slacks;
+      std::string sta_note;
+    };
+    std::vector<NetResult> nets;
+  };
+  CtsSession cts;
+
   // Synthesis session state (unit S1): the design the synthesis
   // commands have parsed, elaborated and generically optimized,
   // as one advancing state machine. Like the timing session,

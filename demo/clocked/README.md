@@ -271,12 +271,73 @@ Measured on the sequence above (`synth_map -target area`):
   named `clk` and `div_q` (clk_top's own wire for the
   divider flop's output, instance `u_div/_17_` in the
   pinned Yosys 0.70 backend's numbering).
-- CTS sink expectations on this design are 23 sinks on the
-  `clk` net and 8 on the `div_q` net (EM_DFFR_X1 clock pins
-  reached), superseding the designed 21 and 16 under the
-  discrepancy rule above: the 21-to-23 difference is
-  u_ctrl's one-hot recode, and the 16-to-8 difference is
-  u_cap's pruning at elaborate.
+- Clock-pin expectations on this design are 23 clock pins
+  on the `clk` net and 8 on the `div_q` net (EM_DFFR_X1
+  clock pins reached), superseding the designed 21 and 16
+  under the discrepancy rule above: the 21-to-23 difference
+  is u_ctrl's one-hot recode, and the 16-to-8 difference is
+  u_cap's pruning at elaborate. The `cts` payload's own
+  `sinks` count is the engine's load-pin count, which on
+  `div_q` is 9, not 8: the net also drives the
+  toggle-feedback inverter's input. Both counts are named
+  wherever CTS reports them (see the F5 section below).
+
+### CTS on this design (F5, measured)
+
+The F5 sequence (`flow-demo.tcl` in this directory) runs
+`place`, then `cts -clock clk` and `cts -clock div_q`, in
+one session. Measured payloads:
+
+- `place`: `placed=168 total=168 hpwl=4078316 overlaps=0`,
+  with the STA leg reporting `sta_slack_ns=unavailable` for
+  the reason below.
+- `cts -clock clk`: `roots=1 buffers=3 sinks=23 subnets=3`,
+  characterization, root, and sink buffers all
+  EM_CLKBUF_X1, inferred from the mock Liberty with no
+  buffer pinning.
+- `cts -clock div_q`: `roots=1 buffers=3 sinks=9 subnets=3`
+  (9 load pins: the 8 clock pins plus the toggle-feedback
+  inverter's input, `u_div/_16_` pin A).
+
+Both payloads end with the STA outcome as an unavailable
+statement, verbatim: `sta_slack_ns=unavailable (scene
+func_tt: could not read SDC file: clk_top.sdc: Error 374:
+clk_top.sdc line 2, empty ports/pins/nets argument.)` (the
+path echoes how the session read the SDC). The cause is
+upstream of CTS: the timing service re-reads `clk_top.sdc`
+against the flat imported database, where the SDC's
+generated-clock source `[get_pins u_div/q]` does not
+resolve (the divider is `u_div/_17_`, pin `Q`, in the flat
+DEF), so every ODB-path analysis on this design reports
+unavailable and `run_timing` fails with the same error
+before and after CTS, exactly as it does at the place
+stage. A separate SDC pin-resolution fix addresses it.
+
+`cts_summary` after the two runs (the Clocks tab's CTS
+section renders the same record):
+
+```text
+cts nets=2
+net name=clk roots=1 buffers=3 sinks=23 clock_sinks=23 subnets=3 liberty_corner=tt
+sta_note sta_slack_ns=unavailable (scene func_tt: could not read SDC file: clk_top.sdc: Error 374: clk_top.sdc line 2, empty ports/pins/nets argument.)
+net name=div_q roots=1 buffers=3 sinks=9 clock_sinks=8 subnets=3 liberty_corner=tt
+sta_note sta_slack_ns=unavailable (scene func_tt: could not read SDC file: clk_top.sdc: Error 374: clk_top.sdc line 2, empty ports/pins/nets argument.)
+```
+
+Post-CTS, `clock_network_summary` still shows both trees
+per pin: `clk` with `sinks=23` and `clk_div` with
+`sinks=8`, the divider flagged `generates=clk_div`, and 3
+inserted clock buffers walked on each tree. The `clk_div`
+source resolves through the root buffer CTS inserted on
+`div_q`; F5 fixed the walk's structural source rule to
+treat a clock buffer's input pin as clock-carrying (before
+the fix, `clk_div` rendered `tree=none, sinks=-` after
+CTS). The walked `clk_div` tree shows 5 buffer-kind nodes
+in total: the 3 CTS buffers plus the feedback inverter and
+the divider's D pin, design logic on the generated clock's
+nets. Re-running `cts` on either net in the same session
+fails with "no clock tree was built" (the engine skips an
+already-buffered net) and leaves the record unchanged.
 
 ### The clock table in a read_sdc-only session (F2 caveat, fixed)
 

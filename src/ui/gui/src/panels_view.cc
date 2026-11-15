@@ -410,6 +410,43 @@ std::string RenderClockNetwork(const ClockNetworkModel& model) {
   return out;
 }
 
+// The Clocks tab's CTS section: the session's recorded cts
+// runs, appended under the clock trees when the CTS model is
+// loaded, and nothing when it is not (the tab's stage line
+// and notes already state the pre-CTS truth). The section is
+// keyed by net name and the tree blocks above it by clock
+// name; on the clocked design the two differ for the
+// generated clock (net div_q, clock clk_div), so the section
+// stands on its own rather than joining the blocks (F5
+// design section 4.3). Counts are the record's: sinks counts
+// every load pin on the net, and when some of those loads
+// are not clock pins the clock-pin count is named too. A run
+// whose STA leg could not analyze shows its unavailable
+// statement verbatim instead of a slack line.
+std::string RenderCts(const CtsModel& model) {
+  if (!model.Loaded()) return "";
+  std::string out = "\nCTS (this session):\n";
+  for (const CtsNet& net : model.Nets()) {
+    out += "  net " + net.name + ": roots " +
+           std::to_string(net.roots) + ", buffers " +
+           std::to_string(net.buffers) + ", sinks " +
+           std::to_string(net.sinks);
+    if (net.clock_sinks != net.sinks) {
+      out += " (" + std::to_string(net.clock_sinks) + " clock pins)";
+    }
+    out += ", subnets " + std::to_string(net.subnets) +
+           ", Liberty corner " + net.liberty_corner + "\n";
+    for (const CtsSlack& slack : net.slacks) {
+      out += "    post-CTS worst slack (" + slack.scene +
+             "): " + FormatSlack(slack.worst_slack_ns) + " ns\n";
+    }
+    if (!net.sta_note.empty()) {
+      out += "    " + net.sta_note + "\n";
+    }
+  }
+  return out;
+}
+
 std::string IssueKindText(const std::string& kind) {
   if (kind == "extraction_artifact") return "extraction artifact";
   if (kind == "resolved_artifact") {
@@ -655,8 +692,9 @@ void PanelsView::Refresh() {
   results_->setPlainText(QString::fromStdString(RenderResults(panels)));
   timing_->setPlainText(
       QString::fromStdString(RenderTiming(view_.Timing())));
-  clocks_->setPlainText(
-      QString::fromStdString(RenderClockNetwork(view_.ClockNetwork())));
+  clocks_->setPlainText(QString::fromStdString(
+      RenderClockNetwork(view_.ClockNetwork()) +
+      RenderCts(view_.Cts())));
   optlog_->setPlainText(QString::fromStdString(RenderOptLog(panels)));
   signoff_->setPlainText(
       QString::fromStdString(RenderSignoff(view_.Signoff())));
