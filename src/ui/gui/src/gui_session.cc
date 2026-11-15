@@ -259,6 +259,7 @@ static SessionView::ResultDestination NavigationForCommand(
       name == "check_timing") {
     return Destination::kTiming;
   }
+  if (name == "cts") return Destination::kClocks;
   if (name == "signoff_summary") return Destination::kSignoff;
   if (name == "report_clock" || name == "report_constraint" ||
       name == "report_analysis_coverage" || name == "report_qor" ||
@@ -302,6 +303,7 @@ CommandResult SessionView::Dispatch(const std::string& name,
         // no live design.
         floorplan_.Clear();
         placement_.Clear();
+        cts_.Clear();
       }
     } else if (name == "close_design") {
       checkpoint_.clear();
@@ -309,6 +311,7 @@ CommandResult SessionView::Dispatch(const std::string& name,
       center_placement_ = false;
       floorplan_.Clear();
       placement_.Clear();
+      cts_.Clear();
     } else if (name == "floorplan") {
       // A successful floorplan takes the user to the
       // floorplan canvas: the center shows it on the next
@@ -536,6 +539,15 @@ void SessionView::RefreshClockNetwork() {
   if (!result.ok || !clock_network_.LoadPayload(result.payload)) {
     NoteUnguardedRefreshFailure(messages_, "clock_network_summary",
                                 result, !clock_network_.Loaded());
+  }
+}
+
+void SessionView::RefreshCts() {
+  const CommandResult result =
+      registry_.Dispatch(context_, "cts_summary", {});
+  if (!result.ok || !cts_.LoadPayload(result.payload)) {
+    NoteUnguardedRefreshFailure(messages_, "cts_summary", result,
+                                cts_.Empty());
   }
 }
 

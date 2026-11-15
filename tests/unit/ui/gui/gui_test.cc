@@ -62,6 +62,8 @@ using eos::ui::BreadcrumbPaths;
 using eos::ui::ComputeSchematicLayout;
 using eos::ui::ConeNetPaths;
 using eos::ui::ConeNetSpokes;
+using eos::ui::CtsModel;
+using eos::ui::CtsNet;
 using eos::ui::DiagramBlock;
 using eos::ui::DiagramModel;
 using eos::ui::DiagramNet;
@@ -2152,6 +2154,35 @@ void RegisterClockNetworkCommand(CommandRegistry& registry,
   EXPECT_TRUE(status.ok());
 }
 
+// F5: the recorded CTS runs as cts_summary reports them: one
+// net with a finite slack line, one with the STA unavailable
+// note (the clocked demo's posture under the ruling of
+// 2026-11-14). div_q names both sink counts: 9 load pins, 8
+// of them flop clock pins.
+const char kCtsSummaryPayload[] =
+    "cts nets=2\n"
+    "net name=clk roots=1 buffers=3 sinks=23 clock_sinks=23 "
+    "subnets=3 liberty_corner=tt\n"
+    "slack scene=func_tt worst_slack_ns=1.25\n"
+    "net name=div_q roots=1 buffers=3 sinks=9 clock_sinks=8 "
+    "subnets=3 liberty_corner=tt\n"
+    "sta_note sta_slack_ns=unavailable (scene func_tt: could not "
+    "read SDC file)\n";
+
+void RegisterCtsSummaryCommand(CommandRegistry& registry,
+                               const std::string& payload, bool ok) {
+  auto status = registry.Register(
+      "cts_summary", "cts_summary",
+      [payload, ok](CommandContext&, const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "query broken");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
 void FillPanelsContext(CommandContext& context) {
   context.synth.parsed = true;
   context.synth.top_cell = "optloop";
@@ -3525,6 +3556,79 @@ TEST(ClockNetworkModel, RejectsMalformedPayloads) {
   ASSERT_TRUE(model.LoadPayload(kClockNetworkPayload));
   EXPECT_FALSE(model.LoadPayload("garbage\n"));
   EXPECT_EQ(model.clocks().size(), 2u);
+}
+
+TEST(CtsModel, ParsesRecordedRuns) {
+  CtsModel model;
+  ASSERT_TRUE(model.LoadPayload(kCtsSummaryPayload));
+  EXPECT_TRUE(model.Loaded());
+  ASSERT_EQ(model.Nets().size(), 2u);
+  const CtsNet& clk = model.Nets()[0];
+  EXPECT_EQ(clk.name, "clk");
+  EXPECT_EQ(clk.roots, 1u);
+  EXPECT_EQ(clk.buffers, 3u);
+  EXPECT_EQ(clk.sinks, 23u);
+  EXPECT_EQ(clk.clock_sinks, 23u);
+  EXPECT_EQ(clk.subnets, 3u);
+  EXPECT_EQ(clk.liberty_corner, "tt");
+  ASSERT_EQ(clk.slacks.size(), 1u);
+  EXPECT_EQ(clk.slacks[0].scene, "func_tt");
+  EXPECT_DOUBLE_EQ(clk.slacks[0].worst_slack_ns, 1.25);
+  EXPECT_TRUE(clk.sta_note.empty());
+  const CtsNet& div_q = model.Nets()[1];
+  EXPECT_EQ(div_q.name, "div_q");
+  EXPECT_EQ(div_q.sinks, 9u);
+  EXPECT_EQ(div_q.clock_sinks, 8u);
+  EXPECT_TRUE(div_q.slacks.empty());
+  EXPECT_EQ(div_q.sta_note,
+            "sta_slack_ns=unavailable (scene func_tt: could not "
+            "read SDC file)");
+}
+
+TEST(CtsModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      // No header.
+      "net name=clk roots=1 buffers=3 sinks=23 clock_sinks=23 "
+      "subnets=3 liberty_corner=tt\n",
+      // Net count mismatch (truncated payload).
+      "cts nets=2\n"
+      "net name=clk roots=1 buffers=3 sinks=23 clock_sinks=23 "
+      "subnets=3 liberty_corner=tt\n",
+      // A net line missing a key (no clock_sinks).
+      "cts nets=1\n"
+      "net name=clk roots=1 buffers=3 sinks=23 subnets=3 "
+      "liberty_corner=tt\n",
+      // A bad number.
+      "cts nets=1\n"
+      "net name=clk roots=x buffers=3 sinks=23 clock_sinks=23 "
+      "subnets=3 liberty_corner=tt\n",
+      // A slack line before any net line.
+      "cts nets=1\n"
+      "slack scene=func_tt worst_slack_ns=1.25\n"
+      "net name=clk roots=1 buffers=3 sinks=23 clock_sinks=23 "
+      "subnets=3 liberty_corner=tt\n",
+      // A sta_note after slack lines on the same net.
+      "cts nets=1\n"
+      "net name=clk roots=1 buffers=3 sinks=23 clock_sinks=23 "
+      "subnets=3 liberty_corner=tt\n"
+      "slack scene=func_tt worst_slack_ns=1.25\n"
+      "sta_note sta_slack_ns=unavailable (x)\n",
+      // An unknown line kind.
+      "cts nets=1\n"
+      "net name=clk roots=1 buffers=3 sinks=23 clock_sinks=23 "
+      "subnets=3 liberty_corner=tt\n"
+      "bogus x=1\n",
+  };
+  for (const char* payload : bad) {
+    CtsModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+  // A malformed load keeps the previous model.
+  CtsModel model;
+  ASSERT_TRUE(model.LoadPayload(kCtsSummaryPayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.Nets().size(), 2u);
 }
 
 // Writes one SDC text to a fresh temp file and removes it on
@@ -5116,6 +5220,39 @@ struct AutoNavView {
         });
     EXPECT_TRUE(elaborate.ok());
     RegisterOkCommand(registry, "run_timing");
+    // F5: the stub cts records a run on clk; the stub
+    // cts_summary fails until the record is non-empty, like
+    // the real query.
+    auto cts = registry.Register(
+        "cts", "cts",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          CommandContext::CtsSession::NetResult entry;
+          entry.net = "clk";
+          entry.roots = 1;
+          entry.buffers = 3;
+          entry.sinks = 23;
+          entry.clock_sinks = 23;
+          entry.subnets = 3;
+          entry.liberty_corner = "tt";
+          ctx.cts.nets.push_back(entry);
+          return CommandResult::Ok("");
+        });
+    EXPECT_TRUE(cts.ok());
+    auto cts_summary = registry.Register(
+        "cts_summary", "cts_summary",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          if (ctx.cts.nets.empty()) {
+            return CommandResult::Fail(
+                eos::ui::Diag::kInvalidConfiguration,
+                "no clock tree: eos::cts first");
+          }
+          return CommandResult::Ok(
+              "cts nets=1\n"
+              "net name=clk roots=1 buffers=3 sinks=23 "
+              "clock_sinks=23 subnets=3 liberty_corner=tt\n"
+              "slack scene=func_tt worst_slack_ns=1.25");
+        });
+    EXPECT_TRUE(cts_summary.ok());
     auto signoff = registry.Register(
         "signoff_summary", "signoff_summary",
         [this](CommandContext&, const std::vector<std::string>&) {
@@ -5255,6 +5392,33 @@ TEST(MainWindowAutoNav, SignoffButtonShowsSignoffTab) {
   EXPECT_TRUE(signoff->isEnabled());
   signoff->click();
   EXPECT_EQ(window.CurrentTab(), 6);
+}
+
+// F5: the CTS stage button starts disabled, enables once a
+// run is recorded, a console cts lands on the Clocks tab,
+// and the stage button shows the Clocks tab too.
+TEST(MainWindowAutoNav, CtsRunShowsClocksTab) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  EXPECT_FALSE(window.CtsEnabled());
+  EXPECT_EQ(window.CurrentTab(), 0);
+  ASSERT_TRUE(fixture.view.Dispatch("cts", {"-clock", "clk"}).ok);
+  window.Refresh();
+  EXPECT_TRUE(window.CtsEnabled());
+  EXPECT_EQ(fixture.view.CtsStep(), StepStatus::kDone);
+  EXPECT_TRUE(fixture.view.Cts().Loaded());
+  EXPECT_EQ(window.CurrentTab(), 4);
+  // Move away through the stepper's Read step (Sources tab),
+  // then take the CTS stage button back to Clocks.
+  QPushButton* read = AutoNavButtonWithPrefix(window, "Read");
+  ASSERT_NE(read, nullptr);
+  read->click();
+  EXPECT_EQ(window.CurrentTab(), 1);
+  QPushButton* cts_button = AutoNavButtonWithPrefix(window, "CTS");
+  ASSERT_NE(cts_button, nullptr);
+  EXPECT_TRUE(cts_button->isEnabled());
+  cts_button->click();
+  EXPECT_EQ(window.CurrentTab(), 4);
 }
 
 // A SessionView with the nested hierarchy, so the center can
@@ -5457,6 +5621,42 @@ TEST(PanelsView, ClocksTabShowsElaboratedNetwork) {
             std::string::npos);
   EXPECT_NE(text.find("Note: latency comes from post-CTS STA and is "
                       "not shown by this view."),
+            std::string::npos);
+}
+
+// F5: the Clocks tab appends the CTS section from the
+// record when the CTS model is loaded, and shows nothing
+// extra when it is empty.
+TEST(PanelsView, ClocksTabAppendsCtsSection) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterClockNetworkCommand(registry, kClockNetworkPayload, true);
+  RegisterCtsSummaryCommand(registry, kCtsSummaryPayload, true);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshClockNetwork();
+  PanelsView bare(view);
+  auto* bare_clocks = qobject_cast<QPlainTextEdit*>(bare.widget(4));
+  ASSERT_NE(bare_clocks, nullptr);
+  EXPECT_EQ(bare_clocks->toPlainText().toStdString().find(
+                "CTS (this session):"),
+            std::string::npos);
+  view.RefreshCts();
+  PanelsView panels(view);
+  auto* clocks = qobject_cast<QPlainTextEdit*>(panels.widget(4));
+  ASSERT_NE(clocks, nullptr);
+  const std::string text = clocks->toPlainText().toStdString();
+  EXPECT_NE(text.find("CTS (this session):"), std::string::npos);
+  EXPECT_NE(text.find(" net clk: roots 1, buffers 3, sinks 23, "
+                      "subnets 3, Liberty corner tt"),
+            std::string::npos);
+  EXPECT_NE(text.find(" post-CTS worst slack (func_tt): 1.25 ns"),
+            std::string::npos);
+  EXPECT_NE(text.find(" net div_q: roots 1, buffers 3, sinks 9 "
+                      "(8 clock pins), subnets 3, Liberty corner tt"),
+            std::string::npos);
+  EXPECT_NE(text.find(" sta_slack_ns=unavailable (scene func_tt: "
+                      "could not read SDC file)"),
             std::string::npos);
 }
 
@@ -5910,6 +6110,39 @@ TEST(GuiSessionView, RefreshClockNetworkKeepsModelOnFailure) {
   EXPECT_EQ(view.Messages()[0],
             "clock_network_summary: EOS invalid_configuration: "
             "query broken");
+}
+
+// F5: the CTS refresh populates the model from the
+// cts_summary query with no echo, and the CTS step follows
+// the session record (not the model).
+TEST(GuiSessionView, RefreshCtsPopulatesModelWithoutEcho) {
+  CommandRegistry registry;
+  RegisterCtsSummaryCommand(registry, kCtsSummaryPayload, true);
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_EQ(view.CtsStep(), StepStatus::kPending);
+  view.RefreshCts();
+  EXPECT_TRUE(view.Cts().Loaded());
+  ASSERT_EQ(view.Cts().Nets().size(), 2u);
+  EXPECT_EQ(view.Cts().Nets()[0].name, "clk");
+  EXPECT_EQ(view.Cts().Nets()[1].name, "div_q");
+  EXPECT_TRUE(view.EchoLog().empty());
+  EXPECT_EQ(view.CtsStep(), StepStatus::kPending);
+  context.cts.nets.push_back(CommandContext::CtsSession::NetResult());
+  EXPECT_EQ(view.CtsStep(), StepStatus::kDone);
+}
+
+// F5: in a fresh session the query fails fast, so the model
+// stays empty and no message is logged (the guarded refresh
+// posture every stage view shares).
+TEST(GuiSessionView, RefreshCtsStaysEmptyOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterCtsSummaryCommand(registry, kCtsSummaryPayload, false);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshCts();
+  EXPECT_FALSE(view.Cts().Loaded());
+  EXPECT_TRUE(view.Messages().empty());
 }
 
 // A4: with clocks wired but no timing run, RefreshTiming

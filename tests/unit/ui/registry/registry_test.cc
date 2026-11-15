@@ -101,7 +101,8 @@ TEST(Registry, CoreSetIsComplete) {
   // per-cell edit unit adds size_cell, swap_cell,
   // insert_buffer, and remove_buffer (four commands).
   // The clock-network unit adds clock_network_summary (one command).
-  EXPECT_EQ(shell.registry.Names().size(), 124u);
+  // The F5 CTS unit adds cts_summary (one command).
+  EXPECT_EQ(shell.registry.Names().size(), 125u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -109,6 +110,7 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("create_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("create_generated_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("clock_network_summary"), nullptr);
+  EXPECT_NE(shell.registry.Find("cts_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("set_waiver"), nullptr);
@@ -11178,6 +11180,382 @@ TEST(CoreCommands, WriteDefBridgesClockedDemoDesign) {
   ASSERT_TRUE(
       delay_shell.Run("read_lef", {mock_dir + "/eos_mock.lef"}).ok);
   ASSERT_TRUE(delay_shell.Run("read_def", {delay_def}).ok);
+}
+
+// The clocked demo session through place (the bridge chain
+// the MappedStage test runs, then floorplan and place), the
+// starting point of the F5 CTS acceptance tests.
+static void BuildPlacedClockedDemoSession(Shell& shell,
+                                          TimingTempDir& dir) {
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  BuildClockedDemoSession(shell);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-target", "area"});
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  const std::string def_path = dir.Path("clk_top.def");
+  const CommandResult def =
+      shell.Run("write_def", {def_path, "-lef", mock_dir + "/eos_mock.lef",
+                              "-tlef", mock_dir + "/eos_mock.tlef"});
+  ASSERT_TRUE(def.ok) << def.message;
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.tlef"}).ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.lef"}).ok);
+  ASSERT_TRUE(shell.Run("read_def", {def_path}).ok);
+  ASSERT_TRUE(shell.Run("floorplan").ok);
+  const CommandResult place = shell.Run("place");
+  ASSERT_TRUE(place.ok) << place.message;
+}
+
+// Counts one clock's buffer nodes in a clock_network_summary
+// payload.
+static int CountBufferNodes(const std::string& payload,
+                            const std::string& clock) {
+  int count = 0;
+  std::istringstream in(payload);
+  std::string line;
+  const std::string prefix = "node clock=" + clock + " ";
+  while (std::getline(in, line)) {
+    if (line.rfind(prefix, 0) != 0) continue;
+    if (line.find("kind=buffer") != std::string::npos) count += 1;
+  }
+  return count;
+}
+
+// Counts one clock's walked buffer nodes whose instance
+// master is a CTS clock buffer (EM_CLKBUF_X1/X2), resolved
+// through the facade: the A5 cross-check compares the CTS
+// buffers the walk renders against the recorded count, and
+// the walk also renders design logic sitting on the clock's
+// nets as buffer nodes (on clk_div, the toggle-feedback
+// inverter and the divider's D pin), which are not CTS
+// buffers.
+static int CountCtsBufferNodes(Shell& shell, const std::string& payload,
+                               const std::string& clock) {
+  int count = 0;
+  std::istringstream in(payload);
+  std::string line;
+  const std::string prefix = "node clock=" + clock + " ";
+  while (std::getline(in, line)) {
+    if (line.rfind(prefix, 0) != 0) continue;
+    if (line.find("kind=buffer") == std::string::npos) continue;
+    const std::size_t open = line.find("name={");
+    const std::size_t close = line.find('}', open);
+    if (open == std::string::npos || close == std::string::npos) {
+      continue;
+    }
+    const std::string instance = line.substr(open + 6, close - open - 6);
+    db::OdbInstanceInfo info;
+    if (!shell.ctx.timing.odb->FindInstance(instance, &info)) continue;
+    if (info.master == "EM_CLKBUF_X1" || info.master == "EM_CLKBUF_X2") {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+// F5 A1 + A2 + A3 (as re-judged by the ruling of 2026-11-14,
+// design section 12): the full chain runs in one session
+// through both cts calls; clk reports roots=1, sinks=23,
+// buffers=3, subnets=3; div_q reports roots=1, buffers=3,
+// subnets=3 and sinks=9, the engine's load-pin count (the 8
+// flop clock pins plus the toggle-feedback inverter's input
+// pin, a real load on the net; the design's original 8
+// counted clock pins only). Both payloads carry the two
+// unavailable statements verbatim, the tt corner, and, per
+// ruling item 2, the STA unavailable statement verbatim
+// instead of a finite slack: the ODB timing path re-reads
+// clk_top.sdc against the flat database and cannot resolve
+// the generated clock's source pin (u_div/q in the SDC,
+// u_div/_17_ pin Q in the DEF), the same posture place
+// already ships on this demo.
+TEST(CoreCommands, CtsRunsClockedDemoEndToEnd) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildPlacedClockedDemoSession(shell, dir);
+  const CommandResult clk = shell.Run("cts", {"-clock", "clk"});
+  ASSERT_TRUE(clk.ok) << clk.message;
+  EXPECT_NE(clk.payload.find("roots=1 buffers=3 sinks=23 subnets=3"),
+            std::string::npos);
+  EXPECT_NE(clk.payload.find(
+                "skew_ns=unavailable (TritonCTS reports no ns skew; "
+                "measure via post-CTS STA)"),
+            std::string::npos);
+  EXPECT_NE(clk.payload.find(
+                "insertion_delay_ns=unavailable (TritonCTS insertion "
+                "delay is a length, not a time)"),
+            std::string::npos);
+  EXPECT_NE(clk.payload.find("liberty_corner=tt"), std::string::npos);
+  // The statement names the SDC by the path the session read
+  // it from, so the test pins the statement's shape and its
+  // stable tail (the OpenSTA error), not the path itself.
+  EXPECT_NE(clk.payload.find(
+                "sta_slack_ns=unavailable (scene func_tt: could not "
+                "read SDC file: "),
+            std::string::npos);
+  EXPECT_NE(clk.payload.find(
+                "clk_top.sdc: Error 374: clk_top.sdc line 2, empty "
+                "ports/pins/nets argument.)"),
+            std::string::npos);
+  const CommandResult div_q = shell.Run("cts", {"-clock", "div_q"});
+  ASSERT_TRUE(div_q.ok) << div_q.message;
+  EXPECT_NE(div_q.payload.find("roots=1 buffers=3 sinks=9 subnets=3"),
+            std::string::npos);
+  EXPECT_NE(div_q.payload.find("liberty_corner=tt"),
+            std::string::npos);
+  EXPECT_NE(div_q.payload.find(
+                "sta_slack_ns=unavailable (scene func_tt: could not "
+                "read SDC file: "),
+            std::string::npos);
+  EXPECT_NE(div_q.payload.find(
+                "clk_top.sdc: Error 374: clk_top.sdc line 2, empty "
+                "ports/pins/nets argument.)"),
+            std::string::npos);
+}
+
+// F5 A4, the fail-fast half: cts_summary with an empty
+// record, in a fresh session and in a placed session that
+// has not run CTS.
+TEST(CoreCommands, CtsSummaryFailsFastWithoutCts) {
+  Shell shell;
+  const CommandResult fresh = shell.Run("cts_summary");
+  ASSERT_FALSE(fresh.ok);
+  EXPECT_EQ(fresh.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(fresh.message.find("no clock tree: eos::cts first"),
+            std::string::npos);
+
+  TimingTempDir dir;
+  Shell placed;
+  BuildPlacedClockedDemoSession(placed, dir);
+  const CommandResult result = placed.Run("cts_summary");
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no clock tree: eos::cts first"),
+            std::string::npos);
+  EXPECT_TRUE(placed.ctx.cts.nets.empty());
+}
+
+// F5 A4: after the two runs, cts_summary returns the record
+// line by line: both sink counts named per net (sinks counts
+// load pins, clock_sinks the flop clock pins among them:
+// 23/23 on clk, 9/8 on div_q), and each run's STA outcome as
+// the sta_note it recorded (ruling item 2).
+TEST(CoreCommands, CtsSummaryReportsRecordedRuns) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildPlacedClockedDemoSession(shell, dir);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
+  ASSERT_EQ(shell.ctx.cts.nets.size(), 2u);
+  const CommandResult summary = shell.Run("cts_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  // The summary must reproduce the record line by line. The
+  // recorded sta_note names the SDC by the path the session
+  // read it from, so the expected payload takes the notes
+  // from the record itself and pins their shape separately.
+  for (const CommandContext::CtsSession::NetResult& entry :
+       shell.ctx.cts.nets) {
+    ASSERT_TRUE(entry.scene_slacks.empty());
+    EXPECT_NE(entry.sta_note.find(
+                  "sta_slack_ns=unavailable (scene func_tt: could "
+                  "not read SDC file: "),
+              std::string::npos);
+    EXPECT_NE(entry.sta_note.find(
+                  "clk_top.sdc: Error 374: clk_top.sdc line 2, "
+                  "empty ports/pins/nets argument.)"),
+              std::string::npos);
+  }
+  EXPECT_EQ(summary.payload,
+            "cts nets=2\n"
+            "net name=clk roots=1 buffers=3 sinks=23 clock_sinks=23 "
+            "subnets=3 liberty_corner=tt\nsta_note " +
+                shell.ctx.cts.nets[0].sta_note +
+                "\nnet name=div_q roots=1 buffers=3 sinks=9 "
+                "clock_sinks=8 subnets=3 liberty_corner=tt\nsta_note " +
+                shell.ctx.cts.nets[1].sta_note);
+}
+
+// F5 record semantics, as measured: a re-run on an
+// already-buffered net builds no new tree. TritonCTS skips
+// the net (pd.cts SecondRunSucceeds documents the skip: it
+// uses a fresh design per run), the driver sees zero clock
+// roots and fails, and the success-only record update
+// leaves the first run's entry untouched: the record and
+// the summary still hold exactly the first payload's
+// numbers. (The design's section 7 draft of this test
+// assumed the re-run succeeds; the engine's measured
+// behavior is the failure above, recorded in design
+// section 12.)
+TEST(CoreCommands, CtsRerunOnBufferedNetKeepsRecord) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildPlacedClockedDemoSession(shell, dir);
+  const CommandResult first = shell.Run("cts", {"-clock", "clk"});
+  ASSERT_TRUE(first.ok) << first.message;
+  const CommandResult second = shell.Run("cts", {"-clock", "clk"});
+  ASSERT_FALSE(second.ok);
+  EXPECT_EQ(second.diag, Diag::kInvalidState);
+  EXPECT_NE(second.message.find("no clock tree was built"),
+            std::string::npos);
+  ASSERT_EQ(shell.ctx.cts.nets.size(), 1u);
+  const CommandContext::CtsSession::NetResult& entry =
+      shell.ctx.cts.nets.front();
+  EXPECT_EQ(entry.net, "clk");
+  EXPECT_EQ(entry.roots, 1);
+  EXPECT_EQ(entry.buffers, 3);
+  EXPECT_EQ(entry.sinks, 23);
+  EXPECT_EQ(entry.clock_sinks, 23);
+  EXPECT_EQ(entry.subnets, 3);
+  const CommandResult summary = shell.Run("cts_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find(
+                "cts nets=1\nnet name=clk roots=1 buffers=3 "
+                "sinks=23 clock_sinks=23 subnets=3 "
+                "liberty_corner=tt"),
+            std::string::npos);
+}
+
+// F5 A5, cross-checked, and the walk-fix regression (ruling
+// item 3): after both cts runs the mapped walk still shows
+// both trees per pin; the walked CTS buffer nodes equal the
+// recorded buffers per clock (3 and 3); the divider sink on
+// clk's tree still carries generates=clk_div; and clk_div
+// resolves its source through the root buffer CTS inserted
+// on div_q. Without the walk fix, clk_div reads sinks=-
+// tree=none here: the divider's output net's only load is
+// the buffer's input pin, which the structural source rule
+// did not count as clock-carrying.
+TEST(CoreCommands, CtsPostCtsClockViewCrossCheck) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildPlacedClockedDemoSession(shell, dir);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
+  const CommandResult pins = shell.Run("clock_network_summary");
+  ASSERT_TRUE(pins.ok) << pins.message;
+  EXPECT_NE(pins.payload.find("stage=mapped clocks=2"),
+            std::string::npos);
+  EXPECT_NE(pins.payload.find(
+                "clock name=clk generated=0 period=5 rise=0 fall=2.5 "
+                "skew=0.1 source={clk} sinks=23 latency=- master=- "
+                "modification=- tree=pins"),
+            std::string::npos);
+  EXPECT_NE(pins.payload.find(
+                "clock name=clk_div generated=1 period=10 rise=0 "
+                "fall=5 skew=0.1 source={u_div/q} sinks=8 latency=- "
+                "master=clk modification={divide_by(2)} tree=pins"),
+            std::string::npos);
+  EXPECT_NE(pins.payload.find(
+                "node clock=clk_div depth=0 kind=source "
+                "name={u_div/_17_/Q} pin=- count=- generates=-"),
+            std::string::npos);
+  EXPECT_NE(pins.payload.find(
+                "name={u_div/_17_} pin=CK count=- generates=clk_div"),
+            std::string::npos);
+  EXPECT_EQ(pins.payload.find("shared clock="), std::string::npos);
+  EXPECT_EQ(CountCtsBufferNodes(shell, pins.payload, "clk"), 3);
+  EXPECT_EQ(CountCtsBufferNodes(shell, pins.payload, "clk_div"), 3);
+  EXPECT_EQ(CountBufferNodes(pins.payload, "clk"), 3);
+  // clk_div's tree holds 5 buffer nodes in total: the 3 CTS
+  // buffers plus the toggle-feedback inverter (u_div/_16_)
+  // and the divider's own D pin, design logic on the
+  // generated clock's nets.
+  EXPECT_EQ(CountBufferNodes(pins.payload, "clk_div"), 5);
+}
+
+// F5 A6 as re-judged (ruling item 2): run_timing's behavior
+// after CTS matches its behavior at the place stage on the
+// same session: the same failure, introduced by the SDC pin
+// resolution gap that predates F5, with no new failure mode
+// from CTS.
+TEST(CoreCommands, CtsRunTimingPostureUnchanged) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildPlacedClockedDemoSession(shell, dir);
+  const CommandResult before = shell.Run("run_timing");
+  ASSERT_FALSE(before.ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
+  const CommandResult after = shell.Run("run_timing");
+  ASSERT_FALSE(after.ok);
+  EXPECT_EQ(after.diag, before.diag);
+  EXPECT_EQ(after.message, before.message);
+}
+
+// F5 A9: CTS does not disturb the place record or the
+// timing session's answers. place_summary's header line
+// (the recorded counts) is byte-identical after CTS; its
+// per-instance lines legitimately grow, because they render
+// the live database and CTS inserted buffer instances into
+// it. timing_summary (clocks-only on this session: no
+// run_timing has succeeded) is byte-identical.
+TEST(CoreCommands, CtsLeavesPlaceAndTimingRecordsAlone) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildPlacedClockedDemoSession(shell, dir);
+  const CommandResult place_before = shell.Run("place_summary");
+  ASSERT_TRUE(place_before.ok) << place_before.message;
+  const CommandResult timing_before = shell.Run("timing_summary");
+  ASSERT_TRUE(timing_before.ok) << timing_before.message;
+  const int placed_count = shell.ctx.place.placed_count;
+  const long long hpwl = shell.ctx.place.hpwl_dbu;
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
+  EXPECT_EQ(shell.ctx.place.placed_count, placed_count);
+  EXPECT_EQ(shell.ctx.place.hpwl_dbu, hpwl);
+  const CommandResult place_after = shell.Run("place_summary");
+  ASSERT_TRUE(place_after.ok) << place_after.message;
+  EXPECT_EQ(place_after.payload.substr(
+                0, place_after.payload.find('\n')),
+            place_before.payload.substr(
+                0, place_before.payload.find('\n')));
+  const CommandResult timing_after = shell.Run("timing_summary");
+  ASSERT_TRUE(timing_after.ok) << timing_after.message;
+  EXPECT_EQ(timing_after.payload, timing_before.payload);
+}
+
+// F5 A8: on demo/synth, after the optloop flow through
+// place, cts -clock vclk fails fast: vclk is a virtual
+// clock (top.sdc creates it with no source), so no net by
+// that name exists and the driver reports it not found.
+// No record is stored, and cts_summary still fails fast.
+TEST(CoreCommands, CtsOnClocklessOptloopFailsFast) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const std::string demo_dir = EOS_DEMO_SYNTH_DIR;
+  ASSERT_TRUE(shell.Run("create_scenario",
+                        {"func_tt", "func", "tt", "estimate"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("read_liberty", {"tt", mock_dir + "/eos_mock.lib"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("read_verilog", {demo_dir + "/optloop.v", "optloop"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  ASSERT_TRUE(shell.Run("synth_map", {"-target", "area"}).ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {demo_dir + "/top.sdc"}).ok);
+  const std::string def_path = dir.Path("optloop.def");
+  ASSERT_TRUE(shell.Run("write_def",
+                        {def_path, "-lef", mock_dir + "/eos_mock.lef",
+                         "-tlef", mock_dir + "/eos_mock.tlef"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.tlef"}).ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.lef"}).ok);
+  ASSERT_TRUE(shell.Run("read_def", {def_path}).ok);
+  ASSERT_TRUE(shell.Run("floorplan").ok);
+  ASSERT_TRUE(shell.Run("place").ok);
+  const CommandResult result = shell.Run("cts", {"-clock", "vclk"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidState);
+  EXPECT_NE(result.message.find("clock net not found"),
+            std::string::npos);
+  EXPECT_TRUE(shell.ctx.cts.nets.empty());
+  const CommandResult summary = shell.Run("cts_summary");
+  ASSERT_FALSE(summary.ok);
+  EXPECT_EQ(summary.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(summary.message.find("no clock tree: eos::cts first"),
+            std::string::npos);
 }
 #endif  // EOS_CLOCKED_DEMO_DIR && EOS_MOCK_PDK_DIR
 
