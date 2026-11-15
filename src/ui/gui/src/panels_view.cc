@@ -267,6 +267,149 @@ std::string RenderTiming(const TimingModel& timing) {
   return out;
 }
 
+// The Clocks tab: the clock network at the stage the session
+// holds. One block per clock (the clock line, the generated
+// derivation, the tree lines indented by depth, the interclock
+// line), then the notes. Latency is "-" at every stage in this
+// unit: it exists only after CTS, from post-CTS STA, and the
+// note line says so (clock-network design sections 3.3, 3.4).
+std::string RenderClockNetwork(const ClockNetworkModel& model) {
+  if (!model.Loaded()) {
+    return "(no clock network yet: no clocks are defined in this "
+           "session. Define one with create_clock or read an SDC "
+           "file with read_sdc.)";
+  }
+  std::string notes;
+  for (const std::string& note : model.notes()) {
+    if (!notes.empty()) notes += "\n";
+    notes += "Note: " + note;
+  }
+  if (model.clocks().empty()) {
+    std::string out = "Clocks: none defined.";
+    if (!notes.empty()) out += "\n" + notes;
+    return out;
+  }
+  const auto unbrace = [](const std::string& value) {
+    if (value.size() >= 2 && value.front() == '{' &&
+        value.back() == '}') {
+      return value.substr(1, value.size() - 2);
+    }
+    return value;
+  };
+  const auto find_clock = [&model](const std::string& name) {
+    for (const ClockNetworkClock& clock : model.clocks()) {
+      if (clock.name == name) return &clock;
+    }
+    return static_cast<const ClockNetworkClock*>(nullptr);
+  };
+  std::string stage_line = "Stage: " + model.stage();
+  if (model.stage() == "constraints") {
+    stage_line = "Stage: constraints only (no design walked yet)";
+  } else if (model.stage() == "elaborated") {
+    stage_line = "Stage: elaborated design";
+  } else if (model.stage() == "mapped") {
+    stage_line = "Stage: mapped design";
+  }
+  std::string out = stage_line + "\n";
+  bool first_block = true;
+  for (const ClockNetworkClock& clock : model.clocks()) {
+    out += first_block ? "\n" : "";
+    first_block = false;
+    const std::string period =
+        clock.period == "-" ? "-" : clock.period + " ns";
+    const std::string waveform =
+        (clock.rise == "-" || clock.fall == "-")
+            ? "-"
+            : "{" + clock.rise + " " + clock.fall + "}";
+    const std::string skew =
+        clock.skew == "none" ? "none" : clock.skew + " ns";
+    out += clock.name + (clock.generated ? " (generated)" : "") +
+           ": period " + period + ", waveform " + waveform +
+           ", sources " + clock.sources + ", skew " + skew +
+           ", sinks " + clock.sinks + ", latency -\n";
+    if (clock.generated && clock.master != "-") {
+      out += "  generated from " + clock.master;
+      if (clock.modification != "-") {
+        out += " by " + unbrace(clock.modification);
+      }
+      const ClockNetworkClock* master = find_clock(clock.master);
+      out += ", master source " +
+             (master != nullptr ? master->sources : std::string("{-}")) +
+             "\n";
+    }
+    if (clock.tree != "none") {
+      for (const ClockNetworkNode& node : clock.nodes) {
+        const std::string indent(2 * (node.depth + 1), ' ');
+        if (node.kind == "source") {
+          out += indent + "source: " +
+                 (clock.generated ? node.name : "port " + node.name) +
+                 "\n";
+        } else if (node.kind == "leaf" || node.kind == "divider") {
+          // Node names are "<path> (<module>)": the leaf line
+          // shows the local instance name and the module.
+          std::string path = node.name;
+          std::string module;
+          const std::size_t open = node.name.rfind(" (");
+          if (open != std::string::npos &&
+              node.name.back() == ')') {
+            path = node.name.substr(0, open);
+            module = node.name.substr(open + 2, node.name.size() - open - 3);
+          }
+          const std::size_t slash = path.rfind('/');
+          const std::string local =
+              slash == std::string::npos ? path : path.substr(slash + 1);
+          out += indent + local + " (" + module + "), " + node.count +
+                 (node.count == "1" ? " sink" : " sinks");
+          if (node.generates != "-") {
+            out += ", generates " + node.generates;
+          }
+          out += "\n";
+        } else if (node.kind == "buffer") {
+          out += indent + node.name + " pin " + node.pin + ", buffer\n";
+        } else {  // sink
+          out += indent + node.name + " pin " + node.pin;
+          if (node.generates != "-") {
+            out += ", generates " + node.generates;
+          }
+          out += "\n";
+        }
+      }
+    }
+    if (clock.generated && clock.master != "-") {
+      // The interclock line prints when this clock's source
+      // node is a sink of its master (the master's tree flags
+      // it with generates=): the shared count comes from the
+      // query's shared lines, 0 when there is no line.
+      const ClockNetworkClock* master = find_clock(clock.master);
+      bool source_is_sink = false;
+      if (master != nullptr) {
+        for (const ClockNetworkNode& node : master->nodes) {
+          if (node.generates == clock.name) source_is_sink = true;
+        }
+      }
+      if (source_is_sink) {
+        long shared = 0;
+        for (const ClockNetworkShared& line : model.shared()) {
+          if ((line.clock == clock.master && line.other == clock.name) ||
+              (line.clock == clock.name && line.other == clock.master)) {
+            shared = static_cast<long>(line.count);
+          }
+        }
+        std::string source_text = unbrace(clock.sources);
+        for (const ClockNetworkNode& node : clock.nodes) {
+          if (node.kind == "source") source_text = node.name;
+        }
+        out += "  " + clock.name + " is generated from " + source_text +
+               ", a sink of " + clock.master +
+               ". The two trees share " + std::to_string(shared) +
+               " sinks.\n";
+      }
+    }
+  }
+  if (!notes.empty()) out += "\n" + notes + "\n";
+  return out;
+}
+
 std::string IssueKindText(const std::string& kind) {
   if (kind == "extraction_artifact") return "extraction artifact";
   if (kind == "resolved_artifact") {
@@ -482,6 +625,7 @@ PanelsView::PanelsView(SessionView& view, QWidget* parent)
   sources_ = AddTab(this, "Sources");
   results_ = AddTab(this, "Results");
   timing_ = AddTab(this, "Timing");
+  clocks_ = AddTab(this, "Clocks");
   optlog_ = AddTab(this, "Opt log");
   // Messages tab: dispatch history only, never design
   // problems (those live in Issues). The header says so.
@@ -511,6 +655,8 @@ void PanelsView::Refresh() {
   results_->setPlainText(QString::fromStdString(RenderResults(panels)));
   timing_->setPlainText(
       QString::fromStdString(RenderTiming(view_.Timing())));
+  clocks_->setPlainText(
+      QString::fromStdString(RenderClockNetwork(view_.ClockNetwork())));
   optlog_->setPlainText(QString::fromStdString(RenderOptLog(panels)));
   signoff_->setPlainText(
       QString::fromStdString(RenderSignoff(view_.Signoff())));

@@ -82,6 +82,7 @@ class PanelsView : public QTabWidget {
   QPlainTextEdit* sources_ = nullptr;
   QPlainTextEdit* results_ = nullptr;
   QPlainTextEdit* timing_ = nullptr;
+  QPlainTextEdit* clocks_ = nullptr;
   QPlainTextEdit* optlog_ = nullptr;
   QPlainTextEdit* messages_ = nullptr;
   QPlainTextEdit* signoff_ = nullptr;

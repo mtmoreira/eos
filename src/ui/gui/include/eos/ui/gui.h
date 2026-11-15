@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "eos/ui/clock_network.h"
 #include "eos/ui/diagram.h"
 #include "eos/ui/console_entry.h"
 #include "eos/ui/floorplan.h"
@@ -301,6 +302,26 @@ class SessionView {
   // cycle by design.
   void RefreshPlacement();
 
+  // Clock-network model, refreshed from the live session (see
+  // RefreshClockNetwork). The Clocks panel reads this: the
+  // stage, one entry per clock with its tree (per-leaf sink
+  // groups on the elaborated design, per-pin nodes on the
+  // mapped one, source nodes only on constraint rows), the
+  // shared-sink lines, and the notes.
+  const ClockNetworkModel& ClockNetwork() const { return clock_network_; }
+
+  // Re-reads the clock-network model from the live session:
+  // dispatches clock_network_summary WITHOUT an echo line (a
+  // model refresh is not a user action) and rebuilds the model
+  // from the payload. The query returns Ok in every ordinary
+  // state (it never fails for a missing database), so the
+  // refresh runs on every refresh with no gate, like the
+  // floorplan and placement refreshes; a failed query or a
+  // malformed payload keeps the last good model and reports
+  // through the unguarded-refresh path, which stays silent
+  // while the model is empty.
+  void RefreshClockNetwork();
+
   // Signoff model, refreshed from the live session (see
   // RefreshSignoff). The Signoff panel reads this: the DRC,
   // LVS, and antenna verdicts parsed from the external PV
@@ -456,6 +477,7 @@ class SessionView {
   std::string timing_key_;
   FloorplanModel floorplan_;
   PlacementModel placement_;
+  ClockNetworkModel clock_network_;
   SignoffModel signoff_;
   // The center view the user last chose: true for the
   // floorplan canvas, false for the hierarchy views. Set by a

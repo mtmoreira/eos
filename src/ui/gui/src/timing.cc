@@ -254,11 +254,17 @@ bool TimingModel::LoadPayload(const std::string& payload) {
                      "attrs", "skew", "sources"})) {
         return false;
       }
+      // Skew is the stored setup uncertainty read_sdc wired
+      // onto the clock rows: a number, or "none" when no
+      // set_clock_uncertainty statement set one.
+      double skew_value = 0.0;
       if (fields["name"].empty() ||
           (fields["generated"] != "0" && fields["generated"] != "1") ||
           !IsNumberOrDash(fields["period"]) ||
           !IsNumberOrDash(fields["rise"]) ||
-          !IsNumberOrDash(fields["fall"]) || fields["skew"] != "none" ||
+          !IsNumberOrDash(fields["fall"]) ||
+          (fields["skew"] != "none" &&
+           !ParseDouble(fields["skew"], &skew_value)) ||
           fields["sources"].empty()) {
         return false;
       }

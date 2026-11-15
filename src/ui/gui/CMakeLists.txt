@@ -8,6 +8,7 @@
 # time (see PROVENANCE.md and README.md).
 add_library(eda_ui_gui STATIC
   src/gui_session.cc
+  src/clock_network.cc
   src/console_entry.cc
   src/diagram.cc
   src/floorplan.cc

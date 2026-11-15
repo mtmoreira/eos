@@ -400,6 +400,7 @@ void MainWindow::Refresh() {
   view_.RefreshTiming();
   view_.RefreshFloorplan();
   view_.RefreshPlacement();
+  view_.RefreshClockNetwork();
   view_.RefreshSignoff();
   view_.RefreshLog();
   browser_->Refresh();

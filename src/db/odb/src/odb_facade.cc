@@ -533,6 +533,7 @@ std::vector<OdbMasterPin> OdbDatabase::MasterPins(
     const odb::dbIoType io = term->getIoType();
     pin.is_input = io == odb::dbIoType::INPUT || io == odb::dbIoType::INOUT;
     pin.is_output = io == odb::dbIoType::OUTPUT || io == odb::dbIoType::INOUT;
+    pin.is_clock = term->getSigType() == odb::dbSigType::CLOCK;
     pins.push_back(pin);
   }
   return pins;
@@ -626,6 +627,36 @@ std::vector<OdbNetConnection> OdbDatabase::NetConnections(
     connections.push_back(connection);
   }
   return connections;
+}
+
+std::optional<std::string> OdbDatabase::NetForPin(
+    const std::string& instance, const std::string& pin) const {
+  odb::dbBlock* block = impl_->TopBlock();
+  if (block == nullptr) {
+    return std::nullopt;
+  }
+  if (instance.empty()) {
+    for (odb::dbBTerm* term : block->getBTerms()) {
+      if (term->getName() == pin) {
+        odb::dbNet* net = term->getNet();
+        if (net == nullptr) return std::nullopt;
+        return net->getName();
+      }
+    }
+    return std::nullopt;
+  }
+  odb::dbInst* inst = block->findInst(instance.c_str());
+  if (inst == nullptr) {
+    return std::nullopt;
+  }
+  for (odb::dbITerm* term : inst->getITerms()) {
+    if (term->getMTerm()->getName() == pin) {
+      odb::dbNet* net = term->getNet();
+      if (net == nullptr) return std::nullopt;
+      return net->getName();
+    }
+  }
+  return std::nullopt;
 }
 
 Status OdbDatabase::SwapInstanceMaster(const std::string& instance,

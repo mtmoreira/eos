@@ -100,13 +100,15 @@ TEST(Registry, CoreSetIsComplete) {
   // F13 DRC engine unit adds drc_run (one command). The
   // per-cell edit unit adds size_cell, swap_cell,
   // insert_buffer, and remove_buffer (four commands).
-  EXPECT_EQ(shell.registry.Names().size(), 123u);
+  // The clock-network unit adds clock_network_summary (one command).
+  EXPECT_EQ(shell.registry.Names().size(), 124u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
   EXPECT_NE(shell.registry.Find("bind_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("create_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("create_generated_clock"), nullptr);
+  EXPECT_NE(shell.registry.Find("clock_network_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("set_waiver"), nullptr);
@@ -5032,13 +5034,18 @@ TEST(TimingSummary, ReportsOptloopAcceptanceNumbers) {
               1e-4);
   EXPECT_NEAR(SynthPayloadNumber(summary, "total_negative_slack_ns"),
               0.0, 1e-4);
-  // No clock row in the read_sdc-only flow: read_sdc records
-  // the SDC path only, so the clock the file defines never lands
-  // in the session constraint set that report_clock (and this
-  // query) reads. That is the documented report_clock boundary,
-  // not a gap in this query. The row rendering itself is covered
-  // by ShowsSessionClockRow below.
-  EXPECT_EQ(summary.payload.find("clock name="), std::string::npos);
+  // The clock row IS present since the clock-network unit:
+  // read_sdc wires the file's create_clock into the session
+  // constraint set (the F2 fix), so the vclk the file defines
+  // renders here as an unresolved (targetless, kEmpty) row.
+  // Before that fix this assertion read find("clock name=") ==
+  // npos; it moved only because the flow's own SDC now wires
+  // its clock. ShowsSessionClockRow below covers the bound,
+  // interactive form of the same row.
+  EXPECT_NE(summary.payload.find(
+                "clock name=vclk generated=0 period=1.25 rise=0 "
+                "fall=0.625 attrs=u skew=none sources={}"),
+            std::string::npos);
   // No violations anywhere, so the timing classes name no
   // violator and cost zero, and the DRC classes carry no limit.
   EXPECT_NE(summary.payload.find("scene=func_tt class=max_delay "
@@ -5147,14 +5154,47 @@ TEST(TimingSummary, ShowsSessionClockRow) {
               1e-4);
 }
 
-TEST(TimingSummary, RequiresTimingRun) {
+// Rewritten by the clock-network unit (design S7): the gate
+// keys on the constraint set, not on whether read_sdc ran. A
+// flow whose SDC defines no clocks keeps the original failure,
+// byte-identical.
+TEST(TimingSummary, RequiresTimingRunWithoutClocks) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  const std::string sdc = dir.Write(
+      "noclocks.sdc", "# constraints without clocks\nset_units -time ns\n");
+  const CommandResult read = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(read.ok) << read.message;
+  EXPECT_NE(read.payload.find("clocks=0"), std::string::npos);
+  const CommandResult summary = shell.Run("timing_summary");
+  ASSERT_FALSE(summary.ok);
+  EXPECT_EQ(summary.message,
+            "no timing results: run eos::run_timing first");
+}
+
+// The companion: the original SDC (targetless vclk) wires its
+// clock, so with no timing run the summary is the clocks-only
+// payload (header plus clock rows, scenes=0), and -scene names
+// its own failure.
+TEST(TimingSummary, ClocksOnlySummaryWithoutTimingRun) {
   TimingTempDir dir;
   Shell shell;
   ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
   const CommandResult summary = shell.Run("timing_summary");
-  ASSERT_FALSE(summary.ok);
-  EXPECT_NE(summary.message.find("no timing results"),
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("scenes=0"), std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "clock name=vclk generated=0 period=1.25 rise=0 "
+                "fall=0.625 attrs=u skew=none sources={}"),
             std::string::npos);
+  const CommandResult scene =
+      shell.Run("timing_summary", {"-scene", "func_tt"});
+  ASSERT_FALSE(scene.ok);
+  EXPECT_EQ(scene.message,
+            "timing_summary: scene has no timing results: func_tt");
 }
 
 TEST(TimingSummary, RejectsBadOptions) {
@@ -6987,10 +7027,17 @@ TEST(CoreCommands, EcoEditClearsTimingResults) {
   EXPECT_TRUE(shell.ctx.timing.last_results.empty());
   EXPECT_TRUE(shell.ctx.timing.last_bottleneck_setup_paths.empty());
   EXPECT_TRUE(shell.ctx.timing.last_bottleneck_hold_paths.empty());
+  // The session's SDC wired a clk row into the constraint set
+  // (the clock-network unit's read_sdc wiring), so with the
+  // results cleared timing_summary answers in clocks-only
+  // mode: header with scenes=0 and the clock row, no scene
+  // rows. That is the observable that the results are gone;
+  // before the wiring it was the "no timing results" failure.
   const CommandResult summary = shell.Run("timing_summary");
-  ASSERT_FALSE(summary.ok);
-  EXPECT_NE(summary.message.find("no timing results"),
-            std::string::npos);
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("scenes=0"), std::string::npos);
+  EXPECT_EQ(summary.payload.find("\nscene="), std::string::npos);
+  EXPECT_NE(summary.payload.find("clock name=clk "), std::string::npos);
   const CommandResult bottleneck = shell.Run("report_bottleneck");
   ASSERT_FALSE(bottleneck.ok);
   EXPECT_NE(bottleneck.message.find("no timing results"),
@@ -10182,6 +10229,800 @@ TEST(GuiShow, DispatchFailsWhenNoViewerFound) {
 // generated-clock table, the waveform default, derived periods and
 // waveforms, unknown masters, construction records, the -skew
 // column, and the option failures.
+
+
+// ---- read_sdc wiring and the clock-network view
+// (clock-network unit) ------------------------------------------------
+// read_sdc parses the file's clock statements (io/sdc) and
+// wires them into the session constraint set with a
+// source_file provenance param; clock_network_summary renders
+// the per-clock tree for the Clocks tab. Acceptance references
+// are the design doc's A1 to A11.
+
+// A row's params joined as "key=value;key=value", for exact
+// assertions on what the wiring stored.
+static std::string JoinedParams(const eos::db::Constraint& c) {
+  std::string out;
+  for (const auto& pair : c.params) {
+    if (!out.empty()) out += ";";
+    out += pair.first + "=" + pair.second;
+  }
+  return out;
+}
+
+// The first stored row of a kind and name, or nullptr.
+static const eos::db::Constraint* FindStoredRow(
+    const Shell& shell, eos::db::ConstraintKind kind,
+    const std::string& name) {
+  for (const auto& c : shell.ctx.project.constraints.all()) {
+    if (c.kind == kind && c.name == name) return &c;
+  }
+  return nullptr;
+}
+
+// How many clock-family rows (kClock plus kGeneratedClock)
+// the set holds.
+static std::size_t ClockFamilyRowCount(const Shell& shell) {
+  std::size_t count = 0;
+  for (const auto& c : shell.ctx.project.constraints.all()) {
+    if (c.kind == eos::db::ConstraintKind::kClock ||
+        c.kind == eos::db::ConstraintKind::kGeneratedClock) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+// A session design the demo SDC binds against: port clk and
+// instance u_div with pin q, the demo file's two targets.
+static void BuildClockedBoundDesign(Shell& shell) {
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(shell.Run("create_cell", {"dff"}).ok);
+  ASSERT_TRUE(shell.Run("create_instance", {"u_div", "dff"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"clk_net"}).ok);
+  ASSERT_TRUE(shell.Run("create_net", {"q_net"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u_div", "CK", "clk_net"}).ok);
+  ASSERT_TRUE(shell.Run("connect", {"u_div", "q", "q_net"}).ok);
+}
+
+#if defined(EOS_CLOCKED_DEMO_DIR) && defined(EOS_MOCK_PDK_DIR)
+// A1 + A2 + A3 (payload): the demo sequence in a fresh shell.
+// read_sdc wires both clocks with the folded uncertainty, the
+// rows store exactly the interactive handlers' params plus
+// source_file, and timing_summary answers clocks-only with
+// the three doc lines.
+TEST(ReadSdc, WiresClockedDemo) {
+  const std::string demo_dir = EOS_CLOCKED_DEMO_DIR;
+  const std::string sdc = demo_dir + "/clk_top.sdc";
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_filelist", {demo_dir + "/design.f", "clk_top"})
+                  .ok);
+  const CommandResult read = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(read.ok) << read.message;
+  EXPECT_EQ(read.payload,
+            "sdc=" + sdc + " clocks=1 generated=1 uncertainty=2 "
+                           "skipped=0 unwired=0");
+  // The stored rows, exactly (design section 2.6).
+  ASSERT_EQ(ClockFamilyRowCount(shell), 2u);
+  const eos::db::Constraint* clk =
+      FindStoredRow(shell, eos::db::ConstraintKind::kClock, "clk");
+  ASSERT_NE(clk, nullptr);
+  EXPECT_EQ(clk->target_spec, "clk");
+  EXPECT_EQ(clk->status, eos::db::BindingStatus::kUnresolved);
+  EXPECT_EQ(JoinedParams(*clk),
+            "period_ns=5;waveform_rise_ns=0;waveform_fall_ns=2.5;"
+            "uncertainty_setup_ns=0.1;"
+            "source_file=" +
+                sdc);
+  const eos::db::Constraint* gen = FindStoredRow(
+      shell, eos::db::ConstraintKind::kGeneratedClock, "clk_div");
+  ASSERT_NE(gen, nullptr);
+  EXPECT_EQ(gen->target_spec, "u_div/q");
+  EXPECT_EQ(gen->status, eos::db::BindingStatus::kUnresolved);
+  EXPECT_EQ(JoinedParams(*gen),
+            "source=clk;master_clock=clk;divide_by=2;"
+            "uncertainty_setup_ns=0.1;"
+            "source_file=" +
+                sdc);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  // A1: the clocks-only timing_summary, exact clock rows.
+  const CommandResult summary = shell.Run("timing_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find(
+                "clock name=clk generated=0 period=5 rise=0 fall=2.5 "
+                "attrs=u skew=0.1 sources={clk}"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "clock name=clk_div generated=1 period=10 rise=0 fall=5 "
+                "attrs=Gu skew=0.1 sources={u_div/q}"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "genclock name=clk_div master_clock=clk "
+                "modification={divide_by(2)} master_source={clk} "
+                "sources={u_div/q}"),
+            std::string::npos);
+  // A2: report_clock and report_clock -skew show both clocks
+  // with the uncertainty in the column and no footer.
+  const CommandResult report = shell.Run("report_clock");
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("clk"), std::string::npos);
+  EXPECT_NE(report.payload.find("clk_div"), std::string::npos);
+  EXPECT_NE(report.payload.find("divide_by(2)"), std::string::npos);
+  const CommandResult skewed = shell.Run("report_clock", {"-skew"});
+  ASSERT_TRUE(skewed.ok) << skewed.message;
+  EXPECT_NE(skewed.payload.find("0.1"), std::string::npos);
+  EXPECT_EQ(skewed.payload.find("skew: no clock uncertainty"),
+            std::string::npos);
+}
+#endif  // EOS_CLOCKED_DEMO_DIR && EOS_MOCK_PDK_DIR
+
+// A3: a second read of the same path replaces the file's rows
+// (an edited period lands; no stacking).
+TEST(ReadSdc, ReplacesOnSecondRead) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string sdc = dir.Write(
+      "clocks.sdc",
+      "create_clock -name clk -period 5 -waveform {0 2.5} "
+      "[get_ports clk]\n"
+      "create_generated_clock -name clk_div -source [get_ports clk] "
+      "-divide_by 2 [get_pins u_div/q]\n");
+  const CommandResult first = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(first.ok) << first.message;
+  ASSERT_EQ(ClockFamilyRowCount(shell), 2u);
+  const CommandResult second = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(second.ok) << second.message;
+  EXPECT_EQ(ClockFamilyRowCount(shell), 2u);
+  // Edit the file in place (period 5 to 6) and read again: the
+  // replacement carries the new value, still two rows.
+  dir.Write("clocks.sdc",
+            "create_clock -name clk -period 6 -waveform {0 3} "
+            "[get_ports clk]\n"
+            "create_generated_clock -name clk_div "
+            "-source [get_ports clk] -divide_by 2 "
+            "[get_pins u_div/q]\n");
+  const CommandResult third = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(third.ok) << third.message;
+  EXPECT_EQ(ClockFamilyRowCount(shell), 2u);
+  const eos::db::Constraint* clk =
+      FindStoredRow(shell, eos::db::ConstraintKind::kClock, "clk");
+  ASSERT_NE(clk, nullptr);
+  EXPECT_EQ(clk->Param("period_ns").value_or(""), "6");
+}
+
+// Rule 2: an interactive definition of the same name wins over
+// the file's; the generated clock still wires and resolves its
+// master against the interactive row.
+TEST(ReadSdc, SkipsInteractiveDefinition) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(shell.Run("create_design", {"top"}).ok);
+  ASSERT_TRUE(shell.Run("create_port", {"clk", "in"}).ok);
+  ASSERT_TRUE(
+      shell.Run("create_clock", {"-period", "99", "-name", "clk", "clk"})
+          .ok);
+  const std::string sdc = dir.Write(
+      "clocks.sdc",
+      "create_clock -name clk -period 5 [get_ports clk]\n"
+      "create_generated_clock -name clk_div -source [get_ports clk] "
+      "-divide_by 2 [get_pins u_div/q]\n");
+  const CommandResult read = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(read.ok) << read.message;
+  EXPECT_NE(read.payload.find("clocks=0 generated=1"),
+            std::string::npos);
+  EXPECT_NE(read.payload.find("skipped=1"), std::string::npos);
+  const eos::db::Constraint* clk =
+      FindStoredRow(shell, eos::db::ConstraintKind::kClock, "clk");
+  ASSERT_NE(clk, nullptr);
+  EXPECT_EQ(clk->Param("period_ns").value_or(""), "99");
+  EXPECT_FALSE(clk->Param("source_file").has_value());
+  const eos::db::Constraint* gen = FindStoredRow(
+      shell, eos::db::ConstraintKind::kGeneratedClock, "clk_div");
+  ASSERT_NE(gen, nullptr);
+  EXPECT_EQ(gen->Param("master_clock").value_or(""), "clk");
+  EXPECT_EQ(gen->Param("source_file").value_or(""), sdc);
+}
+
+// A file with no clock statements wires nothing and every
+// consumer stays in its empty state (A9's SDC side).
+TEST(ReadSdc, NoClocks) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string sdc = dir.Write(
+      "noclocks.sdc",
+      "set_units -time ns\nset_input_delay 1.0 [get_ports d]\n");
+  const CommandResult read = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(read.ok) << read.message;
+  EXPECT_EQ(read.payload,
+            "sdc=" + sdc +
+                " clocks=0 generated=0 uncertainty=0 skipped=0 unwired=0");
+  EXPECT_EQ(ClockFamilyRowCount(shell), 0u);
+  const CommandResult report = shell.Run("report_clock");
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_EQ(report.payload, "clocks=0");
+  const CommandResult summary = shell.Run("timing_summary");
+  ASSERT_FALSE(summary.ok);
+  EXPECT_EQ(summary.message, "no timing results: run eos::run_timing first");
+}
+
+// A generated clock whose source matches no clock target
+// stores no master_clock param and is counted masterless.
+TEST(ReadSdc, MissingMaster) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string sdc = dir.Write(
+      "masterless.sdc",
+      "create_clock -name clk -period 5 [get_ports clk]\n"
+      "create_generated_clock -name g2 -source [get_ports other] "
+      "-divide_by 2 [get_pins u_x/q]\n");
+  const CommandResult read = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(read.ok) << read.message;
+  EXPECT_NE(read.payload.find("masterless=1"), std::string::npos);
+  const eos::db::Constraint* gen = FindStoredRow(
+      shell, eos::db::ConstraintKind::kGeneratedClock, "g2");
+  ASSERT_NE(gen, nullptr);
+  EXPECT_FALSE(gen->Param("master_clock").has_value());
+  EXPECT_EQ(gen->Param("source").value_or(""), "other");
+}
+
+// An unwired statement is reported in the payload with its
+// line and reason, and the wireable statements still wire.
+TEST(ReadSdc, UnwiredReported) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string sdc = dir.Write(
+      "mixed.sdc",
+      "create_clock -name clk -period 5 [get_ports clk]\n"
+      "create_generated_clock -name g -source [get_ports clk] "
+      "-edges {1 3} [get_pins u/q]\n");
+  const CommandResult read = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(read.ok) << read.message;
+  EXPECT_NE(read.payload.find("clocks=1 generated=0"),
+            std::string::npos);
+  EXPECT_NE(read.payload.find("unwired=1"), std::string::npos);
+  EXPECT_NE(read.payload.find("unwired line=2 create_generated_clock: "),
+            std::string::npos);
+  EXPECT_NE(read.payload.find("-edges"), std::string::npos);
+  EXPECT_EQ(ClockFamilyRowCount(shell), 1u);
+}
+
+// Uncertainty folds per clock name: a statement naming only
+// clk_div lands on clk_div's rows alone; clk reads "none", and
+// the report_clock -skew footer stays off because one entry
+// carries an uncertainty.
+TEST(ReadSdc, UncertaintyNamedClock) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string sdc = dir.Write(
+      "named.sdc",
+      "create_clock -name clk -period 5 [get_ports clk]\n"
+      "create_generated_clock -name clk_div -source [get_ports clk] "
+      "-divide_by 2 [get_pins u_div/q]\n"
+      "set_clock_uncertainty -setup 0.1 [get_clocks clk_div]\n");
+  const CommandResult read = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(read.ok) << read.message;
+  EXPECT_NE(read.payload.find("uncertainty=1"), std::string::npos);
+  const eos::db::Constraint* clk =
+      FindStoredRow(shell, eos::db::ConstraintKind::kClock, "clk");
+  ASSERT_NE(clk, nullptr);
+  EXPECT_FALSE(clk->Param("uncertainty_setup_ns").has_value());
+  const eos::db::Constraint* gen = FindStoredRow(
+      shell, eos::db::ConstraintKind::kGeneratedClock, "clk_div");
+  ASSERT_NE(gen, nullptr);
+  EXPECT_EQ(gen->Param("uncertainty_setup_ns").value_or(""), "0.1");
+  const CommandResult summary = shell.Run("timing_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("clock name=clk generated=0 period=5 "
+                                 "rise=0 fall=2.5 attrs=u skew=none "
+                                 "sources={clk}"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("clock name=clk_div generated=1 "
+                                 "period=10 rise=0 fall=5 attrs=Gu "
+                                 "skew=0.1 sources={u_div/q}"),
+            std::string::npos);
+  const CommandResult skewed = shell.Run("report_clock", {"-skew"});
+  ASSERT_TRUE(skewed.ok) << skewed.message;
+  EXPECT_EQ(skewed.payload.find("skew: no clock uncertainty"),
+            std::string::npos);
+}
+
+// The wired rows are ordinary rows: with a design open they
+// bind, and check_timing's generated-clock check passes on
+// them.
+TEST(ReadSdc, CheckTimingSeesWiredClocks) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildClockedBoundDesign(shell);
+  const std::string sdc = dir.Write(
+      "bound.sdc",
+      "create_clock -name clk -period 5 -waveform {0 2.5} "
+      "[get_ports clk]\n"
+      "create_generated_clock -name clk_div -source [get_ports clk] "
+      "-divide_by 2 [get_pins u_div/q]\n");
+  const CommandResult read = shell.Run("read_sdc", {sdc});
+  ASSERT_TRUE(read.ok) << read.message;
+  const eos::db::Constraint* clk =
+      FindStoredRow(shell, eos::db::ConstraintKind::kClock, "clk");
+  ASSERT_NE(clk, nullptr);
+  EXPECT_EQ(clk->status, eos::db::BindingStatus::kBound);
+  const eos::db::Constraint* gen = FindStoredRow(
+      shell, eos::db::ConstraintKind::kGeneratedClock, "clk_div");
+  ASSERT_NE(gen, nullptr);
+  EXPECT_EQ(gen->status, eos::db::BindingStatus::kBound);
+  const CommandResult check = shell.Run("check_timing");
+  ASSERT_TRUE(check.ok) << check.message;
+  EXPECT_NE(check.payload.find("check=generated_clocks status=pass "
+                               "findings=0"),
+            std::string::npos);
+}
+
+// write_sdc renders the wired (bound) rows back out: the
+// round trip carries both clocks with their definitions.
+TEST(ReadSdc, WriteSdcRoundTripsWiredClocks) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildClockedBoundDesign(shell);
+  const std::string sdc = dir.Write(
+      "roundtrip.sdc",
+      "create_clock -name clk -period 5 -waveform {0 2.5} "
+      "[get_ports clk]\n"
+      "create_generated_clock -name clk_div -source [get_ports clk] "
+      "-divide_by 2 [get_pins u_div/q]\n");
+  ASSERT_TRUE(shell.Run("read_sdc", {sdc}).ok);
+  const std::string out_path = dir.Path("written.sdc");
+  const CommandResult written = shell.Run("write_sdc", {out_path});
+  ASSERT_TRUE(written.ok) << written.message;
+  const std::string text = ReadTextFile(out_path);
+  EXPECT_NE(text.find("create_clock"), std::string::npos);
+  EXPECT_NE(text.find("clk"), std::string::npos);
+  EXPECT_NE(text.find("5"), std::string::npos);
+  EXPECT_NE(text.find("create_generated_clock"), std::string::npos);
+  EXPECT_NE(text.find("clk_div"), std::string::npos);
+  EXPECT_NE(text.find("divide_by 2"), std::string::npos);
+}
+
+#if defined(EOS_CLOCKED_DEMO_DIR) && defined(EOS_MOCK_PDK_DIR)
+// A5 + A6 + A7: the summary at all three stages on the clocked
+// design. Counts are the MEASURED ones (design S14): clk has
+// 23 sinks, not the designed 21, because u_ctrl's 2-bit FSM
+// recodes one-hot at elaboration (4 flops become 6); the
+// mapped stage measures the same split (39 flops total).
+// The clocked demo session up to read_sdc, shared by the
+// three stage tests (A5, A6, A7).
+static void BuildClockedDemoSession(Shell& shell) {
+  const std::string demo_dir = EOS_CLOCKED_DEMO_DIR;
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty", {"tt", mock_dir + "/eos_mock.lib"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("read_filelist", {demo_dir + "/design.f", "clk_top"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {demo_dir + "/clk_top.sdc"}).ok);
+}
+
+// A5: constraints stage, rows only.
+TEST(ClockNetworkSummary, ConstraintsStage) {
+  Shell shell;
+  BuildClockedDemoSession(shell);
+  const CommandResult constraints = shell.Run("clock_network_summary");
+  ASSERT_TRUE(constraints.ok) << constraints.message;
+  EXPECT_NE(constraints.payload.find("stage=constraints clocks=2"),
+            std::string::npos);
+  EXPECT_NE(constraints.payload.find(
+                "clock name=clk generated=0 period=5 rise=0 fall=2.5 "
+                "skew=0.1 source={clk} sinks=- latency=- master=- "
+                "modification=- tree=none"),
+            std::string::npos);
+  EXPECT_NE(constraints.payload.find(
+                "clock name=clk_div generated=1 period=10 rise=0 fall=5 "
+                "skew=0.1 source={u_div/q} sinks=- latency=- master=clk "
+                "modification={divide_by(2)} tree=none"),
+            std::string::npos);
+  EXPECT_NE(constraints.payload.find("node clock=clk depth=0 kind=source "
+                                     "name={clk} pin=- count=- "
+                                     "generates=-"),
+            std::string::npos);
+}
+
+// A6: elaborated stage, per-leaf sink groups. The counts are
+// the facade's sequential-cell counts (design doc 4.2's
+// mechanism: Stats(module).sequential_cells), measured on
+// the elaborated design as it actually stands: u_ctrl holds
+// 2 sequential cells (the FSM cell and the run counter), the
+// wide registers hold 1 each, and u_cap does not appear at
+// all: elaborate's fsm pass runs opt_clean, which removes
+// the u_cap instance from clk_top because its only output
+// is unconnected (the demo README notes the output is
+// intentionally unconnected). The bit-level counts the
+// design doc's A6 names (23 and 16) are the aigmap counts
+// recorded in the demo README; they are not what Stats
+// reports, and 16 is unreachable at any stage because the
+// instance is gone. The mapped stage's per-pin counts
+// (next test's subject) are the bit-level truth for the
+// instances that exist: 23 on clk, 8 on clk_div.
+TEST(ClockNetworkSummary, ElaboratedStage) {
+  Shell shell;
+  BuildClockedDemoSession(shell);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult elaborated = shell.Run("clock_network_summary");
+  ASSERT_TRUE(elaborated.ok) << elaborated.message;
+  EXPECT_NE(elaborated.payload.find("stage=elaborated clocks=2"),
+            std::string::npos);
+  EXPECT_NE(elaborated.payload.find(
+                "clock name=clk generated=0 period=5 rise=0 fall=2.5 "
+                "skew=0.1 source={clk} sinks=5 latency=- master=- "
+                "modification=- tree=leaves"),
+            std::string::npos);
+  EXPECT_NE(elaborated.payload.find(
+                "clock name=clk_div generated=1 period=10 rise=0 fall=5 "
+                "skew=0.1 source={u_div/q} sinks=1 latency=- "
+                "master=clk modification={divide_by(2)} tree=leaves"),
+            std::string::npos);
+  EXPECT_NE(elaborated.payload.find(
+                "node clock=clk depth=1 kind=divider "
+                "name={clk_top/u_div (clk_div)} pin=- count=1 "
+                "generates=clk_div"),
+            std::string::npos);
+  EXPECT_NE(elaborated.payload.find(
+                "node clock=clk depth=1 kind=leaf "
+                "name={clk_top/u_ctrl (clk_ctrl)} pin=- count=2 "
+                "generates=-"),
+            std::string::npos);
+  EXPECT_NE(elaborated.payload.find(
+                "node clock=clk_div depth=0 kind=source "
+                "name={u_div/q} pin=- count=- generates=-"),
+            std::string::npos);
+  // u_cap is not in the elaborated hierarchy (see above),
+  // and the divider is not a sink of its own clock: no
+  // shared line, no u_cap or u_div leaf under clk_div.
+  EXPECT_EQ(elaborated.payload.find("u_cap"), std::string::npos);
+  EXPECT_EQ(elaborated.payload.find("shared clock="),
+            std::string::npos);
+}
+
+// A7 is blocked on a pre-existing gap this test records as
+// a tripwire: the F0 bridge (write_def) reads the mapped
+// netlist with ParseMappedVerilog, which understands the
+// ABC-written format only (// comments, flat gate lines).
+// PR 141's sequential synth_map writes Yosys-format Verilog
+// (a /* */ header, one module per leaf, named-port
+// instantiations), so write_def fails on this design at the
+// header's first character, and no ODB ever loads: the
+// query honestly reports the constraints stage with the
+// synth_map replacement note. The mapped-stage walk itself
+// is proven on LEF/DEF fixtures below (BufferFixture,
+// RenamedSource). When the bridge learns the Yosys format
+// (the F5 unit's bridge work), this test must be replaced
+// by the real A7: tree=pins, sinks 23 on clk and 8 on
+// clk_div (u_cap was pruned at elaborate, see
+// ElaboratedStage), the u_div sink node flagged
+// generates=clk_div, no shared line.
+TEST(ClockNetworkSummary, MappedStage) {
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  TimingTempDir dir;
+  Shell shell;
+  BuildClockedDemoSession(shell);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  const CommandResult mapped = shell.Run("synth_map");
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  const std::string def_path = dir.Path("clk_top.def");
+  const CommandResult def =
+      shell.Run("write_def", {def_path, "-lef", mock_dir + "/eos_mock.lef",
+                              "-tlef", mock_dir + "/eos_mock.tlef"});
+  ASSERT_FALSE(def.ok);
+  EXPECT_NE(def.message.find("mapped Verilog"),
+            std::string::npos);
+  const CommandResult pins = shell.Run("clock_network_summary");
+  ASSERT_TRUE(pins.ok) << pins.message;
+  EXPECT_NE(pins.payload.find("stage=constraints clocks=2"),
+            std::string::npos);
+  EXPECT_NE(pins.payload.find("the live design was replaced by "
+                              "synth_map; showing the constraint "
+                              "rows only."),
+            std::string::npos);
+}
+#endif  // EOS_CLOCKED_DEMO_DIR && EOS_MOCK_PDK_DIR
+
+// LEF/DEF fixture texts for the mapped-stage source
+// resolution tests: one flop cell with a USE CLOCK pin and
+// one clock buffer cell.
+const char kClockFixtureLef[] = R"LEF(VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MANUFACTURINGGRID 0.005 ;
+SITE core
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END core
+LAYER metal1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.19 ;
+  WIDTH 0.065 ;
+END metal1
+MACRO DFFX1
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.92 BY 2.72 ;
+  SITE core ;
+  PIN D
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END D
+  PIN CK
+    DIRECTION INPUT ;
+    USE CLOCK ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.2 -0.05 0.3 0.05 ;
+    END
+  END CK
+  PIN Q
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.8 -0.05 0.9 0.05 ;
+    END
+  END Q
+END DFFX1
+MACRO CLKBUF
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 0.46 BY 2.72 ;
+  SITE core ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT -0.05 -0.05 0.05 0.05 ;
+    END
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.35 -0.05 0.45 0.05 ;
+    END
+  END Y
+END CLKBUF
+END LIBRARY
+)LEF";
+
+// Loads the fixture LEF and one DEF text into the session's
+// ODB database through the read commands.
+static void LoadClockFixture(Shell& shell, TimingTempDir& dir,
+                             const std::string& def_text) {
+  const std::string lef = dir.Write("cells.lef", kClockFixtureLef);
+  const std::string def = dir.Write("top.def", def_text);
+  ASSERT_TRUE(shell.Run("read_lef", {lef}).ok);
+  ASSERT_TRUE(shell.Run("read_def", {def}).ok);
+}
+
+// A11: a clock buffer between the source and two flop sinks
+// walks as a buffer node at depth 1 with the sinks at depth
+// 2, ahead of any CTS.
+TEST(ClockNetworkSummary, BufferFixture) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadClockFixture(shell, dir, R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 4 ;
+- u_buf CLKBUF + PLACED ( 1000 1000 ) N ;
+- u_src CLKBUF + PLACED ( 1500 1000 ) N ;
+- u_f1 DFFX1 + PLACED ( 2000 1000 ) N ;
+- u_f2 DFFX1 + PLACED ( 3000 1000 ) N ;
+END COMPONENTS
+PINS 4 ;
+- clk + NET n_in + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- din + NET n_din + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- dout1 + NET n_q1 + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+- dout2 + NET n_q2 + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 6000 ) N ;
+END PINS
+NETS 6 ;
+- n_in ( PIN clk ) ( u_buf A ) ;
+- n_clk ( u_buf Y ) ( u_f1 CK ) ( u_f2 CK ) ;
+- n_din ( PIN din ) ( u_src A ) ;
+- n_d ( u_src Y ) ( u_f1 D ) ( u_f2 D ) ;
+- n_q1 ( u_f1 Q ) ( PIN dout1 ) ;
+- n_q2 ( u_f2 Q ) ( PIN dout2 ) ;
+END NETS
+END DESIGN
+)DEF");
+  const std::string sdc = dir.Write(
+      "buf.sdc", "create_clock -name clk -period 5 [get_ports clk]\n");
+  ASSERT_TRUE(shell.Run("read_sdc", {sdc}).ok);
+  const CommandResult summary = shell.Run("clock_network_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("stage=mapped clocks=1"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("sinks=2"), std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "node clock=clk depth=1 kind=buffer name={u_buf} "
+                "pin=A count=- generates=-"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "node clock=clk depth=2 kind=sink name={u_f1} "
+                "pin=CK count=- generates=-"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "node clock=clk depth=2 kind=sink name={u_f2} "
+                "pin=CK count=- generates=-"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("tree=pins"), std::string::npos);
+}
+
+// The structural fallback: the SDC names the divider u_div,
+// the DEF calls it divider0. Exact and suffix resolution
+// fail; exactly one master sink drives a clock load, so it is
+// the divider, and the generated clock walks from its Q.
+TEST(ClockNetworkSummary, RenamedSource) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadClockFixture(shell, dir, R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 3 ;
+- divider0 DFFX1 + PLACED ( 1000 1000 ) N ;
+- u_m0 DFFX1 + PLACED ( 2000 1000 ) N ;
+- u_s0 DFFX1 + PLACED ( 3000 1000 ) N ;
+END COMPONENTS
+PINS 4 ;
+- clk + NET n_clk + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- din + NET n_d + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- dout + NET n_q + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+- dout2 + NET n_q2 + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 6000 ) N ;
+END PINS
+NETS 5 ;
+- n_clk ( PIN clk ) ( divider0 CK ) ( u_m0 CK ) ;
+- n_div ( divider0 Q ) ( u_s0 CK ) ;
+- n_d ( PIN din ) ( divider0 D ) ( u_m0 D ) ( u_s0 D ) ;
+- n_q ( u_m0 Q ) ( PIN dout ) ;
+- n_q2 ( u_s0 Q ) ( PIN dout2 ) ;
+END NETS
+END DESIGN
+)DEF");
+  const std::string sdc = dir.Write(
+      "renamed.sdc",
+      "create_clock -name clk -period 5 [get_ports clk]\n"
+      "create_generated_clock -name clk_div -source [get_ports clk] "
+      "-divide_by 2 [get_pins u_div/q]\n");
+  ASSERT_TRUE(shell.Run("read_sdc", {sdc}).ok);
+  const CommandResult summary = shell.Run("clock_network_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find(
+                "clock name=clk generated=0 period=5 rise=0 fall=2.5 "
+                "skew=none source={clk} sinks=2 latency=- master=- "
+                "modification=- tree=pins"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "node clock=clk depth=1 kind=sink name={divider0} "
+                "pin=CK count=- generates=clk_div"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "clock name=clk_div generated=1 period=10 rise=0 "
+                "fall=5 skew=none source={u_div/q} sinks=1 latency=- "
+                "master=clk modification={divide_by(2)} tree=pins"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "node clock=clk_div depth=0 kind=source "
+                "name={divider0/Q} pin=- count=- generates=-"),
+            std::string::npos);
+}
+
+// With no divider among the master's sinks at all, the
+// generated clock degrades to tree=none with the not-found
+// note; the master's tree is unaffected. Never a guessed tree.
+TEST(ClockNetworkSummary, RenamedSourceMissing) {
+  TimingTempDir dir;
+  Shell shell;
+  LoadClockFixture(shell, dir, R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 2 ;
+- u_m0 DFFX1 + PLACED ( 2000 1000 ) N ;
+- u_s0 DFFX1 + PLACED ( 3000 1000 ) N ;
+END COMPONENTS
+PINS 4 ;
+- clk + NET n_clk + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- din + NET n_d + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- dout + NET n_q + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+- dout2 + NET n_q2 + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 6000 ) N ;
+END PINS
+NETS 4 ;
+- n_clk ( PIN clk ) ( u_m0 CK ) ( u_s0 CK ) ;
+- n_d ( PIN din ) ( u_m0 D ) ( u_s0 D ) ;
+- n_q ( u_m0 Q ) ( PIN dout ) ;
+- n_q2 ( u_s0 Q ) ( PIN dout2 ) ;
+END NETS
+END DESIGN
+)DEF");
+  const std::string sdc = dir.Write(
+      "renamed.sdc",
+      "create_clock -name clk -period 5 [get_ports clk]\n"
+      "create_generated_clock -name clk_div -source [get_ports clk] "
+      "-divide_by 2 [get_pins u_div/q]\n");
+  ASSERT_TRUE(shell.Run("read_sdc", {sdc}).ok);
+  const CommandResult summary = shell.Run("clock_network_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find(
+                "clock name=clk_div generated=1 period=10 rise=0 "
+                "fall=5 skew=none source={u_div/q} sinks=- latency=- "
+                "master=clk modification={divide_by(2)} tree=none"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "note text={source u_div/q not found in the mapped "
+                "design}"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "clock name=clk generated=0 period=5 rise=0 fall=2.5 "
+                "skew=none source={clk} sinks=2 latency=- master=- "
+                "modification=- tree=pins"),
+            std::string::npos);
+}
+
+// A8: the optloop flow's virtual clock: no target, no source,
+// no sinks, recognized by its empty target spec.
+TEST(ClockNetworkSummary, VirtualClock) {
+  TimingTempDir dir;
+  Shell shell;
+  ASSERT_TRUE(SynthOptFlowToMapped(shell, dir, kSynthOptSdcClear));
+  const CommandResult summary = shell.Run("clock_network_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find(
+                "clock name=vclk generated=0 period=1.25 rise=0 "
+                "fall=0.625 skew=none source={} sinks=- latency=- "
+                "master=- modification=- tree=none"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find(
+                "note text={vclk is a virtual clock: it has no "
+                "source net and no sinks.}"),
+            std::string::npos);
+  const CommandResult report = shell.Run("report_clock");
+  ASSERT_TRUE(report.ok) << report.message;
+  EXPECT_NE(report.payload.find("vclk"), std::string::npos);
+  EXPECT_NE(report.payload.find("1.25"), std::string::npos);
+}
+
+// A9: a fresh session answers Ok with clocks=0, and
+// timing_summary keeps its exact failure.
+TEST(ClockNetworkSummary, NoSdc) {
+  Shell shell;
+  const CommandResult summary = shell.Run("clock_network_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("clocks=0"), std::string::npos);
+  EXPECT_NE(summary.payload.find("stage=constraints"),
+            std::string::npos);
+  const CommandResult timing = shell.Run("timing_summary");
+  ASSERT_FALSE(timing.ok);
+  EXPECT_EQ(timing.message, "no timing results: run eos::run_timing first");
+}
+
 
 TEST(ReportClock, NoDesignReportsZero) {
   Shell shell;

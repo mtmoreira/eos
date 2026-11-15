@@ -14,8 +14,25 @@ timing_summary [-max_paths N] [-scene <name>]
 It is a query, not a report: it registers no report binding,
 writes no file, and changes no session state. It fails fast with
 "no timing results: run eos::run_timing first" when no timing run
-exists, and with an unknown-scenario error when `-scene` names a
-scene the last run never covered.
+exists and the constraint set holds no clock rows, and with an
+unknown-scenario error when `-scene` names a scene the last run
+never covered.
+
+## Clocks-only mode
+
+Since the clock-network unit, the gate is on the clock rows as
+well as on the timing results. When no `run_timing` has run but
+the session constraint set holds clock rows (an SDC clock row, a
+generated clock, or a `bind_clock` record), `timing_summary`
+returns the header (with `scenes=0`) plus the clock rows, and
+nothing else: no engine session sits behind it, and no scene,
+path, coverage, or QoR row is invented. With `-scene` it fails
+with "timing_summary: scene has no timing results: <name>".
+With neither results nor clock rows, the failure is the
+pre-unit one, byte-identical: "no timing results: run
+eos::run_timing first". The GUI's `RefreshTiming` gates its
+clear on the same condition, so a session holding clocks shows
+the clock table instead of an empty panel.
 
 ## What it reads, and what it re-runs
 
@@ -37,14 +54,14 @@ run order. A scenario added after that run is not shown until
 `run_timing` runs again.
 
 The clock table reads the session constraint set only, exactly
-like `report_clock`: a clock defined in an SDC file does not
-appear, because `read_sdc` records the file path only and never
-writes the file's clocks into the session set. Define the clock
-with the interactive `create_clock` to see its row; the two
-systems are disjoint (see `docs/read-sdc-audit.md` section 5),
-so defining it interactively does not disturb the STA run,
-which reads its clocks from the file. Wiring file clocks into
-the session set is a later unit's job, not this query's.
+like `report_clock`. Since the clock-network unit, `read_sdc`
+wires the file's clock statements into that set (with a
+`source_file` provenance param), so a clock defined in an SDC
+file appears here exactly as an interactive `create_clock`
+would store it; the STA run still reads its clocks from the
+file itself. The clock rows' `skew=` reads the setup
+uncertainty the wiring stored (`uncertainty_setup_ns`), or
+`none` when no `set_clock_uncertainty` statement set one.
 
 ## The payload
 
@@ -75,7 +92,7 @@ qor scene=func_tt drc=max_transition violations=0 worst_slack=none
 |---|---|
 | `source=` | Design source (`verilog` or `odb`), scene count, ledger revision. |
 | `scene=` | One scene's slack summary: mode, corner, parasitics level, the four slack metrics, and the worst electrical value plus violating-pin count per check. Slack values use the same rendering as `run_timing`. |
-| `clock` | One clock-table row: name, generated flag, period and waveform rise/fall in ns (`-` when underivable), attribute letters, skew (`none`: no clock uncertainty is defined yet), and sources in braces. Same entries `report_clock` renders. |
+| `clock` | One clock-table row: name, generated flag, period and waveform rise/fall in ns (`-` when underivable), attribute letters, skew (the stored setup uncertainty, or `none` when no statement set one), and sources in braces. Same entries `report_clock` renders. |
 | `genclock` | One generated-clock row: name, master clock, waveform modification in braces, master source in braces, generated sources in braces. |
 | `bindclock` | One clock construction record (`bind_clock`, no period): name and target in braces. |
 | `scene=... class=` | One worst-violator row per class (`max_delay`, `min_delay`, `max_transition`, `max_capacitance`, `max_fanout`): the worst violator, its slack, the exact cost, weight 1, and the violating-pin count. A DRC class with no limit reports `limit=none` instead of slack and cost. Same rows `report_constraint` renders. |
@@ -103,8 +120,8 @@ On the optloop session (`demo/synth`, `synth_opt` winner
 slack +0.05 ns for the `func_tt` scene. The clock table shows
 `vclk` at 1.25 ns once the session defines it with the
 interactive `create_clock` (which needs an open design, so the
-clock is defined on a port of an opened design); in a
-`read_sdc`-only flow the table is empty, because the file's
-clocks never enter the session constraint set (see above).
-Showing the file's clocks without that step needs the later
-unit that wires file constraints into the session set.
+clock is defined on a port of an opened design). Since the
+clock-network unit, a `read_sdc`-only flow shows the same row:
+the wiring stores the file's targetless `vclk` in the session
+set, and the summary answers in clocks-only mode even before
+`run_timing`.

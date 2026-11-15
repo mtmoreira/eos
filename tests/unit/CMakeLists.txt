@@ -35,6 +35,11 @@ target_link_libraries(eda_db_waivers_unit_test
   PRIVATE eda_db_waivers GTest::gtest GTest::gtest_main)
 add_test(NAME db.waivers COMMAND eda_db_waivers_unit_test)
 
+add_executable(eda_io_sdc_unit_test io/sdc/sdc_test.cc)
+target_link_libraries(eda_io_sdc_unit_test
+  PRIVATE eda_io_sdc GTest::gtest GTest::gtest_main)
+add_test(NAME io.sdc COMMAND eda_io_sdc_unit_test)
+
 add_executable(eda_analysis_sta_unit_test analysis/sta/sta_test.cc)
 target_link_libraries(eda_analysis_sta_unit_test
   PRIVATE eda_analysis_sta GTest::gtest GTest::gtest_main)
@@ -106,6 +111,11 @@ add_test(NAME synth.yosys.abc_dff
 add_executable(eda_db_odb_unit_test db/odb/odb_test.cc)
 target_link_libraries(eda_db_odb_unit_test
   PRIVATE eda_db_odb GTest::gtest GTest::gtest_main)
+# The clock-use test reads the mock PDK LEF from the source
+# tree, like the registry tests do.
+target_compile_definitions(eda_db_odb_unit_test
+  PRIVATE
+    EOS_MOCK_PDK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../src/pd/rsz/tests/mock")
 add_test(NAME db.odb COMMAND eda_db_odb_unit_test)
 
 add_executable(eda_db_checkpoint_unit_test db/checkpoint/checkpoint_test.cc)
