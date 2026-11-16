@@ -1768,6 +1768,51 @@
         "tests/unit/ui/registry/registry_test.cc"
       ]
     },
+    "ui.registry.extract.comparison": {
+      "modules": [
+        "checkpoint",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.registry.extract.end_to_end": {
+      "modules": [
+        "checkpoint",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.registry.extract.rerun": {
+      "modules": [
+        "checkpoint",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.registry.extract.summary": {
+      "modules": [
+        "checkpoint",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.registry.extract.timing_agreement": {
+      "modules": [
+        "checkpoint",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
     "ui.registry.route.clock_view": {
       "modules": [
         "checkpoint",

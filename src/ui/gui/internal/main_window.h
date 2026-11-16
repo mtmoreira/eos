@@ -59,6 +59,7 @@ class MainWindow : public QMainWindow {
   bool SynthesisEnabled() const;
   bool CtsEnabled() const;
   bool RouteEnabled() const;
+  bool ExtractEnabled() const;
   bool SignoffEnabled() const;
 
   // Records that the terminal stdin reached EOF (U6). A window
@@ -121,6 +122,7 @@ class MainWindow : public QMainWindow {
   QPushButton* placement_button_ = nullptr;
   QPushButton* cts_button_ = nullptr;
   QPushButton* route_button_ = nullptr;
+  QPushButton* extract_button_ = nullptr;
   QPushButton* signoff_button_ = nullptr;
   HierarchyBrowser* browser_ = nullptr;
   CenterView* center_ = nullptr;

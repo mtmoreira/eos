@@ -9,8 +9,8 @@ mock result may ever be cited as PDK correlation: the mock
 validates engine mechanics, never silicon behavior.
 
 Usage: python3 gen_mock.py (writes eos_mock.lib, eos_mock.lef,
-eos_mock.tlef next to this script). Output is deterministic;
-re-running must produce byte-identical files.
+eos_mock.tlef, eos_mock.rules next to this script). Output is
+deterministic; re-running must produce byte-identical files.
 
 Enrichment loop: when a new engine need appears (a cell, an
 arc, or a tech parameter), add it here together with the
@@ -568,10 +568,120 @@ def emit_tlef(path):
         f.write("\n".join(out) + "\n")
 
 
+# ---------------------------------------------------------------- RC rules
+# The OpenRCX rules file for the mock stack (F7): one section set
+# per routing layer, in the order the imported reader's
+# DensityModel loop consumes them (extRCmodel.cpp): for each
+# metal, RESOVER, OVER, then (below the top metal) UNDER and
+# DIAGUNDER, then (for metals 2..9) OVERUNDER. The grammar
+# generalizes the P6 extraction test's two-metal fixture
+# (extract_test.cc RulesText) by the reader's own loops:
+# RESOVER/OVER carry one DIST table per metal below (0..i-1),
+# UNDER/DIAGUNDER one per metal above (i+1..10), and OVERUNDER
+# one per (below, above) pair. DIAGMODEL ON selects the
+# one-width DIAGUNDER form the fixture uses.
+#
+# Every value derives from the LAYERS table above by the fixed
+# factors here, so the rules can never drift from the tlef they
+# describe. The WIDTH entry is the layer's width; the DIST
+# spacings are 1x, 2x, 4x, 8x that width; the resistance column
+# is the layer's rpersq (the tlef's RESISTANCE RPERSQ); the
+# coupling column is cpersqdist scaled by (0.0016, 0.0010,
+# 0.0004, 0) and the fringe column edgecap scaled by (0.002,
+# 0.0025, 0.003, 0.0035), so coupling falls and fringe rises
+# with spacing as in the fixture's rows. These are invented
+# fixture values in the same sense as the P6 test's: they
+# validate extraction mechanics, never silicon behavior.
+def _dist_rows(width, rpersq, cpersq, edgecap):
+    coupling_f = (0.0016, 0.0010, 0.0004, 0.0)
+    fringe_f = (0.002, 0.0025, 0.003, 0.0035)
+    out = ["DIST count 4 width %s" % fmt(width)]
+    for k, scale in enumerate((1, 2, 4, 8)):
+        out.append("%s %s %s %s" % (
+            fmt(width * scale), fmt(cpersq * coupling_f[k]),
+            fmt(edgecap * fringe_f[k]), fmt(rpersq)))
+    out.append("END DIST")
+    return out
+
+
+def _res_dist_rows(width, rpersq):
+    # The RESOVER row shape (dist1, dist2, fringe, resistance):
+    # one row per dist1 group, because the reader's
+    # diagonal-resistance lookup reads the second group's
+    # table unconditionally (see extract_test.cc ResDistRows).
+    out = ["DIST count 4 width %s" % fmt(width)]
+    for dist1, dist2 in ((0, 1), (1, 2), (2, 4), (4, 8)):
+        out.append("%s %s 0 %s" % (
+            fmt(width * dist1), fmt(width * dist2), fmt(rpersq)))
+    out.append("END DIST")
+    return out
+
+
+def emit_rules(path):
+    out = []
+    out.append("Extraction Rules for OpenRCX mock model")
+    out.append("")
+    out.append("DIAGMODEL ON")
+    out.append("")
+    out.append("LayerCount %d" % len(LAYERS))
+    out.append("DensityRate 1  0")
+    out.append("")
+    out.append("DensityModel 0")
+    top = len(LAYERS)
+    for idx, (name, direction, width, pitch, rpersq, cpersq,
+              edgecap) in enumerate(LAYERS):
+        met = idx + 1
+        out.append("")
+        out.append("Metal %d RESOVER" % met)
+        out.append("WIDTH Table 1 entries:  %s" % fmt(width))
+        for below in range(0, met):
+            out.append("")
+            out.append("Metal %d RESOVER %d" % (met, below))
+            out.extend(_res_dist_rows(width, rpersq))
+        out.append("")
+        out.append("Metal %d OVER" % met)
+        out.append("WIDTH Table 1 entries:  %s" % fmt(width))
+        for below in range(0, met):
+            out.append("")
+            out.append("Metal %d OVER %d" % (met, below))
+            out.extend(_dist_rows(width, rpersq, cpersq, edgecap))
+        if met < top:
+            out.append("")
+            out.append("Metal %d UNDER" % met)
+            out.append("WIDTH Table 1 entries:  %s" % fmt(width))
+            for above in range(met + 1, top + 1):
+                out.append("")
+                out.append("Metal %d UNDER %d" % (met, above))
+                out.extend(_dist_rows(width, rpersq, cpersq,
+                                      edgecap))
+            out.append("")
+            out.append("Metal %d DIAGUNDER" % met)
+            out.append("WIDTH Table 1 entries:  %s" % fmt(width))
+            for above in range(met + 1, top + 1):
+                out.append("")
+                out.append("Metal %d DIAGUNDER %d" % (met, above))
+                out.extend(_dist_rows(width, rpersq, cpersq,
+                                      edgecap))
+        if 1 < met < top:
+            out.append("")
+            out.append("Metal %d OVERUNDER" % met)
+            out.append("WIDTH Table 1 entries:  %s" % fmt(width))
+            for below in range(1, met):
+                for above in range(met + 1, top + 1):
+                    out.append("")
+                    out.append("Metal %d OVER %d UNDER %d"
+                               % (met, below, above))
+                    out.extend(_dist_rows(width, rpersq, cpersq,
+                                          edgecap))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+
+
 def main():
     emit_lib(os.path.join(HERE, "eos_mock.lib"))
     emit_lef(os.path.join(HERE, "eos_mock.lef"))
     emit_tlef(os.path.join(HERE, "eos_mock.tlef"))
+    emit_rules(os.path.join(HERE, "eos_mock.rules"))
 
 
 if __name__ == "__main__":

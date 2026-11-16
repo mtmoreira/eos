@@ -371,6 +371,48 @@ struct CommandContext {
   };
   RouteSession route;
 
+  // Extract session state (full-flow GUI unit F7): the
+  // record of the most recent successful
+  // eos::extract_parasitics run, so the extract_summary
+  // query can report the run's numbers (the engine's
+  // counts, the SPEF and model paths, the run's
+  // post-route estimated STA outcome) without
+  // re-running the extractor. Like the place, CTS, and
+  // route sessions, this is interface session state,
+  // not project state: it is cleared when the design
+  // closes (ResetProject), and a restore does not
+  // bring it back. Only a successful extract run
+  // updates it; a failed run leaves the previous
+  // record untouched, exactly like a failed route
+  // leaves the route record. Unlike the CTS session
+  // it is a single run, not one entry per net: one
+  // invocation extracts the whole design, so a later
+  // successful run replaces the record (a re-run
+  // genuinely re-extracts: the runner replaces the
+  // first run's RC data and rewrites the SPEF).
+  // scene_slacks holds the post-route estimated worst
+  // slack per scene the run's STA leg analyzed; when
+  // that leg could not analyze, sta_note holds the
+  // payload's unavailable statement verbatim instead
+  // and scene_slacks is empty. The extracted-parasitics
+  // comparison is not stored here: it is computed by
+  // extract_summary from the timing session's
+  // last_results at query time (section 3.4 of the
+  // F7 design), so the record never holds a second
+  // copy of a run_timing result.
+  struct ExtractSession {
+    bool extracted = false;
+    int nets_extracted = 0;
+    int rseg_count = 0;
+    int cap_node_count = 0;
+    int cc_seg_count = 0;
+    std::string spef_path;
+    std::string model_path;
+    std::vector<std::pair<std::string, double>> scene_slacks;
+    std::string sta_note;
+  };
+  ExtractSession extract;
+
   // Synthesis session state (unit S1): the design the synthesis
   // commands have parsed, elaborated and generically optimized,
   // as one advancing state machine. Like the timing session,

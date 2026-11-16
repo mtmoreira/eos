@@ -10,6 +10,7 @@ add_library(eda_ui_gui STATIC
   src/gui_session.cc
   src/clock_network.cc
   src/cts.cc
+  src/extract.cc
   src/route.cc
   src/console_entry.cc
   src/diagram.cc

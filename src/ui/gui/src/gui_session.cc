@@ -261,6 +261,7 @@ static SessionView::ResultDestination NavigationForCommand(
   }
   if (name == "cts") return Destination::kClocks;
   if (name == "route") return Destination::kCenter;
+  if (name == "extract_parasitics") return Destination::kTiming;
   if (name == "signoff_summary") return Destination::kSignoff;
   if (name == "report_clock" || name == "report_constraint" ||
       name == "report_analysis_coverage" || name == "report_qor" ||
@@ -306,6 +307,7 @@ CommandResult SessionView::Dispatch(const std::string& name,
         placement_.Clear();
         cts_.Clear();
         route_.Clear();
+        extract_.Clear();
       }
     } else if (name == "close_design") {
       checkpoint_.clear();
@@ -316,6 +318,7 @@ CommandResult SessionView::Dispatch(const std::string& name,
       placement_.Clear();
       cts_.Clear();
       route_.Clear();
+      extract_.Clear();
     } else if (name == "floorplan") {
       // A successful floorplan takes the user to the
       // floorplan canvas: the center shows it on the next
@@ -580,6 +583,15 @@ void SessionView::RefreshRoute() {
   if (!result.ok || !route_.LoadPayload(result.payload)) {
     NoteUnguardedRefreshFailure(messages_, "route_summary", result,
                                 route_.Empty());
+  }
+}
+
+void SessionView::RefreshExtract() {
+  const CommandResult result =
+      registry_.Dispatch(context_, "extract_summary", {});
+  if (!result.ok || !extract_.LoadPayload(result.payload)) {
+    NoteUnguardedRefreshFailure(messages_, "extract_summary", result,
+                                extract_.Empty());
   }
 }
 

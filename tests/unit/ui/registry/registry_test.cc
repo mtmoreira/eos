@@ -105,7 +105,8 @@ TEST(Registry, CoreSetIsComplete) {
   // The clock-network unit adds clock_network_summary (one command).
   // The F5 CTS unit adds cts_summary (one command).
   // The F6 route unit adds route_summary (one command).
-  EXPECT_EQ(shell.registry.Names().size(), 126u);
+  // The F7 extract unit adds extract_summary (one command).
+  EXPECT_EQ(shell.registry.Names().size(), 127u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -115,6 +116,7 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("clock_network_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("cts_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("route_summary"), nullptr);
+  EXPECT_NE(shell.registry.Find("extract_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("set_waiver"), nullptr);
@@ -11598,6 +11600,21 @@ static void BuildRoutedClockedDemoSession(Shell& shell,
   ASSERT_TRUE(route.ok) << route.message;
 }
 
+// The routed clocked demo session plus one extract run with
+// the mock rules file (the F7 chain), the starting point of
+// the F7 extract acceptance tests that do not need the
+// extract payload itself.
+static void BuildExtractedClockedDemoSession(Shell& shell,
+                                             TimingTempDir& dir) {
+  BuildRoutedClockedDemoSession(shell, dir);
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const CommandResult extract = shell.Run(
+      "extract_parasitics",
+      {dir.Path("clk_top.spef"), "-model",
+       mock_dir + "/eos_mock.rules"});
+  ASSERT_TRUE(extract.ok) << extract.message;
+}
+
 // Parses one integer header value out of a route payload's
 // first line ("key=<value>" among space-separated terms).
 // Returns -1 when the key is absent or the value is not an
@@ -11889,6 +11906,339 @@ TEST(CoreCommands, RouteRunTimingAgreesWithRouteSlack) {
   const std::string route_token = PayloadSlackToken(route.payload);
   ASSERT_FALSE(route_token.empty());
   EXPECT_EQ(PayloadSlackToken(after.payload), route_token);
+}
+
+// F7: extract_summary with an empty record fails fast, on a
+// fresh session: the record check is the query's only gate.
+TEST(CoreCommands, ExtractSummaryFailsFastBeforeExtract) {
+  Shell shell;
+  const CommandResult result = shell.Run("extract_summary");
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(
+      result.message.find("no extraction: eos::extract_parasitics "
+                          "first"),
+      std::string::npos);
+  EXPECT_FALSE(shell.ctx.extract.extracted);
+}
+
+// F7 A7: on a placed-but-unrouted fixture session (imported,
+// floorplanned, placed, no route, no synth),
+// extract_parasitics fails with the runner's not-routed
+// message and the extract record stays empty, so
+// extract_summary still fails fast after it.
+TEST(CoreCommands, ExtractFailsFastBeforeRoute) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kRouteLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const CommandResult result = shell.Run(
+      "extract_parasitics",
+      {dir.Path("out.spef"), "-model", mock_dir + "/eos_mock.rules"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidState);
+  EXPECT_NE(result.message.find("design is not routed"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.extract.extracted);
+  const CommandResult summary = shell.Run("extract_summary");
+  ASSERT_FALSE(summary.ok);
+  EXPECT_EQ(summary.diag, Diag::kInvalidConfiguration);
+}
+
+// F7 A7: on the routed small fixture, a nonexistent model
+// path fails with the runner's cannot-read message naming
+// the path verbatim (the runner's ladder checks routed
+// before model readability, so the honest setup routes
+// first, still without synth).
+TEST(CoreCommands, ExtractFailsFastWithMissingModel) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kRouteLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  ASSERT_TRUE(shell.Run("route", {"-max_iterations", "1",
+                                  "-bottom_layer", "metal1",
+                                  "-top_layer", "metal2"})
+                  .ok);
+  const std::string missing = dir.Path("no_such.rules");
+  const CommandResult result = shell.Run(
+      "extract_parasitics", {dir.Path("out.spef"), "-model", missing});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidState);
+  EXPECT_NE(result.message.find("cannot read extraction model file " +
+                                missing),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.extract.extracted);
+}
+
+// F7 A1 + A2: the full chain runs in one session through the
+// bare extract_parasitics call with the mock rules file; the
+// payload's nets equal the route payload's routed count
+// measured in the same session (the test asserts equality
+// with the measured count, not a figure the design
+// invents); rsegs and cap_nodes are above zero; cc_segs is
+// recorded, not gated; the SPEF file exists and is
+// non-empty; and the payload ends with the finite per-scene
+// STA leg (the post-PR-146 posture), not an unavailable
+// statement.
+TEST(CoreCommands, ExtractRunsClockedDemoEndToEnd) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildRoutedClockedDemoSession(shell, dir);
+  const long long routed =
+      RouteHeaderInt(shell.Run("route_summary").payload, "routed");
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const std::string spef_path = dir.Path("clk_top.spef");
+  const CommandResult result = shell.Run(
+      "extract_parasitics",
+      {spef_path, "-model", mock_dir + "/eos_mock.rules"});
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_EQ(RouteHeaderInt(result.payload, "nets"), routed);
+  EXPECT_GT(RouteHeaderInt(result.payload, "rsegs"), 0);
+  EXPECT_GT(RouteHeaderInt(result.payload, "cap_nodes"), 0);
+  EXPECT_GE(RouteHeaderInt(result.payload, "cc_segs"), 0);
+  EXPECT_NE(result.payload.find("spef=" + spef_path),
+            std::string::npos);
+  EXPECT_NE(result.payload.find("scene=func_tt worst_slack_ns="),
+            std::string::npos);
+  EXPECT_EQ(result.payload.find("sta_slack_ns=unavailable"),
+            std::string::npos);
+  std::error_code ec;
+  EXPECT_GT(std::filesystem::file_size(spef_path, ec), 0u);
+  ASSERT_TRUE(shell.ctx.extract.extracted);
+  EXPECT_EQ(shell.ctx.extract.nets_extracted,
+            static_cast<int>(routed));
+  EXPECT_EQ(shell.ctx.extract.spef_path, spef_path);
+  EXPECT_EQ(shell.ctx.extract.model_path,
+            mock_dir + "/eos_mock.rules");
+}
+
+// F7 A3: after the run, extract_summary's header reports the
+// extract payload's counts and both paths exactly, and its
+// slack line equals the extract payload's scene slack
+// exactly as printed. Before the comparison exists the
+// summary carries no compare line.
+TEST(CoreCommands, ExtractSummaryReportsRecordedRun) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildRoutedClockedDemoSession(shell, dir);
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const std::string spef_path = dir.Path("clk_top.spef");
+  const CommandResult extract = shell.Run(
+      "extract_parasitics",
+      {spef_path, "-model", mock_dir + "/eos_mock.rules"});
+  ASSERT_TRUE(extract.ok) << extract.message;
+  const CommandResult summary = shell.Run("extract_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "nets"),
+            RouteHeaderInt(extract.payload, "nets"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "rsegs"),
+            RouteHeaderInt(extract.payload, "rsegs"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "cap_nodes"),
+            RouteHeaderInt(extract.payload, "cap_nodes"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "cc_segs"),
+            RouteHeaderInt(extract.payload, "cc_segs"));
+  EXPECT_NE(summary.payload.find("spef=" + spef_path),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("model=" + mock_dir +
+                                 "/eos_mock.rules"),
+            std::string::npos);
+  const std::string slack_token = PayloadSlackToken(extract.payload);
+  ASSERT_FALSE(slack_token.empty());
+  EXPECT_NE(summary.payload.find("\nslack scene=func_tt "
+                                 "worst_slack_ns=" +
+                                 slack_token),
+            std::string::npos);
+  EXPECT_EQ(summary.payload.find("\ncompare "), std::string::npos);
+  EXPECT_EQ(summary.payload.find("sta_note"), std::string::npos);
+}
+
+// F7 A3, the re-run half: a second extract_parasitics in the
+// same session succeeds (the runner's measured re-run
+// posture) and the record then holds the second run's SPEF
+// path, with counts equal to the first run's.
+TEST(CoreCommands, ExtractRerunReplacesRecord) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildExtractedClockedDemoSession(shell, dir);
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const std::string second_path = dir.Path("clk_top_second.spef");
+  const CommandResult second = shell.Run(
+      "extract_parasitics",
+      {second_path, "-model", mock_dir + "/eos_mock.rules"});
+  ASSERT_TRUE(second.ok) << second.message;
+  ASSERT_TRUE(shell.ctx.extract.extracted);
+  EXPECT_EQ(shell.ctx.extract.spef_path, second_path);
+  const CommandResult summary = shell.Run("extract_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "nets"),
+            RouteHeaderInt(second.payload, "nets"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "rsegs"),
+            RouteHeaderInt(second.payload, "rsegs"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "cap_nodes"),
+            RouteHeaderInt(second.payload, "cap_nodes"));
+  EXPECT_NE(summary.payload.find("spef=" + second_path),
+            std::string::npos);
+}
+
+// F7 A4: the extract record's func_tt slack equals the route
+// record's func_tt slack exactly as printed (both are the
+// same estimated analysis of the same routed database in
+// the same session; the route unit's agreement, extended
+// one stage), and a post-extract run_timing (estimate scene
+// only) reproduces it exactly.
+TEST(CoreCommands, ExtractRunTimingAgreesWithExtractSlack) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildExtractedClockedDemoSession(shell, dir);
+  ASSERT_EQ(shell.ctx.extract.scene_slacks.size(), 1u);
+  ASSERT_EQ(shell.ctx.route.scene_slacks.size(), 1u);
+  EXPECT_EQ(shell.ctx.extract.scene_slacks[0].first, "func_tt");
+  EXPECT_EQ(shell.ctx.extract.scene_slacks[0].second,
+            shell.ctx.route.scene_slacks[0].second);
+  const CommandResult after = shell.Run("run_timing");
+  ASSERT_TRUE(after.ok) << after.message;
+  const CommandResult summary = shell.Run("extract_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  const std::string summary_token = PayloadSlackToken(summary.payload);
+  ASSERT_FALSE(summary_token.empty());
+  EXPECT_EQ(PayloadSlackToken(after.payload), summary_token);
+}
+
+// The value of one key on the run_timing scene line for the
+// named scene (the line starting "scene=<name> "), as
+// printed. Returns "" when the scene line or the key is
+// absent; the tests assert on the returned value, so a
+// missing key fails loudly.
+static std::string SceneLineValue(const std::string& payload,
+                                  const std::string& scene,
+                                  const std::string& key) {
+  const std::string tag = "\nscene=" + scene + " ";
+  const std::size_t at = payload.find(tag);
+  if (at == std::string::npos) return "";
+  const std::size_t line_end = payload.find('\n', at + 1);
+  const std::string line =
+      payload.substr(at + 1, line_end == std::string::npos
+                                 ? std::string::npos
+                                 : line_end - at - 1);
+  const std::string token = key + "=";
+  const std::size_t key_at = line.find(token);
+  if (key_at == std::string::npos) return "";
+  const std::size_t begin = key_at + token.size();
+  std::size_t end = begin;
+  while (end < line.size() && line[end] != ' ') ++end;
+  return line.substr(begin, end - begin);
+}
+
+// The measured prefix of the run_timing scene line for the
+// named scene: the whole line up to the report binding (the
+// " report=" term). The artifact id in the binding is a
+// registry counter that increments per run_timing, not a
+// measurement, so the byte-identical leg of A5 judges the
+// measured prefix.
+static std::string SceneLineMeasuredPrefix(
+    const std::string& payload, const std::string& scene) {
+  const std::string tag = "\nscene=" + scene + " ";
+  const std::size_t at = payload.find(tag);
+  if (at == std::string::npos) return "";
+  const std::size_t line_end = payload.find('\n', at + 1);
+  std::string line =
+      payload.substr(at + 1, line_end == std::string::npos
+                                 ? std::string::npos
+                                 : line_end - at - 1);
+  const std::size_t report_at = line.find(" report=");
+  if (report_at != std::string::npos) line.erase(report_at);
+  return line;
+}
+
+// F7 A5, the unit's headline: the full demo tail. The final
+// run_timing succeeds with two scene lines (func_tt
+// estimate, func_tt_ext extracted); the estimate scene's
+// measured line is byte-identical to the post-route
+// run_timing's (adding the extracted scenario does not move
+// the estimated analysis); the extracted worst slack
+// differs from the estimated (identical numbers would mean
+// the SPEF was not applied); the extracted run's drained
+// engine log carries no SPEF not-found warning; and the
+// final extract_summary carries exactly one compare line
+// whose four values equal the two scene lines' worst and
+// hold slacks exactly as printed.
+TEST(CoreCommands, ExtractedStaComparesAgainstEstimated) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildRoutedClockedDemoSession(shell, dir);
+  const CommandResult post_route = shell.Run("run_timing");
+  ASSERT_TRUE(post_route.ok) << post_route.message;
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const std::string spef_path = dir.Path("clk_top.spef");
+  const CommandResult extract = shell.Run(
+      "extract_parasitics",
+      {spef_path, "-model", mock_dir + "/eos_mock.rules"});
+  ASSERT_TRUE(extract.ok) << extract.message;
+  ASSERT_TRUE(shell.Run("create_scenario",
+                        {"func_tt_ext", "func", "tt", "extracted"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("set_spef", {spef_path}).ok);
+  const std::size_t log_before = shell.ctx.engine_log_lines.size();
+  const CommandResult final_run = shell.Run("run_timing");
+  ASSERT_TRUE(final_run.ok) << final_run.message;
+  EXPECT_NE(final_run.payload.find("scenes=2"), std::string::npos);
+  EXPECT_NE(final_run.payload.find("scene=func_tt mode=func "
+                                   "corner=tt parasitics=estimate "),
+            std::string::npos);
+  EXPECT_NE(final_run.payload.find("scene=func_tt_ext mode=func "
+                                   "corner=tt parasitics=extracted "),
+            std::string::npos);
+  EXPECT_EQ(SceneLineMeasuredPrefix(final_run.payload, "func_tt"),
+            SceneLineMeasuredPrefix(post_route.payload, "func_tt"));
+  const std::string estimated =
+      SceneLineValue(final_run.payload, "func_tt", "worst_slack_ns");
+  const std::string extracted = SceneLineValue(
+      final_run.payload, "func_tt_ext", "worst_slack_ns");
+  ASSERT_FALSE(estimated.empty());
+  ASSERT_FALSE(extracted.empty());
+  EXPECT_NE(extracted, estimated);
+  for (std::size_t i = log_before;
+       i < shell.ctx.engine_log_lines.size(); ++i) {
+    EXPECT_EQ(shell.ctx.engine_log_lines[i].find("not found."),
+              std::string::npos)
+        << shell.ctx.engine_log_lines[i];
+  }
+  const CommandResult summary = shell.Run("extract_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_EQ(CountRouteLines(summary.payload, "compare "), 1);
+  EXPECT_NE(summary.payload.find(
+                "compare mode=func corner=tt "
+                "estimate_scene=func_tt "
+                "extracted_scene=func_tt_ext "
+                "estimated_worst_slack_ns=" +
+                estimated +
+                " extracted_worst_slack_ns=" + extracted +
+                " estimated_worst_hold_slack_ns=" +
+                SceneLineValue(final_run.payload, "func_tt",
+                               "worst_hold_slack_ns") +
+                " extracted_worst_hold_slack_ns=" +
+                SceneLineValue(final_run.payload, "func_tt_ext",
+                               "worst_hold_slack_ns")),
+            std::string::npos);
 }
 
 // F6 A7: on demo/synth, after the optloop flow through

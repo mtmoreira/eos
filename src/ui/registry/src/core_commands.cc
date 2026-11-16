@@ -402,6 +402,7 @@ void ResetProject(CommandContext& ctx) {
   ctx.place = CommandContext::PlaceSession();
   ctx.cts = CommandContext::CtsSession();
   ctx.route = CommandContext::RouteSession();
+  ctx.extract = CommandContext::ExtractSession();
   ctx.signoff = CommandContext::SignoffSession();
   ctx.drc = CommandContext::DrcSession();
   ctx.wire_rc_overrides.clear();
@@ -11636,30 +11637,160 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         // when it is not, the payload says so with the reason
         // instead of inventing a number. The extracted-STA
         // comparison is demonstrated by the unit tests, not faked
-        // into this payload.
+        // into this payload. The per-scene slacks are collected
+        // here into scene_slacks as well, so the extract record
+        // stored below carries the same numbers the payload
+        // reports; when the STA leg cannot analyze, sta_note
+        // carries the payload's unavailable statement verbatim
+        // instead (the route handler's pattern).
         bool from_odb = false;
         std::vector<analysis::SceneAnalysis> scenes;
+        std::vector<std::pair<std::string, double>> scene_slacks;
+        std::string sta_note;
         if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
-          payload += " sta_slack_ns=unavailable (" + bad->message + ")";
+          sta_note = "sta_slack_ns=unavailable (" + bad->message + ")";
+          payload += " " + sta_note;
         } else if (!from_odb) {
-          payload += " sta_slack_ns=unavailable (timing source is "
-                     "Verilog, not the routed database)";
+          sta_note =
+              "sta_slack_ns=unavailable (timing source is "
+              "Verilog, not the routed database)";
+          payload += " " + sta_note;
         } else {
           analysis::TimingService service;
           const Result<std::vector<analysis::SceneResult>> analyzed =
               service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
                               scenes, ctx.timing.sdc_pin_map);
           if (!analyzed.ok()) {
-            payload += " sta_slack_ns=unavailable (" +
+            sta_note = "sta_slack_ns=unavailable (" +
                        analyzed.status().message() + ")";
+            payload += " " + sta_note;
           } else {
             for (const analysis::SceneResult& result :
                  analyzed.value()) {
               payload += " scene=" + result.scenario.name +
                          " worst_slack_ns=" +
                          MetricText(result.metrics, "worst_slack_ns");
+              const auto slack =
+                  result.metrics.find("worst_slack_ns");
+              if (slack != result.metrics.end()) {
+                scene_slacks.push_back(
+                    {result.scenario.name, slack->second.value});
+              }
             }
           }
+        }
+        // The extract record (full-flow GUI unit F7): the numbers
+        // the extract_summary query reports. Only a successful
+        // run stores it; a failed run leaves the previous record
+        // untouched, like run_timing and last_results. A later
+        // successful run replaces the record: a re-run genuinely
+        // re-extracts, so the record holds the latest run's
+        // numbers.
+        CommandContext::ExtractSession entry;
+        entry.extracted = true;
+        entry.nets_extracted = report.nets_extracted;
+        entry.rseg_count = report.rseg_count;
+        entry.cap_node_count = report.cap_node_count;
+        entry.cc_seg_count = report.cc_seg_count;
+        entry.spef_path = report.spef_path;
+        entry.model_path = model_path;
+        entry.scene_slacks = std::move(scene_slacks);
+        entry.sta_note = std::move(sta_note);
+        ctx.extract = std::move(entry);
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- extract_summary (full-flow GUI unit F7) ---------------
+  // The structured extract query the GUI's Timing tab reads:
+  // the session extract record (the engine's counts, the SPEF
+  // and model paths, the run's post-route estimated STA
+  // outcome) plus the estimated-versus-extracted comparison
+  // paired from the timing session's last_results at query
+  // time. It is a query, not a report: it runs no engine,
+  // writes no file, and changes no session state. The
+  // comparison reads the structured results of the most
+  // recent run_timing, never payload text, and the record
+  // holds no copy of it. Like cts_summary, the query reads
+  // only the record, so it does not require the database;
+  // with an empty record it fails fast, mirroring
+  // route_summary's "no routing" posture.
+  add("extract_summary", "extract_summary",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "extract_summary")) {
+          return *bad;
+        }
+        if (!ctx.extract.extracted) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no extraction: eos::extract_parasitics first");
+        }
+        const CommandContext::ExtractSession& record = ctx.extract;
+        std::string payload =
+            "extract nets=" + std::to_string(record.nets_extracted) +
+            " rsegs=" + std::to_string(record.rseg_count) +
+            " cap_nodes=" + std::to_string(record.cap_node_count) +
+            " cc_segs=" + std::to_string(record.cc_seg_count) +
+            " spef=" + record.spef_path +
+            " model=" + record.model_path;
+        for (const auto& slack : record.scene_slacks) {
+          payload += "\nslack scene=" + slack.first +
+                     " worst_slack_ns=" + FormatNumber(slack.second);
+        }
+        if (!record.sta_note.empty()) {
+          payload += "\nsta_note " + record.sta_note;
+        }
+        // The comparison: one line per (mode, corner) pair the
+        // last run_timing holds at both parasitics levels, in
+        // the order the estimate scenes appear. A pair whose
+        // either side lacks a worst or hold slack is skipped
+        // (Analyze always sets both; the rule keeps the
+        // payload grammar total).
+        const std::vector<analysis::SceneResult>& results =
+            ctx.timing.last_results;
+        for (const analysis::SceneResult& estimate : results) {
+          if (estimate.scenario.parasitics !=
+              db::ParasiticsLevel::kEstimate) {
+            continue;
+          }
+          const analysis::SceneResult* extracted = nullptr;
+          for (const analysis::SceneResult& candidate : results) {
+            if (candidate.scenario.parasitics ==
+                    db::ParasiticsLevel::kExtracted &&
+                candidate.scenario.mode == estimate.scenario.mode &&
+                candidate.scenario.corner ==
+                    estimate.scenario.corner) {
+              extracted = &candidate;
+              break;
+            }
+          }
+          if (extracted == nullptr) continue;
+          const auto est_slack =
+              estimate.metrics.find("worst_slack_ns");
+          const auto est_hold =
+              estimate.metrics.find("worst_hold_slack_ns");
+          const auto ext_slack =
+              extracted->metrics.find("worst_slack_ns");
+          const auto ext_hold =
+              extracted->metrics.find("worst_hold_slack_ns");
+          if (est_slack == estimate.metrics.end() ||
+              est_hold == estimate.metrics.end() ||
+              ext_slack == extracted->metrics.end() ||
+              ext_hold == extracted->metrics.end()) {
+            continue;
+          }
+          payload += "\ncompare mode=" + estimate.scenario.mode +
+                     " corner=" + estimate.scenario.corner +
+                     " estimate_scene=" + estimate.scenario.name +
+                     " extracted_scene=" + extracted->scenario.name +
+                     " estimated_worst_slack_ns=" +
+                     FormatNumber(est_slack->second.value) +
+                     " extracted_worst_slack_ns=" +
+                     FormatNumber(ext_slack->second.value) +
+                     " estimated_worst_hold_slack_ns=" +
+                     FormatNumber(est_hold->second.value) +
+                     " extracted_worst_hold_slack_ns=" +
+                     FormatNumber(ext_hold->second.value);
         }
         return CommandResult::Ok(payload);
       });

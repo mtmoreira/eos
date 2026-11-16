@@ -64,6 +64,9 @@ using eos::ui::ConeNetPaths;
 using eos::ui::ConeNetSpokes;
 using eos::ui::CtsModel;
 using eos::ui::CtsNet;
+using eos::ui::ExtractCompare;
+using eos::ui::ExtractModel;
+using eos::ui::ExtractSlack;
 using eos::ui::DiagramBlock;
 using eos::ui::DiagramModel;
 using eos::ui::DiagramNet;
@@ -2228,6 +2231,51 @@ const char kRouteSummaryNoSlackPayload[] =
     "sta_note sta_slack_ns=unavailable (scene func_tt: could not "
     "read SDC file)\n";
 
+// F7: the recorded extract run as extract_summary reports
+// it before the extracted comparison exists: the header with
+// the counts and both paths, and the run's finite estimated
+// slack line.
+const char kExtractSummaryPayload[] =
+    "extract nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+    "spef=clk_top.spef model=eos_mock.rules\n"
+    "slack scene=func_tt worst_slack_ns=3.292352835\n";
+
+// F7: the same run after the extracted run_timing, with the
+// compare line pairing the estimated and extracted scenes.
+const char kExtractSummaryComparePayload[] =
+    "extract nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+    "spef=clk_top.spef model=eos_mock.rules\n"
+    "slack scene=func_tt worst_slack_ns=3.292352835\n"
+    "compare mode=func corner=tt estimate_scene=func_tt "
+    "extracted_scene=func_tt_ext "
+    "estimated_worst_slack_ns=3.292352835 "
+    "extracted_worst_slack_ns=3.105 "
+    "estimated_worst_hold_slack_ns=0.1642400105 "
+    "extracted_worst_hold_slack_ns=0.15\n";
+
+// F7: the same run with the STA unavailable note instead of
+// a slack line.
+const char kExtractSummaryNotePayload[] =
+    "extract nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+    "spef=clk_top.spef model=eos_mock.rules\n"
+    "sta_note sta_slack_ns=unavailable (scene func_tt: could "
+    "not read SDC file)\n";
+
+void RegisterExtractSummaryCommand(CommandRegistry& registry,
+                                   const std::string& payload,
+                                   bool ok) {
+  auto status = registry.Register(
+      "extract_summary", "extract_summary",
+      [payload, ok](CommandContext&, const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "query broken");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
 void RegisterRouteSummaryCommand(CommandRegistry& registry,
                                  const std::string& payload, bool ok) {
   auto status = registry.Register(
@@ -3822,6 +3870,103 @@ TEST(RouteModel, RejectsMalformedPayloads) {
   ASSERT_TRUE(model.LoadPayload(kRouteSummaryPayload));
   EXPECT_FALSE(model.LoadPayload("garbage\n"));
   EXPECT_EQ(model.Segments().size(), 2u);
+}
+
+TEST(ExtractModel, ParsesRecordedRun) {
+  ExtractModel model;
+  ASSERT_TRUE(model.LoadPayload(kExtractSummaryPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.Nets(), 185u);
+  EXPECT_EQ(model.Rsegs(), 4200u);
+  EXPECT_EQ(model.CapNodes(), 2600u);
+  EXPECT_EQ(model.CcSegs(), 120u);
+  EXPECT_EQ(model.SpefPath(), "clk_top.spef");
+  EXPECT_EQ(model.ModelPath(), "eos_mock.rules");
+  ASSERT_EQ(model.Slacks().size(), 1u);
+  EXPECT_EQ(model.Slacks()[0].scene, "func_tt");
+  EXPECT_DOUBLE_EQ(model.Slacks()[0].worst_slack_ns, 3.292352835);
+  EXPECT_TRUE(model.StaNote().empty());
+  EXPECT_TRUE(model.Compares().empty());
+
+  ExtractModel compared;
+  ASSERT_TRUE(compared.LoadPayload(kExtractSummaryComparePayload));
+  ASSERT_EQ(compared.Compares().size(), 1u);
+  const ExtractCompare& compare = compared.Compares()[0];
+  EXPECT_EQ(compare.mode, "func");
+  EXPECT_EQ(compare.corner, "tt");
+  EXPECT_EQ(compare.estimate_scene, "func_tt");
+  EXPECT_EQ(compare.extracted_scene, "func_tt_ext");
+  EXPECT_DOUBLE_EQ(compare.estimated_worst_slack_ns, 3.292352835);
+  EXPECT_DOUBLE_EQ(compare.extracted_worst_slack_ns, 3.105);
+  EXPECT_DOUBLE_EQ(compare.estimated_worst_hold_slack_ns,
+                   0.1642400105);
+  EXPECT_DOUBLE_EQ(compare.extracted_worst_hold_slack_ns, 0.15);
+
+  ExtractModel noted;
+  ASSERT_TRUE(noted.LoadPayload(kExtractSummaryNotePayload));
+  EXPECT_TRUE(noted.Slacks().empty());
+  EXPECT_EQ(noted.StaNote(),
+            "sta_slack_ns=unavailable (scene func_tt: could not "
+            "read SDC file)");
+}
+
+TEST(ExtractModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      // No header.
+      "slack scene=func_tt worst_slack_ns=1.25\n",
+      // A header line missing a key (no model).
+      "extract nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+      "spef=clk_top.spef\n",
+      // An unknown key in the header.
+      "extract nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+      "spef=clk_top.spef model=eos_mock.rules bogus=1\n",
+      // A bad number.
+      "extract nets=x rsegs=4200 cap_nodes=2600 cc_segs=120 "
+      "spef=clk_top.spef model=eos_mock.rules\n",
+      // A duplicate slack scene.
+      "extract nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+      "spef=clk_top.spef model=eos_mock.rules\n"
+      "slack scene=func_tt worst_slack_ns=1.25\n"
+      "slack scene=func_tt worst_slack_ns=1.5\n",
+      // A sta_note beside slack lines.
+      "extract nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+      "spef=clk_top.spef model=eos_mock.rules\n"
+      "slack scene=func_tt worst_slack_ns=1.25\n"
+      "sta_note sta_slack_ns=unavailable (x)\n",
+      // A duplicate compare (mode, corner) pair.
+      "extract nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+      "spef=clk_top.spef model=eos_mock.rules\n"
+      "compare mode=func corner=tt estimate_scene=func_tt "
+      "extracted_scene=func_tt_ext estimated_worst_slack_ns=1 "
+      "extracted_worst_slack_ns=2 estimated_worst_hold_slack_ns=3 "
+      "extracted_worst_hold_slack_ns=4\n"
+      "compare mode=func corner=tt estimate_scene=func_tt "
+      "extracted_scene=func_tt_ext estimated_worst_slack_ns=1 "
+      "extracted_worst_slack_ns=2 estimated_worst_hold_slack_ns=3 "
+      "extracted_worst_hold_slack_ns=4\n",
+      // A slack line after a compare line.
+      "extract nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+      "spef=clk_top.spef model=eos_mock.rules\n"
+      "compare mode=func corner=tt estimate_scene=func_tt "
+      "extracted_scene=func_tt_ext estimated_worst_slack_ns=1 "
+      "extracted_worst_slack_ns=2 estimated_worst_hold_slack_ns=3 "
+      "extracted_worst_hold_slack_ns=4\n"
+      "slack scene=func_tt worst_slack_ns=1.25\n",
+      // An unknown line kind.
+      "extract nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+      "spef=clk_top.spef model=eos_mock.rules\n"
+      "bogus x=1\n",
+  };
+  for (const char* payload : bad) {
+    ExtractModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+  // A malformed load keeps the previous model.
+  ExtractModel model;
+  ASSERT_TRUE(model.LoadPayload(kExtractSummaryComparePayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.Compares().size(), 1u);
 }
 
 // Writes one SDC text to a fresh temp file and removes it on
@@ -5470,6 +5615,30 @@ struct AutoNavView {
           return CommandResult::Ok(kRouteSummaryPayload);
         });
     EXPECT_TRUE(route_summary.ok());
+    // F7: the stub extract_parasitics records a run; the stub
+    // extract_summary fails until the record is set, like the
+    // real query.
+    auto extract = registry.Register(
+        "extract_parasitics", "extract_parasitics",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          ctx.extract.extracted = true;
+          ctx.extract.nets_extracted = 185;
+          return CommandResult::Ok(
+              "nets=185 rsegs=4200 cap_nodes=2600 cc_segs=120 "
+              "spef=clk_top.spef");
+        });
+    EXPECT_TRUE(extract.ok());
+    auto extract_summary = registry.Register(
+        "extract_summary", "extract_summary",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          if (!ctx.extract.extracted) {
+            return CommandResult::Fail(
+                eos::ui::Diag::kInvalidConfiguration,
+                "no extraction: eos::extract_parasitics first");
+          }
+          return CommandResult::Ok(kExtractSummaryPayload);
+        });
+    EXPECT_TRUE(extract_summary.ok());
     auto signoff = registry.Register(
         "signoff_summary", "signoff_summary",
         [this](CommandContext&, const std::vector<std::string>&) {
@@ -5665,6 +5834,38 @@ TEST(MainWindowAutoNav, RouteRunShowsRouteCanvas) {
   EXPECT_TRUE(route_button->isEnabled());
   route_button->click();
   EXPECT_TRUE(fixture.view.ShowingRoute());
+}
+
+// F7: the Extract stage button starts disabled, enables once
+// a run is recorded, a console extract_parasitics lands on
+// the Timing tab, and the stage button shows the Timing tab
+// too.
+TEST(MainWindowAutoNav, ExtractRunShowsTimingTab) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  EXPECT_FALSE(window.ExtractEnabled());
+  EXPECT_EQ(window.CurrentTab(), 0);
+  ASSERT_TRUE(fixture.view
+                  .Dispatch("extract_parasitics",
+                            {"clk_top.spef", "-model", "eos_mock.rules"})
+                  .ok);
+  window.Refresh();
+  EXPECT_TRUE(window.ExtractEnabled());
+  EXPECT_EQ(fixture.view.ExtractStep(), StepStatus::kDone);
+  EXPECT_TRUE(fixture.view.Extract().Loaded());
+  EXPECT_EQ(window.CurrentTab(), 3);
+  // Move away through the stepper's Read step (Sources tab),
+  // then take the Extract stage button back to Timing.
+  QPushButton* read = AutoNavButtonWithPrefix(window, "Read");
+  ASSERT_NE(read, nullptr);
+  read->click();
+  EXPECT_EQ(window.CurrentTab(), 1);
+  QPushButton* extract_button =
+      AutoNavButtonWithPrefix(window, "Extract");
+  ASSERT_NE(extract_button, nullptr);
+  EXPECT_TRUE(extract_button->isEnabled());
+  extract_button->click();
+  EXPECT_EQ(window.CurrentTab(), 3);
 }
 
 // A SessionView with the nested hierarchy, so the center can
@@ -5987,6 +6188,45 @@ TEST(PanelsView, ClocksTabAppendsCtsSection) {
             std::string::npos);
   EXPECT_NE(text.find(" sta_slack_ns=unavailable (scene func_tt: "
                       "could not read SDC file)"),
+            std::string::npos);
+}
+
+// F7: the Timing tab appends the Extraction section from
+// the record when the Extract model is loaded, and shows
+// nothing extra when it is empty.
+TEST(PanelsView, TimingTabAppendsExtractSection) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterExtractSummaryCommand(registry,
+                                kExtractSummaryComparePayload, true);
+  CommandContext context;
+  SessionView view(registry, context);
+  PanelsView bare(view);
+  auto* bare_timing = qobject_cast<QPlainTextEdit*>(bare.widget(3));
+  ASSERT_NE(bare_timing, nullptr);
+  EXPECT_EQ(bare_timing->toPlainText().toStdString().find(
+                "Extraction (post-route):"),
+            std::string::npos);
+  view.RefreshExtract();
+  PanelsView panels(view);
+  auto* timing = qobject_cast<QPlainTextEdit*>(panels.widget(3));
+  ASSERT_NE(timing, nullptr);
+  const std::string text = timing->toPlainText().toStdString();
+  EXPECT_NE(text.find("Extraction (post-route):"),
+            std::string::npos);
+  EXPECT_NE(text.find(" nets 185, RSEGs 4200, capacitance "
+                      "nodes 2600, coupling segments 120"),
+            std::string::npos);
+  EXPECT_NE(text.find(" SPEF: clk_top.spef"), std::string::npos);
+  EXPECT_NE(text.find(" model: eos_mock.rules"),
+            std::string::npos);
+  EXPECT_NE(text.find(" post-route estimated worst slack "
+                      "(func_tt): 3.292352835 ns"),
+            std::string::npos);
+  EXPECT_NE(text.find(" func/tt: estimated 3.292352835 ns "
+                      "(scene func_tt) vs extracted 3.105 ns "
+                      "(scene func_tt_ext); hold 0.1642400105 "
+                      "ns vs 0.15 ns"),
             std::string::npos);
 }
 
@@ -6506,6 +6746,41 @@ TEST(GuiSessionView, RefreshRouteStaysEmptyOnFailedQuery) {
   SessionView view(registry, context);
   view.RefreshRoute();
   EXPECT_FALSE(view.Route().Loaded());
+  EXPECT_TRUE(view.Messages().empty());
+}
+
+// F7: RefreshExtract populates the Extract model from the
+// recorded extract run without echoing the query, and the
+// extract step stays pending until the session record says a
+// run happened.
+TEST(GuiSessionView, RefreshExtractPopulatesModelWithoutEcho) {
+  CommandRegistry registry;
+  RegisterExtractSummaryCommand(registry,
+                                kExtractSummaryComparePayload, true);
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_EQ(view.ExtractStep(), StepStatus::kPending);
+  view.RefreshExtract();
+  EXPECT_TRUE(view.Extract().Loaded());
+  EXPECT_EQ(view.Extract().Nets(), 185u);
+  EXPECT_EQ(view.Extract().Compares().size(), 1u);
+  EXPECT_TRUE(view.EchoLog().empty());
+  EXPECT_EQ(view.ExtractStep(), StepStatus::kPending);
+  context.extract.extracted = true;
+  EXPECT_EQ(view.ExtractStep(), StepStatus::kDone);
+}
+
+// F7: in a fresh session the query fails fast, so the model
+// stays empty and no message is logged (the guarded refresh
+// posture every stage view shares).
+TEST(GuiSessionView, RefreshExtractStaysEmptyOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterExtractSummaryCommand(registry, kExtractSummaryPayload,
+                                false);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshExtract();
+  EXPECT_FALSE(view.Extract().Loaded());
   EXPECT_TRUE(view.Messages().empty());
 }
 
