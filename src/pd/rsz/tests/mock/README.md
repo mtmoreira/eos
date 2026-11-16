@@ -46,7 +46,8 @@ engine feature be tested in CI without any real PDK file.
 - `eos_mock.tlef`: 10 routing layers. Tech-derived wire scalars
   (R = RPERSQ / width, C = CPERSQDIST * width +
   2 * EDGECAPACITANCE, per the command formula):
-  - em1: R 1,000,000 ohm/m, C 5.0e-08 F/m
+  - em1: R 4,000,000 ohm/m, C 4.25e-08 F/m (fine metal:
+    0.05 um wide on a 0.1 um pitch, see the F6 note below)
   - em2: R 750,000 ohm/m, C 3.8e-08 F/m
   - em3: R 333,333.33 ohm/m, C 3.3e-08 F/m
   - em4: R 175,000 ohm/m, C 3.0e-08 F/m
@@ -59,11 +60,19 @@ engine feature be tested in CI without any real PDK file.
   The default layer is the lowest-numbered complete routing
   layer (em1). The negative wire3 case uses em99, which is
   absent from this file by design, so the same fail-fast branch
-  fires with the layer named in the message. Layers em4 and
+  fires with the layer named in the message. Layer directions
+  strictly alternate starting with em1 horizontal (em1 H, em2
+  V, em3 H, ...); the global router fails the run with
+  GRT-0126 when two adjacent routing layers share a
+  direction, which is how the F6 route probe caught em5
+  listed VERTICAL (duplicating em4) in the first place. Layers em4 and
   em6 through em10 exist because the setup2 and tie5 DEFs
   reference those layers in TRACKS statements, and the DEF
   parser rejects undefined layers; they carry no repair
-  semantics in v1.
+  semantics in v1. `MANUFACTURINGGRID 0.005` is required:
+  without it the tech reports a zero manufacturing grid and
+  the detailed router's off-grid pin check divides by it
+  (SIGFPE), which the F6 route probe hit next.
 - `eos_mock.tlef` DRC rules (invented fixture values, added
   2026-11-10 for the F13 DRC engine; documented as invented,
   never process data): per routing layer, SPACING =
@@ -71,9 +80,35 @@ engine feature be tested in CI without any real PDK file.
   width * 0.1 um2, MINSTEP = 0.1 um. SPACING equals the
   edge-to-edge distance between adjacent-track wires, so
   router output on adjacent tracks sits exactly at the rule.
-  No cut layers and no VIA definitions exist in the mock;
-  via enclosure and cut spacing are exercised by the DRC
-  engine unit tests with their own inline fixtures.
+  Cut layers via1..via9 and vias VIA12..VIA910 exist
+  (added F6). The detailed router's pin access gives pins
+  on the lowest layers no planar access, so a pin's only
+  access is a via up, and the via check needs a via
+  definition to grant it; with no vias every pin on em1
+  got zero access points (DRT-0073). Each via's metal
+  rect is a square of the layer's own wire width and the
+  cut is half the narrower width. The cut layers are
+  interleaved between the routing layers: a via's layers
+  must be consecutive in the tech's layer order, or the
+  router fails with DRT-0126. Via enclosure and cut
+  spacing rules are still exercised by the DRC engine unit
+  tests with their own inline fixtures, not by this file's
+  values.
+- em1 is finer than the stack's ladder (0.05 um wide on a
+  0.1 um pitch, against 0.2 um pins), added F6: the
+  detailed router's pin-access stub is three wire widths
+  long, and at the stack's 0.2 um width it reaches the
+  edge-abutting cells' pins and fails the via check for
+  every top-level pin (DRT-0074), while the fine width
+  keeps the stub short enough to pass. The fine width
+  changes em1's derived RC (R 4,000,000, C 4.25e-08), so
+  the 16 RSZ mock golden verdicts that pin it were
+  re-baselined with it: 13 changed only in RC and slack
+  values (repair decisions identical), 3 changed in
+  inserted-buffer counts as well (fanout3 64 to 55, hold1
+  18 to 16, hold2 8 to 7; fewer buffers because the lower
+  wire C needs less drive, hold slack better in each case,
+  status still ok).
 - `port_cases.py`: ports the original suite cases onto the mock
   (see "Porting transform" below). Deterministic: re-running
   overwrites identical bytes.
@@ -305,7 +340,7 @@ All 14 runnable cases pass twice with byte-identical verdict
 lines (determinism checked by running each case twice and
 diffing). Verdicts are pinned in repair_<case>.ok. Tech
 scalars match the model exactly where reported (em1
-1,000,000 ohm/m and 5.0e-08 F/m; em3 333,333.33 and 3.3e-08).
+4,000,000 ohm/m and 4.25e-08 F/m; em3 333,333.33 and 3.3e-08).
 
 Action summary (from the .ok files):
 - setup1: setup path acts, 5 buffers inserted, WNS -59.98 to

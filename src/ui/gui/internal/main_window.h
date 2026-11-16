@@ -58,6 +58,7 @@ class MainWindow : public QMainWindow {
   int CurrentTab() const;
   bool SynthesisEnabled() const;
   bool CtsEnabled() const;
+  bool RouteEnabled() const;
   bool SignoffEnabled() const;
 
   // Records that the terminal stdin reached EOF (U6). A window
@@ -110,7 +111,8 @@ class MainWindow : public QMainWindow {
   // is loaded. Synthesis shows the Results tab's synthesis
   // section once elaboration is done; it stays a plain
   // navigation button, with no bold state. CTS shows the
-  // Clocks tab once a CTS run is recorded. Signoff shows the
+  // Clocks tab once a CTS run is recorded. Route shows the
+  // routing canvas once a route run is recorded. Signoff shows the
   // Signoff tab once verdicts are loaded. The other later
   // stages stay greyed labels until their units land.
   QPushButton* elaboration_button_ = nullptr;
@@ -118,6 +120,7 @@ class MainWindow : public QMainWindow {
   QPushButton* floorplan_button_ = nullptr;
   QPushButton* placement_button_ = nullptr;
   QPushButton* cts_button_ = nullptr;
+  QPushButton* route_button_ = nullptr;
   QPushButton* signoff_button_ = nullptr;
   HierarchyBrowser* browser_ = nullptr;
   CenterView* center_ = nullptr;

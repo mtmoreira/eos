@@ -64,7 +64,9 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   // section. Place is a button too: it stays disabled until a
   // placement is loaded, and shows the placement canvas.
   // CTS is a button too: it stays disabled until a CTS run is
-  // recorded, and shows the Clocks tab. Signoff is a button
+  // recorded, and shows the Clocks tab. Route is a button too:
+  // it stays disabled until a route run is recorded, and shows
+  // the routing canvas. Signoff is a button
   // too: it stays disabled until signoff verdicts are loaded,
   // and shows the Signoff tab.
   // Elaboration, Floorplan, and Place are flat buttons, not labels: the
@@ -80,6 +82,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   connect(elaboration_button_, &QPushButton::clicked, [this]() {
     view_.ShowFloorplan(false);
     view_.ShowPlacement(false);
+    view_.ShowRoute(false);
     Refresh();
   });
   for (const char* stage : kLaterStages) {
@@ -103,6 +106,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       stages_layout->addWidget(floorplan_button_);
       connect(floorplan_button_, &QPushButton::clicked, [this]() {
         view_.ShowPlacement(false);
+        view_.ShowRoute(false);
         view_.ShowFloorplan(true);
         Refresh();
       });
@@ -115,6 +119,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       stages_layout->addWidget(placement_button_);
       connect(placement_button_, &QPushButton::clicked, [this]() {
         view_.ShowFloorplan(false);
+        view_.ShowRoute(false);
         view_.ShowPlacement(true);
         Refresh();
       });
@@ -128,7 +133,21 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       connect(cts_button_, &QPushButton::clicked, [this]() {
         // PanelsView is created below; clicks only happen after
         // construction, so it is set by then.
+        view_.ShowRoute(false);
         panels_->ShowTab(4);
+        Refresh();
+      });
+      continue;
+    }
+    if (std::string(stage) == "Route") {
+      route_button_ = new QPushButton(stage, stages);
+      route_button_->setFlat(true);
+      route_button_->setEnabled(false);
+      stages_layout->addWidget(route_button_);
+      connect(route_button_, &QPushButton::clicked, [this]() {
+        view_.ShowFloorplan(false);
+        view_.ShowPlacement(false);
+        view_.ShowRoute(true);
         Refresh();
       });
       continue;
@@ -189,11 +208,12 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   browser_ = new HierarchyBrowser(view_, middle);
   browser_->SetSelectionCallback([this]() {
     // Hierarchy navigation shows the hierarchy views: it
-    // clears the floorplan and placement stages, so a click in
-    // the tree never leaves the user on a floorplan or
-    // placement canvas for a different level.
+    // clears the floorplan, placement, and route stages, so a click in
+    // the tree never leaves the user on a floorplan,
+    // placement, or routing canvas for a different level.
     view_.ShowFloorplan(false);
     view_.ShowPlacement(false);
+    view_.ShowRoute(false);
     view_.SetDiagramLevel(view_.SelectedHierarchyPath());
     Refresh();
   });
@@ -304,6 +324,10 @@ bool MainWindow::SynthesisEnabled() const {
 
 bool MainWindow::CtsEnabled() const {
   return cts_button_ != nullptr && cts_button_->isEnabled();
+}
+
+bool MainWindow::RouteEnabled() const {
+  return route_button_ != nullptr && route_button_->isEnabled();
 }
 
 bool MainWindow::SignoffEnabled() const {
@@ -424,6 +448,7 @@ void MainWindow::Refresh() {
   view_.RefreshPlacement();
   view_.RefreshClockNetwork();
   view_.RefreshCts();
+  view_.RefreshRoute();
   view_.RefreshSignoff();
   view_.RefreshLog();
   browser_->Refresh();
@@ -484,6 +509,17 @@ void MainWindow::RefreshSteps() {
   // still loaded.
   if (cts_button_ != nullptr) {
     cts_button_->setEnabled(view_.Cts().Loaded());
+  }
+  // Route stays disabled until a route run is recorded, and
+  // stays enabled once it is: the flag comes from the live
+  // model, so a later refresh never disables it while the
+  // record is still loaded. It is bold while the routing
+  // canvas is showing, following the placement button's
+  // pattern.
+  if (route_button_ != nullptr) {
+    route_button_->setEnabled(view_.Route().Loaded());
+    route_button_->setStyleSheet(
+        view_.ShowingRoute() ? "font-weight: bold;" : "");
   }
   // Signoff stays disabled until verdicts are loaded, and stays
   // enabled once they are: the flag comes from the live model,

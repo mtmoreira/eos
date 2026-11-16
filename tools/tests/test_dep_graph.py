@@ -313,7 +313,10 @@ def test_real_repo_check_passes_and_rules_hold():
     # The waiver model unit adds db.waivers, the 69th ctest entry.
     # The F13 DRC engine unit adds pv.drc, the 70th ctest entry.
     # The clock-network unit adds io.sdc, the 71st ctest entry.
-    assert len(all_tests) == 71
+    # F6 splits the six clocked route tests out of ui.registry
+    # into per-test entries (fresh process each, design section
+    # 14), the 72nd through 77th ctest entries.
+    assert len(all_tests) == 77
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),

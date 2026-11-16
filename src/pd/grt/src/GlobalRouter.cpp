@@ -2433,6 +2433,28 @@ void GlobalRouter::initGrid(int max_layer)
   int x_grids = upper_rightX / tile_size;
   int y_grids = upper_rightY / tile_size;
 
+  // FastRoute's edge arrays need at least two grid cells per
+  // dimension (h_edges is [y][x-1], v_edges is [x][y-1]), and
+  // a net whose pins share one cell is treated as local, so a
+  // die smaller than one tile collapses the whole design into
+  // a single cell and the router aborts (or errors on local
+  // nets whose pins sit on different tracks). Shrink the tile
+  // so the die holds at least two cells per side, keeping the
+  // tile a whole number of track pitches. Dies that already
+  // hold two or more cells per side are untouched.
+  if ((x_grids < 2 || y_grids < 2) && track_spacing > 0) {
+    const int min_side = std::min(upper_rightX, upper_rightY);
+    int shrunk = (min_side / 2 / track_spacing) * track_spacing;
+    if (shrunk < track_spacing) {
+      shrunk = track_spacing;
+    }
+    if (shrunk < tile_size) {
+      tile_size = shrunk;
+      x_grids = upper_rightX / tile_size;
+      y_grids = upper_rightY / tile_size;
+    }
+  }
+
   bool perfect_regular_x = (x_grids * tile_size) == upper_rightX;
   bool perfect_regular_y = (y_grids * tile_size) == upper_rightY;
 

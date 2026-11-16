@@ -10,6 +10,7 @@ add_library(eda_ui_gui STATIC
   src/gui_session.cc
   src/clock_network.cc
   src/cts.cc
+  src/route.cc
   src/console_entry.cc
   src/diagram.cc
   src/floorplan.cc
@@ -32,6 +33,7 @@ if(Qt6_FOUND)
     src/center_view.cc
     src/floorplan_diagram.cc
     src/placement_diagram.cc
+    src/route_diagram.cc
     src/schematic_diagram.cc
     src/panels_view.cc
     src/splash_screen.cc

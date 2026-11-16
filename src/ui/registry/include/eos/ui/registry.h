@@ -313,6 +313,54 @@ struct CommandContext {
   };
   CtsSession cts;
 
+  // Route session state (full-flow GUI unit F6): the record of
+  // the most recent successful eos::route run, so the
+  // route_summary query can report the run's numbers (the
+  // engine's counts, the per-layer congestion sums, the
+  // Liberty corner, the run's post-route STA outcome)
+  // without re-running the engine or re-walking the database.
+  // Like the place and CTS sessions, this is interface
+  // session state, not project state: it is cleared when the
+  // design closes (ResetProject), and a restore does not
+  // bring it back. Only a successful route run updates it; a
+  // failed run leaves the previous record untouched, exactly
+  // like a failed place leaves the place record. Unlike the
+  // CTS session it is a single run, not one entry per net:
+  // one invocation routes the whole design, so a later
+  // successful run replaces the record (a re-run genuinely
+  // re-routes: the runner strips prior guides and wires
+  // first). The wire geometry itself is never stored here:
+  // it comes from the live database at query time through
+  // QueryRouteGeometry, so a later route run's geometry is
+  // what the query reports. scene_slacks holds the post-route
+  // worst slack per scene the run analyzed; when the run's
+  // STA leg could not analyze, sta_note holds the payload's
+  // unavailable statement verbatim instead and scene_slacks
+  // is empty.
+  struct RouteSession {
+    struct LayerResult {
+      int number = 0;
+      std::string name;
+      long long capacity = 0;
+      long long usage = 0;
+      long long overflow = 0;
+    };
+    bool routed = false;
+    int routed_count = 0;
+    int total_count = 0;
+    int guide_count = 0;
+    long long total_overflow = 0;
+    int violation_count = 0;
+    int detailed_iterations = 0;
+    int detailed_bound = 0;
+    bool stopped_at_bound = false;
+    std::vector<LayerResult> layers;
+    std::string liberty_corner;
+    std::vector<std::pair<std::string, double>> scene_slacks;
+    std::string sta_note;
+  };
+  RouteSession route;
+
   // Synthesis session state (unit S1): the design the synthesis
   // commands have parsed, elaborated and generically optimized,
   // as one advancing state machine. Like the timing session,

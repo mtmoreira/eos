@@ -858,20 +858,27 @@ void FastRouteCore::mazeRouteMSMDOrder3D(int expand,
                                          int ripupTHlb,
                                          int ripupTHub)
 {
-  static multi_array<Direction, 3> directions_3D(
+  // Scratch for the 3D maze search. These were function-statics
+  // sized by the first call's grid, which is wrong when the
+  // grid changes between runs in one process (a smaller grid
+  // first leaves a larger grid indexing out of bounds and
+  // aborting in Boost multi_array): they are per-edge scratch,
+  // rewritten before use for every edge below, so they are
+  // plain locals sized by the current grid on every call.
+  multi_array<Direction, 3> directions_3D(
       boost::extents[num_layers_][y_grid_][x_grid_]);
-  static multi_array<int, 3> corr_edge_3D(
+  multi_array<int, 3> corr_edge_3D(
       boost::extents[num_layers_][y_grid_][x_grid_]);
-  static multi_array<parent3D, 3> pr_3D_(
+  multi_array<parent3D, 3> pr_3D_(
       boost::extents[num_layers_][y_grid_][x_grid_]);
 
   int64 total_size = static_cast<int64>(num_layers_) * y_range_ * x_range_;
-  static std::vector<bool> pop_heap2_3D(total_size, false);
+  std::vector<bool> pop_heap2_3D(total_size, false);
 
   // allocate memory for priority queue
   total_size = static_cast<int64>(y_grid_) * x_grid_ * num_layers_;
-  static std::vector<int*> src_heap_3D(total_size);
-  static std::vector<int*> dest_heap_3D(total_size);
+  std::vector<int*> src_heap_3D(total_size);
+  std::vector<int*> dest_heap_3D(total_size);
 
   for (int i = 0; i < y_grid_; i++) {
     for (int j = 0; j < x_grid_; j++) {
@@ -881,9 +888,9 @@ void FastRouteCore::mazeRouteMSMDOrder3D(int expand,
 
   const int endIND = tree_order_pv_.size() * 0.9;
 
-  static multi_array<int, 3> d1_3D(
+  multi_array<int, 3> d1_3D(
       boost::extents[num_layers_][y_range_][x_range_]);
-  static multi_array<int, 3> d2_3D(
+  multi_array<int, 3> d2_3D(
       boost::extents[num_layers_][y_range_][x_range_]);
 
   for (int orderIndex = 0; orderIndex < endIND; orderIndex++) {

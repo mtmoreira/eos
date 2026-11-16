@@ -146,6 +146,54 @@ struct RouteReport {
 Status RunRoute(odb::dbDatabase* db, const RouteOptions& options,
                 RouteReport* report);
 
+// One routed path segment: one maximal straight run on one
+// layer, as the dbWire decoder emits it (a PATH, JUNCTION,
+// SHORT, or VWIRE run), with the layer's name, the wire width
+// the run carries, and its centerline points in database units
+// (at least two points; a junction point seeds a branch run,
+// so a branch's first segment runs from the junction point).
+struct RouteWireSegment {
+  std::string net;
+  std::string layer;
+  int width = 0;
+  std::vector<std::pair<int, int>> points;
+};
+
+// One via the wire encoding yields: the net, the lower and
+// upper routing layer names of the via's layer pair, and the
+// via's placed point in database units.
+struct RouteVia {
+  std::string net;
+  std::string lower_layer;
+  std::string upper_layer;
+  int x = 0;
+  int y = 0;
+};
+
+// The routed geometry of the block's signal nets: every
+// segment and via the live database holds, plus the signal
+// nets with no wire at all. A net lands in unwired_nets when
+// it has no dbWire; the query reports the database as it is
+// and never fails for an unwired net.
+struct RouteGeometry {
+  std::vector<RouteWireSegment> segments;
+  std::vector<RouteVia> vias;
+  std::vector<std::string> unwired_nets;
+};
+
+// Reads the routed geometry from the live database (full-flow
+// GUI unit F6): walks the signal nets of the top block and
+// decodes each net's dbWire with odb::dbWireDecoder into
+// segments and vias, following the decoding pattern the
+// in-tree DRC engine's DecodeWire proves (a path run is
+// flushed whenever a new path, junction, short, virtual wire,
+// via, tech via, or patch rect starts). It runs no engine and
+// mutates nothing. Supply and special nets are skipped, the
+// same set the runner never routes. Fails with kInvalidState
+// when the database holds no technology data or no top block.
+Status QueryRouteGeometry(odb::dbDatabase* db,
+                          RouteGeometry* geometry);
+
 }  // namespace eos::pd
 
 #endif  // EOS_PD_ROUTE_H_

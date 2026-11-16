@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <string>
 
@@ -102,7 +103,8 @@ TEST(Registry, CoreSetIsComplete) {
   // insert_buffer, and remove_buffer (four commands).
   // The clock-network unit adds clock_network_summary (one command).
   // The F5 CTS unit adds cts_summary (one command).
-  EXPECT_EQ(shell.registry.Names().size(), 125u);
+  // The F6 route unit adds route_summary (one command).
+  EXPECT_EQ(shell.registry.Names().size(), 126u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -111,6 +113,7 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("create_generated_clock"), nullptr);
   EXPECT_NE(shell.registry.Find("clock_network_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("cts_summary"), nullptr);
+  EXPECT_NE(shell.registry.Find("route_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("set_waiver"), nullptr);
@@ -11556,6 +11559,436 @@ TEST(CoreCommands, CtsOnClocklessOptloopFailsFast) {
   EXPECT_EQ(summary.diag, Diag::kInvalidConfiguration);
   EXPECT_NE(summary.message.find("no clock tree: eos::cts first"),
             std::string::npos);
+}
+
+// The clocked demo session through route (the F5 chain, then
+// one bare route run), the starting point of the F6 route
+// acceptance tests.
+static void BuildRoutedClockedDemoSession(Shell& shell,
+                                          TimingTempDir& dir) {
+  BuildPlacedClockedDemoSession(shell, dir);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
+  const CommandResult route = shell.Run("route", {});
+  ASSERT_TRUE(route.ok) << route.message;
+}
+
+// Parses one integer header value out of a route payload's
+// first line ("key=<value>" among space-separated terms).
+// Returns -1 when the key is absent or the value is not an
+// integer; the tests assert on the returned value, so a
+// missing key fails loudly instead of passing silently.
+static long long RouteHeaderInt(const std::string& payload,
+                                const std::string& key) {
+  const std::string token = key + "=";
+  const std::size_t at = payload.find(token);
+  if (at == std::string::npos) return -1;
+  const std::size_t begin = at + token.size();
+  std::size_t end = begin;
+  while (end < payload.size() && payload[end] != ' ' &&
+         payload[end] != '\n') {
+    ++end;
+  }
+  if (end == begin) return -1;
+  try {
+    return std::stoll(payload.substr(begin, end - begin));
+  } catch (...) {
+    return -1;
+  }
+}
+
+// Counts the lines of a route_summary payload starting with
+// the given tag ("layer ", "wire ", "via ", "unwired ").
+static int CountRouteLines(const std::string& payload,
+                           const std::string& tag) {
+  int count = 0;
+  std::istringstream in(payload);
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.rfind(tag, 0) == 0) ++count;
+  }
+  return count;
+}
+
+// Counts the distinct nets named on the wire lines of a
+// route_summary payload.
+static int CountWiredNets(const std::string& payload) {
+  std::set<std::string> nets;
+  std::istringstream in(payload);
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.rfind("wire net=", 0) != 0) continue;
+    const std::size_t begin = std::string("wire net=").size();
+    const std::size_t end = line.find(' ', begin);
+    if (end == std::string::npos) continue;
+    nets.insert(line.substr(begin, end - begin));
+  }
+  return static_cast<int>(nets.size());
+}
+
+// Whether the wire lines of a route_summary payload carry at
+// least one segment for the named net.
+static bool NetHasWire(const std::string& payload,
+                       const std::string& net) {
+  return payload.find("wire net=" + net + " ") != std::string::npos;
+}
+
+// F6 A1 + A2: the full chain runs in one session through the
+// bare route call; routed equals total (the test parses the
+// payload's total rather than asserting a figure the design
+// invents); guides are above zero; one layer term per routing
+// layer in the default range (10 on the mock, em1 through
+// em10); detailed iterations stay within the bound of 64; and
+// stopped_at_bound is false exactly when violations are zero.
+// Overflow and violations are recorded whatever they measure
+// (the design judges them as reported, never failed on). The
+// payload ends with the STA unavailable statement verbatim,
+// the same statement place and both cts payloads carry on
+// this design.
+TEST(CoreCommands, RouteRunsClockedDemoEndToEnd) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildPlacedClockedDemoSession(shell, dir);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
+  const CommandResult result = shell.Run("route", {});
+  ASSERT_TRUE(result.ok) << result.message;
+  const long long routed = RouteHeaderInt(result.payload, "routed");
+  const long long total = RouteHeaderInt(result.payload, "total");
+  ASSERT_GE(routed, 0);
+  ASSERT_GE(total, 0);
+  EXPECT_EQ(routed, total);
+  EXPECT_GT(RouteHeaderInt(result.payload, "guides"), 0);
+  EXPECT_NE(result.payload.find("layer_1=em1"), std::string::npos);
+  EXPECT_NE(result.payload.find("layer_10=em10"), std::string::npos);
+  EXPECT_EQ(RouteHeaderInt(result.payload, "detailed_bound"), 64);
+  const long long iterations =
+      RouteHeaderInt(result.payload, "detailed_iterations");
+  EXPECT_GE(iterations, 1);
+  EXPECT_LE(iterations, 64);
+  const long long violations =
+      RouteHeaderInt(result.payload, "violations");
+  ASSERT_GE(violations, 0);
+  const bool stopped =
+      result.payload.find("stopped_at_bound=true") != std::string::npos;
+  EXPECT_EQ(stopped, violations > 0 && iterations >= 64);
+  EXPECT_NE(result.payload.find("liberty_corner=tt"), std::string::npos);
+  EXPECT_NE(result.payload.find(
+                "sta_slack_ns=unavailable (scene func_tt: could not "
+                "read SDC file: "),
+            std::string::npos);
+  EXPECT_NE(result.payload.find(
+                "clk_top.sdc: Error 374: clk_top.sdc line 2, empty "
+                "ports/pins/nets argument.)"),
+            std::string::npos);
+}
+
+// F6 A3, the fail-fast half: route_summary with an empty
+// record, in a fresh session and in a placed session that
+// has run CTS but not route.
+TEST(CoreCommands, RouteSummaryFailsFastWithoutRoute) {
+  Shell shell;
+  const CommandResult fresh = shell.Run("route_summary");
+  ASSERT_FALSE(fresh.ok);
+  EXPECT_EQ(fresh.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(fresh.message.find("no routing: eos::route first"),
+            std::string::npos);
+
+  TimingTempDir dir;
+  Shell placed;
+  BuildPlacedClockedDemoSession(placed, dir);
+  ASSERT_TRUE(placed.Run("cts", {"-clock", "clk"}).ok);
+  const CommandResult result = placed.Run("route_summary");
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no routing: eos::route first"),
+            std::string::npos);
+  EXPECT_FALSE(placed.ctx.route.routed);
+}
+
+// F6 A3 + A5: after the run, route_summary returns the
+// record line by line (header counts equal to the route
+// payload's, one layer line per layer in range with the
+// payload's per-layer numbers, the sta_note equal to the
+// run's unavailable statement), and the geometry
+// cross-check: at least one wire segment for every routed
+// net, the clk and div_q nets wired, and the unwired net
+// count matching the header's routed-versus-total gap.
+TEST(CoreCommands, RouteSummaryReportsRecordedRun) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildPlacedClockedDemoSession(shell, dir);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
+  const CommandResult route = shell.Run("route", {});
+  ASSERT_TRUE(route.ok) << route.message;
+  ASSERT_TRUE(shell.ctx.route.routed);
+  const CommandResult summary = shell.Run("route_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  // The summary must reproduce the record line by line. The
+  // recorded sta_note names the SDC by the path the session
+  // read it from, so the expected payload takes the note from
+  // the record itself and pins its shape separately.
+  ASSERT_TRUE(shell.ctx.route.scene_slacks.empty());
+  EXPECT_NE(shell.ctx.route.sta_note.find(
+                "sta_slack_ns=unavailable (scene func_tt: could "
+                "not read SDC file: "),
+            std::string::npos);
+  EXPECT_NE(shell.ctx.route.sta_note.find(
+                "clk_top.sdc: Error 374: clk_top.sdc line 2, "
+                "empty ports/pins/nets argument.)"),
+            std::string::npos);
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "routed"),
+            RouteHeaderInt(route.payload, "routed"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "total"),
+            RouteHeaderInt(route.payload, "total"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "guides"),
+            RouteHeaderInt(route.payload, "guides"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "overflow"),
+            RouteHeaderInt(route.payload, "overflow"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "violations"),
+            RouteHeaderInt(route.payload, "violations"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "detailed_iterations"),
+            RouteHeaderInt(route.payload, "detailed_iterations"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "detailed_bound"),
+            RouteHeaderInt(route.payload, "detailed_bound"));
+  EXPECT_NE(summary.payload.find("liberty_corner=tt"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("die="), std::string::npos);
+  EXPECT_NE(summary.payload.find("core="), std::string::npos);
+  // One layer line per layer in range (10 on the mock), with
+  // the payload's per-layer numbers.
+  EXPECT_EQ(CountRouteLines(summary.payload, "layer "), 10);
+  for (int layer = 1; layer <= 10; ++layer) {
+    const std::string term =
+        "layer number=" + std::to_string(layer) + " name=em" +
+        std::to_string(layer) + " ";
+    EXPECT_NE(summary.payload.find(term), std::string::npos)
+        << "missing layer line: " << term;
+  }
+  // The geometry cross-check (A5): every routed net has at
+  // least one segment, clk and div_q are wired, and the
+  // unwired count matches the header gap exactly.
+  const long long routed = RouteHeaderInt(summary.payload, "routed");
+  const long long total = RouteHeaderInt(summary.payload, "total");
+  EXPECT_EQ(CountWiredNets(summary.payload), routed);
+  EXPECT_TRUE(NetHasWire(summary.payload, "clk"));
+  EXPECT_TRUE(NetHasWire(summary.payload, "div_q"));
+  EXPECT_EQ(CountRouteLines(summary.payload, "unwired "),
+            static_cast<int>(total - routed));
+  EXPECT_NE(summary.payload.find("sta_note " + shell.ctx.route.sta_note),
+            std::string::npos);
+}
+
+// F6 record semantics: a second route in the same session
+// succeeds (the runner strips prior guides and wires, so a
+// re-run genuinely re-routes) and the record and
+// route_summary hold the second run's numbers, whatever they
+// measure; the test asserts record-equals-second-payload, not
+// fixed counts.
+TEST(CoreCommands, RouteRerunReplacesRecord) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildRoutedClockedDemoSession(shell, dir);
+  const CommandResult first = shell.Run("route", {});
+  ASSERT_TRUE(first.ok) << first.message;
+  const CommandResult second = shell.Run("route", {});
+  ASSERT_TRUE(second.ok) << second.message;
+  ASSERT_TRUE(shell.ctx.route.routed);
+  const CommandResult summary = shell.Run("route_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "routed"),
+            RouteHeaderInt(second.payload, "routed"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "total"),
+            RouteHeaderInt(second.payload, "total"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "guides"),
+            RouteHeaderInt(second.payload, "guides"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "violations"),
+            RouteHeaderInt(second.payload, "violations"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "detailed_iterations"),
+            RouteHeaderInt(second.payload, "detailed_iterations"));
+}
+
+// F6 A5, the clock view after route: routing moves no
+// instance and rebuilds no tree, so clock_network_summary
+// still shows both trees per pin with the same sink counts
+// and buffer nodes as after CTS.
+TEST(CoreCommands, RouteLeavesClockViewUnchanged) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildRoutedClockedDemoSession(shell, dir);
+  const CommandResult pins = shell.Run("clock_network_summary");
+  ASSERT_TRUE(pins.ok) << pins.message;
+  EXPECT_NE(pins.payload.find("stage=mapped clocks=2"),
+            std::string::npos);
+  EXPECT_NE(pins.payload.find(
+                "clock name=clk generated=0 period=5 rise=0 fall=2.5 "
+                "skew=0.1 source={clk} sinks=23 latency=- master=- "
+                "modification=- tree=pins"),
+            std::string::npos);
+  EXPECT_NE(pins.payload.find(
+                "clock name=clk_div generated=1 period=10 rise=0 "
+                "fall=5 skew=0.1 source={u_div/q} sinks=8 latency=- "
+                "master=clk modification={divide_by(2)} tree=pins"),
+            std::string::npos);
+  EXPECT_NE(pins.payload.find(
+                "name={u_div/_17_} pin=CK count=- generates=clk_div"),
+            std::string::npos);
+  EXPECT_EQ(CountCtsBufferNodes(shell, pins.payload, "clk"), 3);
+  EXPECT_EQ(CountCtsBufferNodes(shell, pins.payload, "clk_div"), 3);
+}
+
+// F6 A4 as judged (the place-stage posture): run_timing's
+// behavior after route matches its behavior at the place
+// stage on the same session: the same failure, introduced
+// by the SDC pin resolution gap that predates F6, with no
+// new failure mode from routing.
+TEST(CoreCommands, RouteRunTimingPostureUnchanged) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildPlacedClockedDemoSession(shell, dir);
+  const CommandResult before = shell.Run("run_timing");
+  ASSERT_FALSE(before.ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
+  ASSERT_TRUE(shell.Run("route", {}).ok);
+  const CommandResult after = shell.Run("run_timing");
+  ASSERT_FALSE(after.ok);
+  EXPECT_EQ(after.diag, before.diag);
+  EXPECT_EQ(after.message, before.message);
+}
+
+// F6 A7: on demo/synth, after the optloop flow through
+// place, bare route succeeds: route needs a placed design
+// and a Liberty, not a clock. The mirror image of F5's A8.
+TEST(CoreCommands, RouteOnClocklessOptloopSucceeds) {
+  TimingTempDir dir;
+  Shell shell;
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const std::string demo_dir = EOS_DEMO_SYNTH_DIR;
+  ASSERT_TRUE(shell.Run("create_scenario",
+                        {"func_tt", "func", "tt", "estimate"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("read_liberty", {"tt", mock_dir + "/eos_mock.lib"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("read_verilog", {demo_dir + "/optloop.v", "optloop"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  ASSERT_TRUE(shell.Run("synth_map", {"-target", "area"}).ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {demo_dir + "/top.sdc"}).ok);
+  const std::string def_path = dir.Path("optloop.def");
+  ASSERT_TRUE(shell.Run("write_def",
+                        {def_path, "-lef", mock_dir + "/eos_mock.lef",
+                         "-tlef", mock_dir + "/eos_mock.tlef"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.tlef"}).ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.lef"}).ok);
+  ASSERT_TRUE(shell.Run("read_def", {def_path}).ok);
+  ASSERT_TRUE(shell.Run("floorplan").ok);
+  ASSERT_TRUE(shell.Run("place").ok);
+  const CommandResult result = shell.Run("route", {});
+  ASSERT_TRUE(result.ok) << result.message;
+  const long long routed = RouteHeaderInt(result.payload, "routed");
+  const long long total = RouteHeaderInt(result.payload, "total");
+  ASSERT_GE(routed, 0);
+  ASSERT_GE(total, 0);
+  EXPECT_EQ(routed, total);
+  EXPECT_GT(RouteHeaderInt(result.payload, "guides"), 0);
+  EXPECT_NE(result.payload.find("liberty_corner=tt"), std::string::npos);
+  const CommandResult summary = shell.Run("route_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "routed"), routed);
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "total"), total);
+}
+
+// F6 A8: route before place fails with the driver's "not
+// placed" message; before floorplan, with "not floorplanned".
+// After any failed route, route_summary still fails fast
+// with no record.
+TEST(CoreCommands, RouteFailsFastBeforePlace) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kRouteLef)).ok());
+  // The floorplan fixture's components are PLACED, so the
+  // "floorplanned but unplaced" leg needs the same DEF with the
+  // components UNPLACED; the pins stay PLACED (pin placement is
+  // not instance placement, and the driver's check reads
+  // instances only).
+  std::string unplaced_def(kFloorplanDef);
+  for (const std::string& marker :
+       {"- u1 BUFX2 + PLACED", "- u2 BUFX2 + PLACED"}) {
+    const std::size_t at = unplaced_def.find(marker);
+    ASSERT_NE(at, std::string::npos);
+    unplaced_def.replace(at + marker.size() - 6, 6, "UNPLACED");
+  }
+  ASSERT_TRUE(
+      database.ReadDef(dir.Write("top.def", unplaced_def)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  // Unfloorplanned: no rows yet.
+  const CommandResult unplanned = shell.Run("route", {});
+  ASSERT_FALSE(unplanned.ok);
+  EXPECT_EQ(unplanned.diag, Diag::kInvalidState);
+  EXPECT_NE(unplanned.message.find("not floorplanned"),
+            std::string::npos);
+  // Floorplanned but unplaced: rows exist, no placed instance.
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  const CommandResult unplaced = shell.Run("route", {});
+  ASSERT_FALSE(unplaced.ok);
+  EXPECT_EQ(unplaced.diag, Diag::kInvalidState);
+  EXPECT_NE(unplaced.message.find("not placed"), std::string::npos);
+  EXPECT_FALSE(shell.ctx.route.routed);
+  const CommandResult summary = shell.Run("route_summary");
+  ASSERT_FALSE(summary.ok);
+  EXPECT_EQ(summary.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(summary.message.find("no routing: eos::route first"),
+            std::string::npos);
+}
+
+// F6 A9: route does not disturb the place record, the CTS
+// record, or the timing session's answers. place_summary's
+// header line (the recorded counts) is byte-identical after
+// route; cts_summary is byte-identical; timing_summary
+// (clocks-only on this session: no run_timing has succeeded)
+// is byte-identical.
+TEST(CoreCommands, RouteLeavesPlaceAndCtsRecordsAlone) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildPlacedClockedDemoSession(shell, dir);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
+  ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
+  const CommandResult place_before = shell.Run("place_summary");
+  ASSERT_TRUE(place_before.ok) << place_before.message;
+  const CommandResult cts_before = shell.Run("cts_summary");
+  ASSERT_TRUE(cts_before.ok) << cts_before.message;
+  const CommandResult timing_before = shell.Run("timing_summary");
+  ASSERT_TRUE(timing_before.ok) << timing_before.message;
+  const int placed_count = shell.ctx.place.placed_count;
+  const long long hpwl = shell.ctx.place.hpwl_dbu;
+  ASSERT_EQ(shell.ctx.cts.nets.size(), 2u);
+  ASSERT_TRUE(shell.Run("route", {}).ok);
+  EXPECT_EQ(shell.ctx.place.placed_count, placed_count);
+  EXPECT_EQ(shell.ctx.place.hpwl_dbu, hpwl);
+  EXPECT_EQ(shell.ctx.cts.nets.size(), 2u);
+  ASSERT_TRUE(shell.ctx.route.routed);
+  const CommandResult place_after = shell.Run("place_summary");
+  ASSERT_TRUE(place_after.ok) << place_after.message;
+  EXPECT_EQ(place_after.payload.substr(
+                0, place_after.payload.find('\n')),
+            place_before.payload.substr(
+                0, place_before.payload.find('\n')));
+  const CommandResult cts_after = shell.Run("cts_summary");
+  ASSERT_TRUE(cts_after.ok) << cts_after.message;
+  EXPECT_EQ(cts_after.payload, cts_before.payload);
+  const CommandResult timing_after = shell.Run("timing_summary");
+  ASSERT_TRUE(timing_after.ok) << timing_after.message;
+  EXPECT_EQ(timing_after.payload, timing_before.payload);
 }
 #endif  // EOS_CLOCKED_DEMO_DIR && EOS_MOCK_PDK_DIR
 

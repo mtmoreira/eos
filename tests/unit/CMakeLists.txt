@@ -327,7 +327,36 @@ target_compile_definitions(eda_ui_registry_unit_test
     EOS_MOCK_PDK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../src/pd/rsz/tests/mock"
     EOS_DEMO_SYNTH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/synth"
     EOS_CLOCKED_DEMO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/clocked")
-add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test)
+add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test
+  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingPostureUnchanged:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone)
+# F6 (design section 14): the six clocked route tests each run in
+# their own process. The vendored Yosys kernel orders cells by
+# IdString pool index, a process-global assigned in first-internment
+# order with no reset between designs, so a synth run's output
+# depends on which tests ran earlier in the same process; in the
+# shared ui.registry process the clocked route's detailed router
+# saw a different placement and stalled (40 first-iteration
+# violations in-suite vs 24 fresh, stuck at 2). A fresh process per
+# test reproduces the standalone numbers exactly. The tests stay in
+# this binary; only their ctest entries are separate.
+add_test(NAME ui.registry.route.end_to_end
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.RouteRunsClockedDemoEndToEnd)
+add_test(NAME ui.registry.route.summary
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.RouteSummaryReportsRecordedRun)
+add_test(NAME ui.registry.route.rerun
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.RouteRerunReplacesRecord)
+add_test(NAME ui.registry.route.clock_view
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.RouteLeavesClockViewUnchanged)
+add_test(NAME ui.registry.route.timing_posture
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.RouteRunTimingPostureUnchanged)
+add_test(NAME ui.registry.route.records
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone)
 
 if(TCL_FOUND)
   add_executable(eda_ui_tcl_unit_test ui/tcl/tcl_shell_test.cc)

@@ -260,6 +260,7 @@ static SessionView::ResultDestination NavigationForCommand(
     return Destination::kTiming;
   }
   if (name == "cts") return Destination::kClocks;
+  if (name == "route") return Destination::kCenter;
   if (name == "signoff_summary") return Destination::kSignoff;
   if (name == "report_clock" || name == "report_constraint" ||
       name == "report_analysis_coverage" || name == "report_qor" ||
@@ -304,26 +305,48 @@ CommandResult SessionView::Dispatch(const std::string& name,
         floorplan_.Clear();
         placement_.Clear();
         cts_.Clear();
+        route_.Clear();
       }
     } else if (name == "close_design") {
       checkpoint_.clear();
       center_floorplan_ = false;
       center_placement_ = false;
+      center_route_ = false;
       floorplan_.Clear();
       placement_.Clear();
       cts_.Clear();
+      route_.Clear();
     } else if (name == "floorplan") {
       // A successful floorplan takes the user to the
       // floorplan canvas: the center shows it on the next
-      // refresh, once the model loads.
+      // refresh, once the model loads. Only one center canvas
+      // shows at a time, so this clears the placement and
+      // routing flags.
       center_floorplan_ = true;
+      center_placement_ = false;
+      center_route_ = false;
     } else if (name == "place") {
       // A successful place takes the user to the placement
       // canvas: the center shows it on the next refresh, once
       // the model loads. It wins over the floorplan canvas
       // while the placement model is loaded (see
-      // CenterView::Refresh).
+      // CenterView::Refresh); it also clears the routing flag,
+      // so a re-place after route shows the new placement.
       center_placement_ = true;
+      center_floorplan_ = false;
+      center_route_ = false;
+    } else if (name == "route") {
+      // A successful route takes the user to the routing
+      // canvas: the center shows it on the next refresh, once
+      // the model loads. It wins over the placement canvas
+      // while the route model is loaded (see
+      // CenterView::Refresh); the kCenter navigation the
+      // command asks for clears the floorplan and placement
+      // flags on that refresh, and this clears them here too
+      // so the view is consistent even without a window.
+      center_route_ = true;
+      center_floorplan_ = false;
+      center_placement_ = false;
     }
   }
   if (result.ok && (name == "read_verilog" || name == "read_filelist" ||
@@ -548,6 +571,15 @@ void SessionView::RefreshCts() {
   if (!result.ok || !cts_.LoadPayload(result.payload)) {
     NoteUnguardedRefreshFailure(messages_, "cts_summary", result,
                                 cts_.Empty());
+  }
+}
+
+void SessionView::RefreshRoute() {
+  const CommandResult result =
+      registry_.Dispatch(context_, "route_summary", {});
+  if (!result.ok || !route_.LoadPayload(result.payload)) {
+    NoteUnguardedRefreshFailure(messages_, "route_summary", result,
+                                route_.Empty());
   }
 }
 

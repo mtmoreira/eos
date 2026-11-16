@@ -288,9 +288,12 @@ The F5 sequence (`flow-demo.tcl` in this directory) runs
 `place`, then `cts -clock clk` and `cts -clock div_q`, in
 one session. Measured payloads:
 
-- `place`: `placed=168 total=168 hpwl=4078316 overlaps=0`,
+- `place`: `placed=168 total=168 hpwl=3965890 overlaps=0`,
   with the STA leg reporting `sta_slack_ns=unavailable` for
-  the reason below.
+  the reason below. (The F5 record was `hpwl=4078316`; the
+  F6 pin snap moved the top-level pin centers to the
+  manufacturing grid, which moved the HPWL. The CTS counts
+  below are unchanged.)
 - `cts -clock clk`: `roots=1 buffers=3 sinks=23 subnets=3`,
   characterization, root, and sink buffers all
   EM_CLKBUF_X1, inferred from the mock Liberty with no
@@ -338,6 +341,37 @@ the divider's D pin, design logic on the generated clock's
 nets. Re-running `cts` on either net in the same session
 fails with "no clock tree was built" (the engine skips an
 already-buffered net) and leaves the record unchanged.
+
+### Route on this design (F6, measured)
+
+The F6 sequence continues the F5 one with `route`, then
+`route_summary`, in the same session. Measured payloads:
+
+- `route`: `routed=185 total=185 guides=520 overflow=0
+  violations=0 detailed_iterations=2 detailed_bound=64
+  stopped_at_bound=false liberty_corner=tt
+  die=0,0,86000,86000 core=0,0,86000,83200`, with the STA
+  leg reporting the same unavailable statement as place
+  and CTS (the SDC pin-resolution gap, not a routing
+  outcome). Per-layer congestion: em1 capacity=1720
+  usage=155, em2 capacity=424 usage=109, em3 through em10
+  usage=0. All 185 nets routed, none unwired.
+- `route_summary`: the header above, one `layer` line per
+  layer in order, then 1326 `wire` lines and 987 `via`
+  lines covering all 185 nets (`clk` and `div_q` both
+  wired, on em1, em2, and em3), no `unwired` lines, and
+  the STA note verbatim. A second `route` in the same
+  session succeeds and replaces the record; its summary is
+  byte-identical to the first (the route is deterministic
+  on this design).
+
+Route leaves the place, CTS, and clock records alone:
+`place_summary` and `cts_summary` are byte-identical
+after a route, and `clock_network_summary` still shows
+`clk` with `sinks=23` and `clk_div` with `sinks=8`. The
+clockless optloop demo routes too (`routed=6 total=6
+guides=22 overflow=0 violations=0 detailed_iterations=1
+detailed_bound=64`, die `0,0,10000,10000`).
 
 ### The clock table in a read_sdc-only session (F2 caveat, fixed)
 

@@ -75,6 +75,12 @@ using eos::ui::FloorplanModel;
 using eos::ui::FloorplanRect;
 using eos::ui::PlacementModel;
 using eos::ui::PlacementRect;
+using eos::ui::RouteLayer;
+using eos::ui::RouteModel;
+using eos::ui::RouteRect;
+using eos::ui::RouteSegment;
+using eos::ui::RouteViaPoint;
+using eos::ui::RouteDiagram;
 using eos::ui::GateSymbol;
 using eos::ui::GuiIssue;
 using eos::ui::HierarchyModel;
@@ -312,6 +318,8 @@ TEST(GuiSessionView, StepStatesFollowSessionFlags) {
   EXPECT_EQ(view.GenericStep(), StepStatus::kPending);
   EXPECT_EQ(view.SynthesisStep(), StepStatus::kPending);
   EXPECT_EQ(view.PlacementStep(), StepStatus::kPending);
+  EXPECT_EQ(view.CtsStep(), StepStatus::kPending);
+  EXPECT_EQ(view.RouteStep(), StepStatus::kPending);
   context.synth.parsed = true;
   EXPECT_EQ(view.ReadStep(), StepStatus::kDone);
   context.synth.elaborated = true;
@@ -322,6 +330,10 @@ TEST(GuiSessionView, StepStatesFollowSessionFlags) {
   EXPECT_EQ(view.SynthesisStep(), StepStatus::kDone);
   context.place.placed = true;
   EXPECT_EQ(view.PlacementStep(), StepStatus::kDone);
+  context.cts.nets.push_back(CommandContext::CtsSession::NetResult());
+  EXPECT_EQ(view.CtsStep(), StepStatus::kDone);
+  context.route.routed = true;
+  EXPECT_EQ(view.RouteStep(), StepStatus::kDone);
 }
 
 TEST(GuiSessionView, DispatchSeesSharedContext) {
@@ -2183,6 +2195,53 @@ void RegisterCtsSummaryCommand(CommandRegistry& registry,
   EXPECT_TRUE(status.ok());
 }
 
+// F6: the recorded route run as route_summary reports it: 3
+// routed of 3 total on two layers, with one multi-point wire
+// segment per clock net, one via between the layers, and a
+// finite slack line (the clocked demo's posture is the
+// unavailable note instead; see kRouteSummaryNoSlackPayload).
+const char kRouteSummaryPayload[] =
+    "route routed=3 total=3 guides=12 overflow=0 violations=0 "
+    "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+    "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n"
+    "layer number=1 name=em1 capacity=100 usage=40 overflow=0\n"
+    "layer number=2 name=em2 capacity=100 usage=30 overflow=0\n"
+    "wire net=clk layer=em1 width=200 "
+    "points=100,100,400,100,400,400\n"
+    "wire net=div_q layer=em2 width=200 points=200,200,200,500\n"
+    "via net=clk layers=em1-em2 x=400 y=100\n"
+    "slack scene=func_tt worst_slack_ns=1.25\n";
+
+// F6: the same run with the STA unavailable note instead of a
+// slack line, the posture the clocked demo reports until the
+// SDC pin-resolution fix lands.
+const char kRouteSummaryNoSlackPayload[] =
+    "route routed=3 total=3 guides=12 overflow=0 violations=0 "
+    "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+    "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n"
+    "layer number=1 name=em1 capacity=100 usage=40 overflow=0\n"
+    "layer number=2 name=em2 capacity=100 usage=30 overflow=0\n"
+    "wire net=clk layer=em1 width=200 "
+    "points=100,100,400,100,400,400\n"
+    "wire net=div_q layer=em2 width=200 points=200,200,200,500\n"
+    "via net=clk layers=em1-em2 x=400 y=100\n"
+    "sta_note sta_slack_ns=unavailable (scene func_tt: could not "
+    "read SDC file)\n";
+
+void RegisterRouteSummaryCommand(CommandRegistry& registry,
+                                 const std::string& payload, bool ok) {
+  auto status = registry.Register(
+      "route_summary", "route_summary",
+      [payload, ok](CommandContext&, const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "query broken");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
 void FillPanelsContext(CommandContext& context) {
   context.synth.parsed = true;
   context.synth.top_cell = "optloop";
@@ -3629,6 +3688,140 @@ TEST(CtsModel, RejectsMalformedPayloads) {
   ASSERT_TRUE(model.LoadPayload(kCtsSummaryPayload));
   EXPECT_FALSE(model.LoadPayload("garbage\n"));
   EXPECT_EQ(model.Nets().size(), 2u);
+}
+
+TEST(RouteModel, ParsesRecordedRun) {
+  RouteModel model;
+  ASSERT_TRUE(model.LoadPayload(kRouteSummaryPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.Routed(), 3u);
+  EXPECT_EQ(model.Total(), 3u);
+  EXPECT_EQ(model.Guides(), 12u);
+  EXPECT_EQ(model.Overflow(), 0);
+  EXPECT_EQ(model.Violations(), 0u);
+  EXPECT_EQ(model.DetailedIterations(), 2u);
+  EXPECT_EQ(model.DetailedBound(), 64u);
+  EXPECT_FALSE(model.StoppedAtBound());
+  EXPECT_EQ(model.LibertyCorner(), "tt");
+  EXPECT_EQ(model.DieArea(), (RouteRect{0, 0, 5000, 5000}));
+  EXPECT_EQ(model.CoreArea(), (RouteRect{0, 0, 5000, 5000}));
+  ASSERT_EQ(model.Layers().size(), 2u);
+  EXPECT_EQ(model.Layers()[0].number, 1);
+  EXPECT_EQ(model.Layers()[0].name, "em1");
+  EXPECT_EQ(model.Layers()[0].capacity, 100);
+  EXPECT_EQ(model.Layers()[0].usage, 40);
+  EXPECT_EQ(model.Layers()[0].overflow, 0);
+  EXPECT_EQ(model.Layers()[1].number, 2);
+  EXPECT_EQ(model.Layers()[1].name, "em2");
+  ASSERT_EQ(model.Segments().size(), 2u);
+  const RouteSegment& clk = model.Segments()[0];
+  EXPECT_EQ(clk.net, "clk");
+  EXPECT_EQ(clk.layer, "em1");
+  EXPECT_EQ(clk.width, 200);
+  ASSERT_EQ(clk.points.size(), 3u);
+  EXPECT_EQ(clk.points[0], (std::pair<int, int>{100, 100}));
+  EXPECT_EQ(clk.points[1], (std::pair<int, int>{400, 100}));
+  EXPECT_EQ(clk.points[2], (std::pair<int, int>{400, 400}));
+  EXPECT_EQ(model.WiresForLayer("em1").size(), 1u);
+  EXPECT_EQ(model.WiresForLayer("em2").size(), 1u);
+  EXPECT_TRUE(model.WiresForLayer("em3").empty());
+  ASSERT_EQ(model.Vias().size(), 1u);
+  const RouteViaPoint& via = model.Vias()[0];
+  EXPECT_EQ(via.net, "clk");
+  EXPECT_EQ(via.lower_layer, "em1");
+  EXPECT_EQ(via.upper_layer, "em2");
+  EXPECT_EQ(via.x, 400);
+  EXPECT_EQ(via.y, 100);
+  EXPECT_EQ(model.ViasForLayer("em1").size(), 1u);
+  EXPECT_EQ(model.ViasForLayer("em2").size(), 1u);
+  EXPECT_TRUE(model.ViasForLayer("em3").empty());
+  EXPECT_TRUE(model.UnwiredNets().empty());
+  ASSERT_EQ(model.Slacks().size(), 1u);
+  EXPECT_EQ(model.Slacks()[0].scene, "func_tt");
+  EXPECT_DOUBLE_EQ(model.Slacks()[0].worst_slack_ns, 1.25);
+  EXPECT_TRUE(model.StaNote().empty());
+
+  // The no-slack form carries the unavailable statement
+  // verbatim instead of slack lines.
+  RouteModel noted;
+  ASSERT_TRUE(noted.LoadPayload(kRouteSummaryNoSlackPayload));
+  EXPECT_TRUE(noted.Slacks().empty());
+  EXPECT_EQ(noted.StaNote(),
+            "sta_slack_ns=unavailable (scene func_tt: could not "
+            "read SDC file)");
+}
+
+TEST(RouteModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      // No header.
+      "layer number=1 name=em1 capacity=100 usage=40 overflow=0\n",
+      // A header line missing a key (no core).
+      "route routed=3 total=3 guides=12 overflow=0 violations=0 "
+      "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+      "liberty_corner=tt die=0,0,5000,5000\n",
+      // Routed above total (the header gap is the unwired
+      // count, so this is a count mismatch).
+      "route routed=4 total=3 guides=12 overflow=0 violations=0 "
+      "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+      "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n",
+      // A layer line after a wire line.
+      "route routed=3 total=3 guides=12 overflow=0 violations=0 "
+      "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+      "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n"
+      "wire net=clk layer=em1 width=200 points=100,100,400,100\n"
+      "layer number=1 name=em1 capacity=100 usage=40 overflow=0\n",
+      // A duplicate layer number.
+      "route routed=3 total=3 guides=12 overflow=0 violations=0 "
+      "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+      "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n"
+      "layer number=1 name=em1 capacity=100 usage=40 overflow=0\n"
+      "layer number=1 name=em2 capacity=100 usage=30 overflow=0\n",
+      // A wire line naming an unknown layer.
+      "route routed=3 total=3 guides=12 overflow=0 violations=0 "
+      "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+      "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n"
+      "layer number=1 name=em1 capacity=100 usage=40 overflow=0\n"
+      "wire net=clk layer=em9 width=200 points=100,100,400,100\n",
+      // A points list with an odd count.
+      "route routed=3 total=3 guides=12 overflow=0 violations=0 "
+      "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+      "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n"
+      "layer number=1 name=em1 capacity=100 usage=40 overflow=0\n"
+      "wire net=clk layer=em1 width=200 points=100,100,400\n",
+      // A bad number.
+      "route routed=3 total=3 guides=12 overflow=0 violations=0 "
+      "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+      "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n"
+      "layer number=x name=em1 capacity=100 usage=40 overflow=0\n",
+      // A sta_note after slack lines on the same run.
+      "route routed=3 total=3 guides=12 overflow=0 violations=0 "
+      "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+      "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n"
+      "layer number=1 name=em1 capacity=100 usage=40 overflow=0\n"
+      "slack scene=func_tt worst_slack_ns=1.25\n"
+      "sta_note sta_slack_ns=unavailable (x)\n",
+      // An unknown line kind.
+      "route routed=3 total=3 guides=12 overflow=0 violations=0 "
+      "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+      "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n"
+      "bogus x=1\n",
+      // The unwired count does not match the header gap
+      // (routed 2 of 3 total, no unwired line).
+      "route routed=2 total=3 guides=12 overflow=0 violations=0 "
+      "detailed_iterations=2 detailed_bound=64 stopped_at_bound=false "
+      "liberty_corner=tt die=0,0,5000,5000 core=0,0,5000,5000\n"
+      "layer number=1 name=em1 capacity=100 usage=40 overflow=0\n",
+  };
+  for (const char* payload : bad) {
+    RouteModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+  // A malformed load keeps the previous model.
+  RouteModel model;
+  ASSERT_TRUE(model.LoadPayload(kRouteSummaryPayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.Segments().size(), 2u);
 }
 
 // Writes one SDC text to a fresh temp file and removes it on
@@ -5253,6 +5446,30 @@ struct AutoNavView {
               "slack scene=func_tt worst_slack_ns=1.25");
         });
     EXPECT_TRUE(cts_summary.ok());
+    // F6: the stub route records a run; the stub
+    // route_summary fails until the record is set, like the
+    // real query.
+    auto route = registry.Register(
+        "route", "route",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          ctx.route.routed = true;
+          return CommandResult::Ok(
+              "route routed=3 total=3 guides=12 overflow=0 "
+              "violations=0 detailed_iterations=2 detailed_bound=64 "
+              "stopped_at_bound=false liberty_corner=tt");
+        });
+    EXPECT_TRUE(route.ok());
+    auto route_summary = registry.Register(
+        "route_summary", "route_summary",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          if (!ctx.route.routed) {
+            return CommandResult::Fail(
+                eos::ui::Diag::kInvalidConfiguration,
+                "no routing: eos::route first");
+          }
+          return CommandResult::Ok(kRouteSummaryPayload);
+        });
+    EXPECT_TRUE(route_summary.ok());
     auto signoff = registry.Register(
         "signoff_summary", "signoff_summary",
         [this](CommandContext&, const std::vector<std::string>&) {
@@ -5421,6 +5638,35 @@ TEST(MainWindowAutoNav, CtsRunShowsClocksTab) {
   EXPECT_EQ(window.CurrentTab(), 4);
 }
 
+// F6: the Route stage button starts disabled, enables once a
+// run is recorded, a console route lands on the center routing
+// canvas, and the stage button shows the routing canvas too.
+TEST(MainWindowAutoNav, RouteRunShowsRouteCanvas) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  EXPECT_FALSE(window.RouteEnabled());
+  EXPECT_EQ(window.CurrentTab(), 0);
+  ASSERT_TRUE(fixture.view.Dispatch("route", {}).ok);
+  window.Refresh();
+  EXPECT_TRUE(window.RouteEnabled());
+  EXPECT_EQ(fixture.view.RouteStep(), StepStatus::kDone);
+  EXPECT_TRUE(fixture.view.Route().Loaded());
+  EXPECT_TRUE(fixture.view.ShowingRoute());
+  // Move away through the Elaboration stage button (it clears
+  // the center flags), then take the Route stage button back
+  // to the routing canvas.
+  QPushButton* elaboration =
+      AutoNavButtonWithPrefix(window, "Elaboration");
+  ASSERT_NE(elaboration, nullptr);
+  elaboration->click();
+  EXPECT_FALSE(fixture.view.ShowingRoute());
+  QPushButton* route_button = AutoNavButtonWithPrefix(window, "Route");
+  ASSERT_NE(route_button, nullptr);
+  EXPECT_TRUE(route_button->isEnabled());
+  route_button->click();
+  EXPECT_TRUE(fixture.view.ShowingRoute());
+}
+
 // A SessionView with the nested hierarchy, so the center can
 // switch between the block diagram (non-leaf levels) and the
 // schematic (the leaf adder module).
@@ -5536,6 +5782,90 @@ TEST(CenterView, ShowsFloorplanWhenFloorplanStageChosen) {
   fixture.view.ShowFloorplan(false);
   center.Refresh();
   EXPECT_FALSE(center.ShowingFloorplan());
+}
+
+// F6: the center shows the routing canvas when the route
+// stage is chosen: the die outline, one polygon per wire
+// segment, and one square per via.
+TEST(CenterView, ShowsRouteWhenRouteStageChosen) {
+  CenterViewFixture fixture;
+  RegisterRouteSummaryCommand(fixture.registry, kRouteSummaryPayload, true);
+  fixture.view.RefreshRoute();
+  ASSERT_TRUE(fixture.view.Route().Loaded());
+  CenterView center(fixture.view);
+  center.Refresh();
+  EXPECT_FALSE(center.ShowingRoute());
+  EXPECT_FALSE(center.ShowingSchematic());
+  // A successful route dispatch chooses the route stage: the
+  // center shows the canvas, not the schematic.
+  fixture.view.ShowRoute(true);
+  center.Refresh();
+  EXPECT_TRUE(center.ShowingRoute());
+  EXPECT_FALSE(center.ShowingSchematic());
+  // The route page renders the die outline: a white 2px rect
+  // over the die rectangle.
+  bool die_found = false;
+  for (const QGraphicsRectItem* rect :
+       OutlineSceneItems<QGraphicsRectItem>(center.Route()->Scene())) {
+    if (rect->pen().color() == Qt::white &&
+        rect->pen().widthF() == 2 &&
+        OutlineRectNear(rect->rect(), QRectF(0, -5000, 5000, 5000))) {
+      die_found = true;
+    }
+  }
+  EXPECT_TRUE(die_found);
+  // One polygon per wire segment (2 in the fixture payload),
+  // and one via square (a colored rect, neither the white die
+  // outline nor the white core outline).
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(
+                center.Route()->Scene())
+                .size(),
+            2u);
+  std::size_t vias = 0;
+  for (const QGraphicsRectItem* rect :
+       OutlineSceneItems<QGraphicsRectItem>(center.Route()->Scene())) {
+    if (rect->pen().color() != Qt::white) ++vias;
+  }
+  EXPECT_EQ(vias, 1u);
+  // Hierarchy navigation clears the stage: the center shows
+  // the hierarchy views again.
+  fixture.view.ShowRoute(false);
+  center.Refresh();
+  EXPECT_FALSE(center.ShowingRoute());
+}
+
+// F6: the layer selector filters the canvas to one layer's
+// segments, and the counts panel names the run.
+TEST(CenterView, RouteLayerSelectorFiltersSegments) {
+  CenterViewFixture fixture;
+  RegisterRouteSummaryCommand(fixture.registry, kRouteSummaryPayload, true);
+  fixture.view.RefreshRoute();
+  CenterView center(fixture.view);
+  fixture.view.ShowRoute(true);
+  center.Refresh();
+  RouteDiagram* diagram = center.Route();
+  ASSERT_NE(diagram, nullptr);
+  EXPECT_EQ(diagram->SelectedLayer(), "");
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(diagram->Scene())
+                .size(),
+            2u);
+  diagram->SelectLayer("em1");
+  EXPECT_EQ(diagram->SelectedLayer(), "em1");
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(diagram->Scene())
+                .size(),
+            1u);
+  diagram->SelectLayer("em2");
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(diagram->Scene())
+                .size(),
+            1u);
+  diagram->SelectLayer("");
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(diagram->Scene())
+                .size(),
+            2u);
+  EXPECT_NE(diagram->CountsText().find("Routed: 3 / 3"),
+            std::string::npos);
+  EXPECT_NE(diagram->CountsText().find("Guides: 12"),
+            std::string::npos);
 }
 
 TEST(CenterView, HighlightGateForwardsToSchematicOnlyWhenLeaf) {
@@ -6142,6 +6472,40 @@ TEST(GuiSessionView, RefreshCtsStaysEmptyOnFailedQuery) {
   SessionView view(registry, context);
   view.RefreshCts();
   EXPECT_FALSE(view.Cts().Loaded());
+  EXPECT_TRUE(view.Messages().empty());
+}
+
+// F6: RefreshRoute populates the Route model from the
+// recorded route run without echoing the query, and the
+// route step stays pending until the session record says a
+// run happened.
+TEST(GuiSessionView, RefreshRoutePopulatesModelWithoutEcho) {
+  CommandRegistry registry;
+  RegisterRouteSummaryCommand(registry, kRouteSummaryPayload, true);
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_EQ(view.RouteStep(), StepStatus::kPending);
+  view.RefreshRoute();
+  EXPECT_TRUE(view.Route().Loaded());
+  EXPECT_EQ(view.Route().Routed(), 3u);
+  EXPECT_EQ(view.Route().Total(), 3u);
+  EXPECT_EQ(view.Route().Segments().size(), 2u);
+  EXPECT_TRUE(view.EchoLog().empty());
+  EXPECT_EQ(view.RouteStep(), StepStatus::kPending);
+  context.route.routed = true;
+  EXPECT_EQ(view.RouteStep(), StepStatus::kDone);
+}
+
+// F6: in a fresh session the query fails fast, so the model
+// stays empty and no message is logged (the guarded refresh
+// posture every stage view shares).
+TEST(GuiSessionView, RefreshRouteStaysEmptyOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterRouteSummaryCommand(registry, kRouteSummaryPayload, false);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshRoute();
+  EXPECT_FALSE(view.Route().Loaded());
   EXPECT_TRUE(view.Messages().empty());
 }
 
