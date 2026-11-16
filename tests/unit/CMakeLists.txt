@@ -328,7 +328,7 @@ target_compile_definitions(eda_ui_registry_unit_test
     EOS_DEMO_SYNTH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/synth"
     EOS_CLOCKED_DEMO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/clocked")
 add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test
-  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingPostureUnchanged:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone)
+  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone)
 # F6 (design section 14): the six clocked route tests each run in
 # their own process. The vendored Yosys kernel orders cells by
 # IdString pool index, a process-global assigned in first-internment
@@ -353,7 +353,7 @@ add_test(NAME ui.registry.route.clock_view
     --gtest_filter=CoreCommands.RouteLeavesClockViewUnchanged)
 add_test(NAME ui.registry.route.timing_posture
   COMMAND eda_ui_registry_unit_test
-    --gtest_filter=CoreCommands.RouteRunTimingPostureUnchanged)
+    --gtest_filter=CoreCommands.RouteRunTimingAgreesWithRouteSlack)
 add_test(NAME ui.registry.route.records
   COMMAND eda_ui_registry_unit_test
     --gtest_filter=CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone)

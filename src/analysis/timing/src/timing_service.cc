@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <set>
+#include <sstream>
 #include <utility>
 
 #include "eos/analysis/sta.h"
@@ -555,6 +557,221 @@ Result<CheckReportsResult> CheckReportsScene(
   return out;
 }
 
+// Translates an SDC text through a pin map (SDC pin-resolution
+// design, section 4.5). A word equal to a map key is replaced by
+// the map's value; every other byte is preserved, so line numbers
+// stay true and engine messages cite the user's lines. The scan
+// follows io/sdc's documented lexical subset: statements split on
+// newlines and semicolons, {...} groups nest, [...] groups are
+// command substitutions, double quotes group words, a backslash
+// escapes the next character (backslash-newline continues a
+// statement), and a '#' at the start of a token, outside braces,
+// comments out the rest of the line and is never rewritten. A
+// [digits] suffix directly on a word is a bit select and part of
+// the word. A word that is one quoted string is compared by its
+// content, quotes preserved. Unmapped words pass through
+// byte-identical: the translator never drops, patterns, or
+// guesses a reference.
+std::string TranslateSdcPinReferences(const std::string& text,
+                                      const SdcPinMap& map) {
+  if (map.empty()) return text;
+  std::string out;
+  out.reserve(text.size());
+  std::string word;
+  bool in_word = false;
+  bool in_quote = false;
+  int brace_depth = 0;
+  const std::size_t n = text.size();
+  const auto flush_word = [&]() {
+    if (!in_word) return;
+    const auto direct = map.find(word);
+    if (direct != map.end()) {
+      out += direct->second;
+    } else if (word.size() >= 2 && word.front() == '"' &&
+               word.back() == '"' &&
+               word.find('"', 1) == word.size() - 1) {
+      const auto inner = map.find(word.substr(1, word.size() - 2));
+      if (inner != map.end()) {
+        out += '"';
+        out += inner->second;
+        out += '"';
+      } else {
+        out += word;
+      }
+    } else {
+      out += word;
+    }
+    word.clear();
+    in_word = false;
+  };
+  for (std::size_t i = 0; i < n; ++i) {
+    const char c = text[i];
+    if (in_quote) {
+      word += c;
+      if (c == '\\' && i + 1 < n) word += text[++i];
+      if (c == '"') in_quote = false;
+      continue;
+    }
+    if (c == '#' && !in_word && brace_depth == 0) {
+      // A comment runs to the end of the line and keeps the
+      // user's words; the newline itself is emitted after.
+      while (i < n && text[i] != '\n') out += text[i++];
+      if (i < n) out += text[i];
+      continue;
+    }
+    if (c == '\\' && i + 1 < n) {
+      in_word = true;
+      word += c;
+      word += text[++i];
+      continue;
+    }
+    if (c == '"') {
+      in_word = true;
+      in_quote = true;
+      word += c;
+      continue;
+    }
+    if (c == '{') {
+      flush_word();
+      ++brace_depth;
+      out += c;
+      continue;
+    }
+    if (c == '}') {
+      flush_word();
+      if (brace_depth > 0) --brace_depth;
+      out += c;
+      continue;
+    }
+    if (c == '[' && in_word) {
+      // A [digits] suffix directly on a word is a bit select and
+      // part of the word; any other bracket delimits.
+      std::size_t j = i + 1;
+      while (j < n && text[j] >= '0' && text[j] <= '9') ++j;
+      if (j > i + 1 && j < n && text[j] == ']') {
+        word.append(text, i, j - i + 1);
+        i = j;
+        continue;
+      }
+      flush_word();
+      out += c;
+      continue;
+    }
+    if (c == '[' || c == ']' || c == ';' || c == ' ' || c == '\t' ||
+        c == '\r' || c == '\n' || c == '\f' || c == '\v') {
+      flush_word();
+      out += c;
+      continue;
+    }
+    in_word = true;
+    word += c;
+  }
+  flush_word();
+  return out;
+}
+
+// The scratch products of an ODB analysis (design section 4.4):
+// the database's netlist, and, when a pin map is present, the
+// translated SDC beside it. Both live in the temp directory and
+// are removed when the owning call returns, whatever the outcome.
+struct OdbScratchDesign {
+  VerilogDesign design;
+  std::filesystem::path netlist_path;
+  std::filesystem::path sdc_scratch_path;  // empty: no translation
+  std::string user_sdc_path;
+  ~OdbScratchDesign() {
+    std::error_code ec;
+    if (!netlist_path.empty()) std::filesystem::remove(netlist_path, ec);
+    if (!sdc_scratch_path.empty()) {
+      std::filesystem::remove(sdc_scratch_path, ec);
+    }
+  }
+};
+
+// Writes the scratch netlist from the database, exactly as the
+// ODB overloads always have, and, when the pin map is non-empty,
+// a scratch translated SDC beside it; the design then names the
+// scratch SDC. With an empty map, or when the user's SDC text
+// cannot be read for translation, the design names the user's
+// SDC path itself and the engine produces its own read behavior,
+// byte-identical to the pre-map service.
+Status PrepareOdbDesign(db::OdbDatabase& database,
+                        const std::string& sdc_path,
+                        const SdcPinMap& pin_map,
+                        OdbScratchDesign* scratch) {
+  scratch->user_sdc_path = sdc_path;
+  scratch->netlist_path = std::filesystem::temp_directory_path() /
+                          "eos_timing_service_netlist.v";
+  const Status written =
+      database.WriteVerilog(scratch->netlist_path.string());
+  if (!written.ok()) return written;
+  std::string effective_sdc = sdc_path;
+  if (!pin_map.empty()) {
+    std::ifstream in(sdc_path, std::ios::binary);
+    if (in) {
+      const std::string text{std::istreambuf_iterator<char>(in),
+                             std::istreambuf_iterator<char>()};
+      if (!in.bad()) {
+        const std::filesystem::path scratch_path =
+            std::filesystem::temp_directory_path() /
+            "eos_timing_service_sdc.sdc";
+        scratch->sdc_scratch_path = scratch_path;
+        std::ofstream out(scratch_path,
+                          std::ios::binary | std::ios::trunc);
+        if (out) {
+          out << TranslateSdcPinReferences(text, pin_map);
+          out.flush();
+          if (out.good()) effective_sdc = scratch_path.string();
+        }
+      }
+    }
+  }
+  scratch->design = VerilogDesign{scratch->netlist_path.string(),
+                                  database.TopBlockName(), effective_sdc};
+  return Status::Ok();
+}
+
+// On a failure from a translated session, names the user's SDC
+// file in place of the scratch translation (design section 4.4):
+// translation preserved line numbers, so the substituted message
+// names the user's file and the true line, exactly as messages
+// on untranslated sessions do. Two forms are substituted: the
+// scratch path itself (the facade's "could not read SDC file"
+// prefix carries the path it was given) and the scratch file's
+// basename (the engine's own error text names only the
+// basename: "eos_timing_service_sdc.sdc line 2" for OpenSTA's
+// Error 374, measured).
+template <typename T>
+Result<T> SubstituteScratchSdcPath(Result<T> result,
+                                   const OdbScratchDesign& scratch) {
+  if (result.ok() || scratch.sdc_scratch_path.empty() ||
+      scratch.design.sdc_path != scratch.sdc_scratch_path.string()) {
+    return std::move(result);
+  }
+  const auto replace_all = [](std::string text, const std::string& needle,
+                              const std::string& value) {
+    if (needle.empty()) return text;
+    std::string replaced;
+    std::size_t pos = 0;
+    for (std::size_t hit = text.find(needle, pos);
+         hit != std::string::npos; hit = text.find(needle, pos)) {
+      replaced.append(text, pos, hit - pos);
+      replaced += value;
+      pos = hit + needle.size();
+    }
+    replaced.append(text, pos, std::string::npos);
+    return replaced;
+  };
+  std::string replaced =
+      replace_all(result.status().message(),
+                  scratch.sdc_scratch_path.string(), scratch.user_sdc_path);
+  replaced = replace_all(
+      std::move(replaced), scratch.sdc_scratch_path.filename().string(),
+      std::filesystem::path(scratch.user_sdc_path).filename().string());
+  if (replaced == result.status().message()) return std::move(result);
+  return Status::Error(result.status().code(), replaced);
+}
+
 }  // namespace
 
 Result<std::vector<SceneResult>> TimingService::Analyze(
@@ -569,7 +786,7 @@ Result<std::vector<SceneResult>> TimingService::Analyze(
 
 Result<std::vector<SceneResult>> TimingService::Analyze(
     db::OdbDatabase& database, const std::string& sdc_path,
-    const std::vector<SceneAnalysis>& scenes) {
+    const std::vector<SceneAnalysis>& scenes, const SdcPinMap& pin_map) {
   if (!database.has_top_block()) {
     return Status::Error(ErrorCode::kInvalidState,
                          "timing analysis of an ODB database with no "
@@ -577,23 +794,12 @@ Result<std::vector<SceneResult>> TimingService::Analyze(
   }
   const Status valid = Validate(sdc_path, scenes);
   if (!valid.ok()) return valid;
-  // The netlist is a scratch product of the database, never a
-  // deliverable: it lives in the temp directory and is removed
-  // when this call returns, whatever the outcome.
-  const std::filesystem::path netlist =
-      std::filesystem::temp_directory_path() / "eos_timing_service_netlist.v";
-  const Status written = database.WriteVerilog(netlist.string());
-  if (!written.ok()) return written;
-  struct NetlistGuard {
-    std::filesystem::path path;
-    ~NetlistGuard() {
-      std::error_code ec;
-      std::filesystem::remove(path, ec);
-    }
-  } guard{netlist};
-  const VerilogDesign design{netlist.string(), database.TopBlockName(),
-                             sdc_path};
-  return AnalyzeChecked(design, scenes);
+  OdbScratchDesign scratch;
+  const Status prepared =
+      PrepareOdbDesign(database, sdc_path, pin_map, &scratch);
+  if (!prepared.ok()) return prepared;
+  return SubstituteScratchSdcPath(AnalyzeChecked(scratch.design, scenes),
+                                  scratch);
 }
 
 Result<std::vector<ScenePathReports>> TimingService::ReportPaths(
@@ -623,29 +829,18 @@ Result<std::vector<ScenePathReports>> TimingService::ReportPaths(
 Result<std::vector<ScenePathReports>> TimingService::ReportPaths(
     db::OdbDatabase& database, const std::string& sdc_path,
     const std::vector<SceneAnalysis>& scenes,
-    const PathReportRequest& request) {
+    const PathReportRequest& request, const SdcPinMap& pin_map) {
   if (!database.has_top_block()) {
     return Status::Error(ErrorCode::kInvalidState,
                          "timing analysis of an ODB database with no "
                          "top block");
   }
-  // The netlist is a scratch product of the database, never a
-  // deliverable: it lives in the temp directory and is removed
-  // when this call returns, whatever the outcome.
-  const std::filesystem::path netlist =
-      std::filesystem::temp_directory_path() / "eos_timing_service_netlist.v";
-  const Status written = database.WriteVerilog(netlist.string());
-  if (!written.ok()) return written;
-  struct NetlistGuard {
-    std::filesystem::path path;
-    ~NetlistGuard() {
-      std::error_code ec;
-      std::filesystem::remove(path, ec);
-    }
-  } guard{netlist};
-  const VerilogDesign design{netlist.string(), database.TopBlockName(),
-                             sdc_path};
-  return ReportPaths(design, scenes, request);
+  OdbScratchDesign scratch;
+  const Status prepared =
+      PrepareOdbDesign(database, sdc_path, pin_map, &scratch);
+  if (!prepared.ok()) return prepared;
+  return SubstituteScratchSdcPath(
+      ReportPaths(scratch.design, scenes, request), scratch);
 }
 
 Result<std::vector<CoverageResult>> TimingService::AnalyzeCoverage(
@@ -667,29 +862,18 @@ Result<std::vector<CoverageResult>> TimingService::AnalyzeCoverage(
 
 Result<std::vector<CoverageResult>> TimingService::AnalyzeCoverage(
     db::OdbDatabase& database, const std::string& sdc_path,
-    const std::vector<SceneAnalysis>& scenes) {
+    const std::vector<SceneAnalysis>& scenes, const SdcPinMap& pin_map) {
   if (!database.has_top_block()) {
     return Status::Error(ErrorCode::kInvalidState,
                          "timing analysis of an ODB database with no "
                          "top block");
   }
-  // The netlist is a scratch product of the database, never a
-  // deliverable: it lives in the temp directory and is removed
-  // when this call returns, whatever the outcome.
-  const std::filesystem::path netlist =
-      std::filesystem::temp_directory_path() / "eos_timing_service_netlist.v";
-  const Status written = database.WriteVerilog(netlist.string());
-  if (!written.ok()) return written;
-  struct NetlistGuard {
-    std::filesystem::path path;
-    ~NetlistGuard() {
-      std::error_code ec;
-      std::filesystem::remove(path, ec);
-    }
-  } guard{netlist};
-  const VerilogDesign design{netlist.string(), database.TopBlockName(),
-                             sdc_path};
-  return AnalyzeCoverage(design, scenes);
+  OdbScratchDesign scratch;
+  const Status prepared =
+      PrepareOdbDesign(database, sdc_path, pin_map, &scratch);
+  if (!prepared.ok()) return prepared;
+  return SubstituteScratchSdcPath(
+      AnalyzeCoverage(scratch.design, scenes), scratch);
 }
 
 Result<std::vector<QorResult>> TimingService::AnalyzeQor(
@@ -711,29 +895,18 @@ Result<std::vector<QorResult>> TimingService::AnalyzeQor(
 
 Result<std::vector<QorResult>> TimingService::AnalyzeQor(
     db::OdbDatabase& database, const std::string& sdc_path,
-    const std::vector<SceneAnalysis>& scenes) {
+    const std::vector<SceneAnalysis>& scenes, const SdcPinMap& pin_map) {
   if (!database.has_top_block()) {
     return Status::Error(ErrorCode::kInvalidState,
                          "timing analysis of an ODB database with no "
                          "top block");
   }
-  // The netlist is a scratch product of the database, never a
-  // deliverable: it lives in the temp directory and is removed
-  // when this call returns, whatever the outcome.
-  const std::filesystem::path netlist =
-      std::filesystem::temp_directory_path() / "eos_timing_service_netlist.v";
-  const Status written = database.WriteVerilog(netlist.string());
-  if (!written.ok()) return written;
-  struct NetlistGuard {
-    std::filesystem::path path;
-    ~NetlistGuard() {
-      std::error_code ec;
-      std::filesystem::remove(path, ec);
-    }
-  } guard{netlist};
-  const VerilogDesign design{netlist.string(), database.TopBlockName(),
-                             sdc_path};
-  return AnalyzeQor(design, scenes);
+  OdbScratchDesign scratch;
+  const Status prepared =
+      PrepareOdbDesign(database, sdc_path, pin_map, &scratch);
+  if (!prepared.ok()) return prepared;
+  return SubstituteScratchSdcPath(AnalyzeQor(scratch.design, scenes),
+                                  scratch);
 }
 
 Result<std::vector<CheckReportsResult>>
@@ -757,29 +930,18 @@ TimingService::AnalyzeCheckReports(
 Result<std::vector<CheckReportsResult>>
 TimingService::AnalyzeCheckReports(
     db::OdbDatabase& database, const std::string& sdc_path,
-    const std::vector<SceneAnalysis>& scenes) {
+    const std::vector<SceneAnalysis>& scenes, const SdcPinMap& pin_map) {
   if (!database.has_top_block()) {
     return Status::Error(ErrorCode::kInvalidState,
                          "timing analysis of an ODB database with no "
                          "top block");
   }
-  // The netlist is a scratch product of the database, never a
-  // deliverable: it lives in the temp directory and is removed
-  // when this call returns, whatever the outcome.
-  const std::filesystem::path netlist =
-      std::filesystem::temp_directory_path() / "eos_timing_service_netlist.v";
-  const Status written = database.WriteVerilog(netlist.string());
-  if (!written.ok()) return written;
-  struct NetlistGuard {
-    std::filesystem::path path;
-    ~NetlistGuard() {
-      std::error_code ec;
-      std::filesystem::remove(path, ec);
-    }
-  } guard{netlist};
-  const VerilogDesign design{netlist.string(), database.TopBlockName(),
-                             sdc_path};
-  return AnalyzeCheckReports(design, scenes);
+  OdbScratchDesign scratch;
+  const Status prepared =
+      PrepareOdbDesign(database, sdc_path, pin_map, &scratch);
+  if (!prepared.ok()) return prepared;
+  return SubstituteScratchSdcPath(
+      AnalyzeCheckReports(scratch.design, scenes), scratch);
 }
 
 }  // namespace eos::analysis

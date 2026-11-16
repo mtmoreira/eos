@@ -120,6 +120,15 @@ struct VerilogDesign {
   std::string sdc_path;
 };
 
+// The SDC pin map (SDC pin-resolution unit): exact correspondences
+// from a hierarchical pin path in the SDC's spelling (a submodule
+// output port bit, `u_div/q`) to the flat pin path in an imported
+// database's spelling (`u_div/_17_/Q`). The bridge records it at
+// write_def; the ODB overloads below translate the SDC through it
+// per call (section 4 of the design). An empty map means no
+// translation: the engine receives the user's SDC path itself.
+using SdcPinMap = std::map<std::string, std::string>;
+
 // One timing path report request: the check kind (setup for the
 // max-delay analysis, hold for the min-delay analysis), an optional
 // endpoint pin (empty selects the worst endpoints), the maximum
@@ -285,7 +294,8 @@ class TimingService {
   // no top block, plus the Analyze failures above.
   Result<std::vector<SceneResult>> Analyze(
       db::OdbDatabase& database, const std::string& sdc_path,
-      const std::vector<SceneAnalysis>& scenes);
+      const std::vector<SceneAnalysis>& scenes,
+      const SdcPinMap& pin_map = SdcPinMap());
 
   // Reports the worst paths of the Verilog design under every
   // scene, per the request. Each scene runs its own engine session
@@ -308,7 +318,8 @@ class TimingService {
   Result<std::vector<ScenePathReports>> ReportPaths(
       db::OdbDatabase& database, const std::string& sdc_path,
       const std::vector<SceneAnalysis>& scenes,
-      const PathReportRequest& request);
+      const PathReportRequest& request,
+      const SdcPinMap& pin_map = SdcPinMap());
 
   // Reports the analysis coverage of the Verilog design under
   // every scene (Immediate unit 7, review item I4): one
@@ -327,7 +338,8 @@ class TimingService {
   // kInvalidState when the database has no top block.
   Result<std::vector<CoverageResult>> AnalyzeCoverage(
       db::OdbDatabase& database, const std::string& sdc_path,
-      const std::vector<SceneAnalysis>& scenes);
+      const std::vector<SceneAnalysis>& scenes,
+      const SdcPinMap& pin_map = SdcPinMap());
 
   // Reports one scene's QoR data under every scene (Immediate
   // unit 9, review item I9): per-group endpoint slacks, the cell
@@ -345,7 +357,8 @@ class TimingService {
   // when the database has no top block.
   Result<std::vector<QorResult>> AnalyzeQor(
       db::OdbDatabase& database, const std::string& sdc_path,
-      const std::vector<SceneAnalysis>& scenes);
+      const std::vector<SceneAnalysis>& scenes,
+      const SdcPinMap& pin_map = SdcPinMap());
 
   // Reports the check-specific data (Immediate unit 10, review
   // item T8) of the Verilog design under every scene: the
@@ -365,7 +378,8 @@ class TimingService {
   // plus kInvalidState when the database has no top block.
   Result<std::vector<CheckReportsResult>> AnalyzeCheckReports(
       db::OdbDatabase& database, const std::string& sdc_path,
-      const std::vector<SceneAnalysis>& scenes);
+      const std::vector<SceneAnalysis>& scenes,
+      const SdcPinMap& pin_map = SdcPinMap());
 };
 
 }  // namespace eos::analysis

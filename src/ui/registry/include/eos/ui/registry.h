@@ -224,6 +224,16 @@ struct CommandContext {
     std::string verilog_path;
     std::string top_cell;
     std::string sdc_path;
+    // The SDC pin map (SDC pin-resolution unit): the bridge's
+    // exact correspondences from hierarchical pin paths in the
+    // SDC's spelling to flat pin paths in the imported database's
+    // spelling, recorded by write_def beside sdc_path and handed
+    // to the timing service's ODB overloads, which translate the
+    // SDC through it per call. Success-only, replace-never-merge
+    // updates at write_def; an empty map (any session that did
+    // not run the bridge) leaves ODB analyses byte-identical to
+    // the pre-map behavior. Not persisted anywhere.
+    analysis::SdcPinMap sdc_pin_map;
     std::map<std::string, std::string> liberty_by_corner;
     std::string spef_path;
     std::vector<analysis::SceneResult> last_results;

@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <set>
 #include <sstream>
 #include <string>
@@ -11265,13 +11266,13 @@ static int CountCtsBufferNodes(Shell& shell, const std::string& payload,
 // flop clock pins plus the toggle-feedback inverter's input
 // pin, a real load on the net; the design's original 8
 // counted clock pins only). Both payloads carry the two
-// unavailable statements verbatim, the tt corner, and, per
-// ruling item 2, the STA unavailable statement verbatim
-// instead of a finite slack: the ODB timing path re-reads
-// clk_top.sdc against the flat database and cannot resolve
-// the generated clock's source pin (u_div/q in the SDC,
-// u_div/_17_ pin Q in the DEF), the same posture place
-// already ships on this demo.
+// unavailable statements verbatim and the tt corner. The STA
+// leg's posture is the SDC pin-resolution unit's A3, which
+// supersedes ruling item 2: the session pin map recorded at
+// write_def translates clk_top.sdc at the timing service
+// boundary, the generated clock's source pin resolves
+// against the flat database, and both payloads carry the
+// finite scene slack instead of the unavailable statement.
 TEST(CoreCommands, CtsRunsClockedDemoEndToEnd) {
   TimingTempDir dir;
   Shell shell;
@@ -11289,16 +11290,9 @@ TEST(CoreCommands, CtsRunsClockedDemoEndToEnd) {
                 "delay is a length, not a time)"),
             std::string::npos);
   EXPECT_NE(clk.payload.find("liberty_corner=tt"), std::string::npos);
-  // The statement names the SDC by the path the session read
-  // it from, so the test pins the statement's shape and its
-  // stable tail (the OpenSTA error), not the path itself.
-  EXPECT_NE(clk.payload.find(
-                "sta_slack_ns=unavailable (scene func_tt: could not "
-                "read SDC file: "),
+  EXPECT_NE(clk.payload.find("scene=func_tt worst_slack_ns="),
             std::string::npos);
-  EXPECT_NE(clk.payload.find(
-                "clk_top.sdc: Error 374: clk_top.sdc line 2, empty "
-                "ports/pins/nets argument.)"),
+  EXPECT_EQ(clk.payload.find("sta_slack_ns=unavailable"),
             std::string::npos);
   const CommandResult div_q = shell.Run("cts", {"-clock", "div_q"});
   ASSERT_TRUE(div_q.ok) << div_q.message;
@@ -11306,13 +11300,9 @@ TEST(CoreCommands, CtsRunsClockedDemoEndToEnd) {
             std::string::npos);
   EXPECT_NE(div_q.payload.find("liberty_corner=tt"),
             std::string::npos);
-  EXPECT_NE(div_q.payload.find(
-                "sta_slack_ns=unavailable (scene func_tt: could not "
-                "read SDC file: "),
+  EXPECT_NE(div_q.payload.find("scene=func_tt worst_slack_ns="),
             std::string::npos);
-  EXPECT_NE(div_q.payload.find(
-                "clk_top.sdc: Error 374: clk_top.sdc line 2, empty "
-                "ports/pins/nets argument.)"),
+  EXPECT_EQ(div_q.payload.find("sta_slack_ns=unavailable"),
             std::string::npos);
 }
 
@@ -11342,7 +11332,10 @@ TEST(CoreCommands, CtsSummaryFailsFastWithoutCts) {
 // line by line: both sink counts named per net (sinks counts
 // load pins, clock_sinks the flop clock pins among them:
 // 23/23 on clk, 9/8 on div_q), and each run's STA outcome as
-// the sta_note it recorded (ruling item 2).
+// the slack line it recorded. The outcome is the SDC
+// pin-resolution unit's finite slack (its A3 supersedes
+// F5's ruling item 2): the record holds one func_tt slack
+// per net and no sta_note.
 TEST(CoreCommands, CtsSummaryReportsRecordedRuns) {
   TimingTempDir dir;
   Shell shell;
@@ -11353,29 +11346,32 @@ TEST(CoreCommands, CtsSummaryReportsRecordedRuns) {
   const CommandResult summary = shell.Run("cts_summary");
   ASSERT_TRUE(summary.ok) << summary.message;
   // The summary must reproduce the record line by line. The
-  // recorded sta_note names the SDC by the path the session
-  // read it from, so the expected payload takes the notes
-  // from the record itself and pins their shape separately.
+  // expected payload takes each net's slack from the record
+  // itself, formatted as the summary formats it (the
+  // registry's FormatNumber: an ostringstream at precision
+  // 10), and pins the record's shape separately.
+  const auto slack_line =
+      [](const CommandContext::CtsSession::NetResult& entry) {
+        std::ostringstream out;
+        out << std::setprecision(10) << entry.scene_slacks[0].second;
+        return "\nslack scene=" + entry.scene_slacks[0].first +
+               " worst_slack_ns=" + out.str();
+      };
   for (const CommandContext::CtsSession::NetResult& entry :
        shell.ctx.cts.nets) {
-    ASSERT_TRUE(entry.scene_slacks.empty());
-    EXPECT_NE(entry.sta_note.find(
-                  "sta_slack_ns=unavailable (scene func_tt: could "
-                  "not read SDC file: "),
-              std::string::npos);
-    EXPECT_NE(entry.sta_note.find(
-                  "clk_top.sdc: Error 374: clk_top.sdc line 2, "
-                  "empty ports/pins/nets argument.)"),
-              std::string::npos);
+    ASSERT_EQ(entry.scene_slacks.size(), 1u);
+    EXPECT_EQ(entry.scene_slacks[0].first, "func_tt");
+    EXPECT_TRUE(std::isfinite(entry.scene_slacks[0].second));
+    EXPECT_TRUE(entry.sta_note.empty());
   }
   EXPECT_EQ(summary.payload,
             "cts nets=2\n"
             "net name=clk roots=1 buffers=3 sinks=23 clock_sinks=23 "
-            "subnets=3 liberty_corner=tt\nsta_note " +
-                shell.ctx.cts.nets[0].sta_note +
+            "subnets=3 liberty_corner=tt" +
+                slack_line(shell.ctx.cts.nets[0]) +
                 "\nnet name=div_q roots=1 buffers=3 sinks=9 "
-                "clock_sinks=8 subnets=3 liberty_corner=tt\nsta_note " +
-                shell.ctx.cts.nets[1].sta_note);
+                "clock_sinks=8 subnets=3 liberty_corner=tt" +
+                slack_line(shell.ctx.cts.nets[1]));
 }
 
 // F5 record semantics, as measured: a re-run on an
@@ -11466,23 +11462,52 @@ TEST(CoreCommands, CtsPostCtsClockViewCrossCheck) {
   EXPECT_EQ(CountBufferNodes(pins.payload, "clk_div"), 5);
 }
 
-// F5 A6 as re-judged (ruling item 2): run_timing's behavior
-// after CTS matches its behavior at the place stage on the
-// same session: the same failure, introduced by the SDC pin
-// resolution gap that predates F5, with no new failure mode
-// from CTS.
-TEST(CoreCommands, CtsRunTimingPostureUnchanged) {
+// The worst_slack_ns value of a payload, as printed (the
+// token after the first "worst_slack_ns="): the SDC
+// pin-resolution unit's A4 judges agreement between two
+// payloads exactly as printed, not after a float round trip.
+static std::string PayloadSlackToken(const std::string& payload) {
+  const std::string key = "worst_slack_ns=";
+  const std::size_t at = payload.find(key);
+  if (at == std::string::npos) return "";
+  const std::size_t begin = at + key.size();
+  std::size_t end = begin;
+  while (end < payload.size() && payload[end] != ' ' &&
+         payload[end] != '\n') {
+    ++end;
+  }
+  return payload.substr(begin, end - begin);
+}
+
+// The same token as a number, for the A2 cross-path agreement
+// (a tolerance comparison, unlike A4's exact printed match).
+static double PayloadSlack(const std::string& payload) {
+  const std::string token = PayloadSlackToken(payload);
+  return token.empty() ? 0.0 : std::stod(token);
+}
+
+// The SDC pin-resolution unit's A4 (F5's re-judged A6 with
+// the finite number restored): run_timing after both cts
+// calls succeeds with source=odb, and its reported
+// worst_slack_ns equals the second cts payload's reported
+// worst_slack_ns exactly as printed: same database state,
+// same scenes, same translated SDC, so the two analyses are
+// the same computation. (This test replaces F5's
+// CtsRunTimingPostureUnchanged, which pinned the shared
+// failure the pin map now fixes.)
+TEST(CoreCommands, CtsRunTimingAgreesWithCtsSlack) {
   TimingTempDir dir;
   Shell shell;
   BuildPlacedClockedDemoSession(shell, dir);
-  const CommandResult before = shell.Run("run_timing");
-  ASSERT_FALSE(before.ok);
   ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
-  ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
+  const CommandResult div_q = shell.Run("cts", {"-clock", "div_q"});
+  ASSERT_TRUE(div_q.ok) << div_q.message;
   const CommandResult after = shell.Run("run_timing");
-  ASSERT_FALSE(after.ok);
-  EXPECT_EQ(after.diag, before.diag);
-  EXPECT_EQ(after.message, before.message);
+  ASSERT_TRUE(after.ok) << after.message;
+  EXPECT_NE(after.payload.find("source=odb"), std::string::npos);
+  const std::string cts_token = PayloadSlackToken(div_q.payload);
+  ASSERT_FALSE(cts_token.empty());
+  EXPECT_EQ(PayloadSlackToken(after.payload), cts_token);
 }
 
 // F5 A9: CTS does not disturb the place record or the
@@ -11642,9 +11667,10 @@ static bool NetHasWire(const std::string& payload,
 // stopped_at_bound is false exactly when violations are zero.
 // Overflow and violations are recorded whatever they measure
 // (the design judges them as reported, never failed on). The
-// payload ends with the STA unavailable statement verbatim,
-// the same statement place and both cts payloads carry on
-// this design.
+// payload ends with the finite scene slack (the SDC
+// pin-resolution unit supersedes the unavailable statement
+// this payload carried through F6, the same supersession as
+// place's and both cts payloads').
 TEST(CoreCommands, RouteRunsClockedDemoEndToEnd) {
   TimingTempDir dir;
   Shell shell;
@@ -11673,13 +11699,9 @@ TEST(CoreCommands, RouteRunsClockedDemoEndToEnd) {
       result.payload.find("stopped_at_bound=true") != std::string::npos;
   EXPECT_EQ(stopped, violations > 0 && iterations >= 64);
   EXPECT_NE(result.payload.find("liberty_corner=tt"), std::string::npos);
-  EXPECT_NE(result.payload.find(
-                "sta_slack_ns=unavailable (scene func_tt: could not "
-                "read SDC file: "),
+  EXPECT_NE(result.payload.find("scene=func_tt worst_slack_ns="),
             std::string::npos);
-  EXPECT_NE(result.payload.find(
-                "clk_top.sdc: Error 374: clk_top.sdc line 2, empty "
-                "ports/pins/nets argument.)"),
+  EXPECT_EQ(result.payload.find("sta_slack_ns=unavailable"),
             std::string::npos);
 }
 
@@ -11709,11 +11731,13 @@ TEST(CoreCommands, RouteSummaryFailsFastWithoutRoute) {
 // F6 A3 + A5: after the run, route_summary returns the
 // record line by line (header counts equal to the route
 // payload's, one layer line per layer in range with the
-// payload's per-layer numbers, the sta_note equal to the
-// run's unavailable statement), and the geometry
-// cross-check: at least one wire segment for every routed
-// net, the clk and div_q nets wired, and the unwired net
-// count matching the header's routed-versus-total gap.
+// payload's per-layer numbers, the slack line equal to the
+// record's finite post-route slack: the SDC pin-resolution
+// unit supersedes the unavailable statement the record
+// carried through F6), and the geometry cross-check: at
+// least one wire segment for every routed net, the clk and
+// div_q nets wired, and the unwired net count matching the
+// header's routed-versus-total gap.
 TEST(CoreCommands, RouteSummaryReportsRecordedRun) {
   TimingTempDir dir;
   Shell shell;
@@ -11726,18 +11750,22 @@ TEST(CoreCommands, RouteSummaryReportsRecordedRun) {
   const CommandResult summary = shell.Run("route_summary");
   ASSERT_TRUE(summary.ok) << summary.message;
   // The summary must reproduce the record line by line. The
-  // recorded sta_note names the SDC by the path the session
-  // read it from, so the expected payload takes the note from
-  // the record itself and pins its shape separately.
-  ASSERT_TRUE(shell.ctx.route.scene_slacks.empty());
-  EXPECT_NE(shell.ctx.route.sta_note.find(
-                "sta_slack_ns=unavailable (scene func_tt: could "
-                "not read SDC file: "),
-            std::string::npos);
-  EXPECT_NE(shell.ctx.route.sta_note.find(
-                "clk_top.sdc: Error 374: clk_top.sdc line 2, "
-                "empty ports/pins/nets argument.)"),
-            std::string::npos);
+  // record's slack is formatted as the summary formats it
+  // (the registry's FormatNumber: an ostringstream at
+  // precision 10).
+  ASSERT_EQ(shell.ctx.route.scene_slacks.size(), 1u);
+  EXPECT_EQ(shell.ctx.route.scene_slacks[0].first, "func_tt");
+  EXPECT_TRUE(std::isfinite(shell.ctx.route.scene_slacks[0].second));
+  EXPECT_TRUE(shell.ctx.route.sta_note.empty());
+  {
+    std::ostringstream out;
+    out << std::setprecision(10)
+        << shell.ctx.route.scene_slacks[0].second;
+    EXPECT_NE(summary.payload.find("\nslack scene=func_tt "
+                                   "worst_slack_ns=" +
+                                   out.str()),
+              std::string::npos);
+  }
   EXPECT_EQ(RouteHeaderInt(summary.payload, "routed"),
             RouteHeaderInt(route.payload, "routed"));
   EXPECT_EQ(RouteHeaderInt(summary.payload, "total"),
@@ -11776,8 +11804,7 @@ TEST(CoreCommands, RouteSummaryReportsRecordedRun) {
   EXPECT_TRUE(NetHasWire(summary.payload, "div_q"));
   EXPECT_EQ(CountRouteLines(summary.payload, "unwired "),
             static_cast<int>(total - routed));
-  EXPECT_NE(summary.payload.find("sta_note " + shell.ctx.route.sta_note),
-            std::string::npos);
+  EXPECT_EQ(summary.payload.find("sta_note"), std::string::npos);
 }
 
 // F6 record semantics: a second route in the same session
@@ -11838,24 +11865,30 @@ TEST(CoreCommands, RouteLeavesClockViewUnchanged) {
   EXPECT_EQ(CountCtsBufferNodes(shell, pins.payload, "clk_div"), 3);
 }
 
-// F6 A4 as judged (the place-stage posture): run_timing's
-// behavior after route matches its behavior at the place
-// stage on the same session: the same failure, introduced
-// by the SDC pin resolution gap that predates F6, with no
-// new failure mode from routing.
-TEST(CoreCommands, RouteRunTimingPostureUnchanged) {
+// The SDC pin-resolution unit's A4 at the route stage
+// (F6's re-judged A6 with the finite number restored):
+// run_timing after route succeeds with source=odb, and its
+// reported worst_slack_ns equals the route payload's
+// reported worst_slack_ns exactly as printed: same database
+// state, same scenes, same translated SDC. (This test
+// replaces F6's RouteRunTimingPostureUnchanged, which pinned
+// the shared failure the pin map now fixes; its per-test
+// ctest entry keeps the F6 isolation, under the same entry
+// name.)
+TEST(CoreCommands, RouteRunTimingAgreesWithRouteSlack) {
   TimingTempDir dir;
   Shell shell;
   BuildPlacedClockedDemoSession(shell, dir);
-  const CommandResult before = shell.Run("run_timing");
-  ASSERT_FALSE(before.ok);
   ASSERT_TRUE(shell.Run("cts", {"-clock", "clk"}).ok);
   ASSERT_TRUE(shell.Run("cts", {"-clock", "div_q"}).ok);
-  ASSERT_TRUE(shell.Run("route", {}).ok);
+  const CommandResult route = shell.Run("route", {});
+  ASSERT_TRUE(route.ok) << route.message;
   const CommandResult after = shell.Run("run_timing");
-  ASSERT_FALSE(after.ok);
-  EXPECT_EQ(after.diag, before.diag);
-  EXPECT_EQ(after.message, before.message);
+  ASSERT_TRUE(after.ok) << after.message;
+  EXPECT_NE(after.payload.find("source=odb"), std::string::npos);
+  const std::string route_token = PayloadSlackToken(route.payload);
+  ASSERT_FALSE(route_token.empty());
+  EXPECT_EQ(PayloadSlackToken(after.payload), route_token);
 }
 
 // F6 A7: on demo/synth, after the optloop flow through
@@ -11989,6 +12022,172 @@ TEST(CoreCommands, RouteLeavesPlaceAndCtsRecordsAlone) {
   const CommandResult timing_after = shell.Run("timing_summary");
   ASSERT_TRUE(timing_after.ok) << timing_after.message;
   EXPECT_EQ(timing_after.payload, timing_before.payload);
+}
+
+// The SDC pin-resolution unit's A1 + A2 + A5, the
+// end-to-end acceptance: on the clocked demo, the place
+// payload carries the finite scene slack (A1); run_timing
+// on the ODB path in the same session succeeds with
+// source=odb and agrees with run_timing on the netlist path
+// over the same session's mapped design within 0.001 ns
+// (A2); and report_clock's rows are byte-identical across
+// the two paths, the constraint set untouched by the
+// translation: the generated row's target_spec is still the
+// SDC's own words, {u_div/q} (A5). Values are judged as
+// agreements, never constants (design section 8): the
+// mapped netlist's instance numbering is the synthesis
+// backend's business, and the two paths' agreement is
+// pool-state-independent because each path is judged
+// against its own session's products.
+TEST(CoreCommands, ClockedDemoOdbTimingResolves) {
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  TimingTempDir dir;
+  Shell shell;
+  BuildClockedDemoSession(shell);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  const CommandResult mapped =
+      shell.Run("synth_map", {"-target", "area"});
+  ASSERT_TRUE(mapped.ok) << mapped.message;
+  const std::string def_path = dir.Path("clk_top.def");
+  const CommandResult def =
+      shell.Run("write_def", {def_path, "-lef", mock_dir + "/eos_mock.lef",
+                              "-tlef", mock_dir + "/eos_mock.tlef"});
+  ASSERT_TRUE(def.ok) << def.message;
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.tlef"}).ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.lef"}).ok);
+  ASSERT_TRUE(shell.Run("read_def", {def_path}).ok);
+  ASSERT_TRUE(shell.Run("floorplan").ok);
+  const CommandResult place = shell.Run("place");
+  ASSERT_TRUE(place.ok) << place.message;
+  EXPECT_NE(place.payload.find("scene=func_tt worst_slack_ns="),
+            std::string::npos);
+  EXPECT_EQ(place.payload.find("sta_slack_ns=unavailable"),
+            std::string::npos);
+  const double place_slack = PayloadSlack(place.payload);
+  EXPECT_TRUE(std::isfinite(place_slack));
+
+  const CommandResult odb_run = shell.Run("run_timing");
+  ASSERT_TRUE(odb_run.ok) << odb_run.message;
+  EXPECT_NE(odb_run.payload.find("source=odb"), std::string::npos);
+  const double odb_slack = PayloadSlack(odb_run.payload);
+  EXPECT_TRUE(std::isfinite(odb_slack));
+  EXPECT_NEAR(odb_slack, place_slack, 0.001);
+
+  // The netlist half: a second session over the same demo;
+  // synth_map leaves the mapped netlist as the timing
+  // session's design, and no read_def ever imports the ODB
+  // path, so run_timing takes the netlist form.
+  Shell netlist_shell;
+  BuildClockedDemoSession(netlist_shell);
+  ASSERT_TRUE(netlist_shell.Run("elaborate").ok);
+  ASSERT_TRUE(netlist_shell.Run("synth_generic").ok);
+  const CommandResult netlist_mapped =
+      netlist_shell.Run("synth_map", {"-target", "area"});
+  ASSERT_TRUE(netlist_mapped.ok) << netlist_mapped.message;
+  const CommandResult netlist_run = netlist_shell.Run("run_timing");
+  ASSERT_TRUE(netlist_run.ok) << netlist_run.message;
+  EXPECT_NE(netlist_run.payload.find("source=verilog"),
+            std::string::npos);
+  EXPECT_NEAR(PayloadSlack(netlist_run.payload), odb_slack, 0.001);
+
+  const CommandResult odb_clocks = shell.Run("report_clock");
+  ASSERT_TRUE(odb_clocks.ok) << odb_clocks.message;
+  const CommandResult netlist_clocks =
+      netlist_shell.Run("report_clock");
+  ASSERT_TRUE(netlist_clocks.ok) << netlist_clocks.message;
+  EXPECT_EQ(odb_clocks.payload, netlist_clocks.payload);
+  EXPECT_NE(odb_clocks.payload.find("{u_div/q}"), std::string::npos);
+}
+
+// The SDC pin-resolution unit's A8 + the map contract
+// (design section 7): a successful write_def on the clocked
+// demo records the session pin map beside sdc_path, with
+// the literal entry the whole unit exists for, u_div/q
+// mapped to the divider's flat pin; every value names an
+// instance read_def resolves; the delay target's sequence
+// records its own map and times end to end with finite
+// slack, like the area one; and a later write_def replaces
+// the map rather than merging into it, judged by a
+// hierarchy-free design whose map is empty.
+TEST(CoreCommands, WriteDefRecordsSdcPinMap) {
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  TimingTempDir dir;
+  Shell shell;
+  BuildClockedDemoSession(shell);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  ASSERT_TRUE(shell.Run("synth_map", {"-target", "area"}).ok);
+  const std::string def_path = dir.Path("clk_top.def");
+  const CommandResult def =
+      shell.Run("write_def", {def_path, "-lef", mock_dir + "/eos_mock.lef",
+                              "-tlef", mock_dir + "/eos_mock.tlef"});
+  ASSERT_TRUE(def.ok) << def.message;
+  const auto divider = shell.ctx.timing.sdc_pin_map.find("u_div/q");
+  ASSERT_NE(divider, shell.ctx.timing.sdc_pin_map.end());
+  EXPECT_EQ(divider->second, "u_div/_17_/Q");
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.tlef"}).ok);
+  ASSERT_TRUE(shell.Run("read_lef", {mock_dir + "/eos_mock.lef"}).ok);
+  ASSERT_TRUE(shell.Run("read_def", {def_path}).ok);
+  for (const auto& entry : shell.ctx.timing.sdc_pin_map) {
+    const std::size_t slash = entry.second.rfind('/');
+    ASSERT_NE(slash, std::string::npos) << entry.second;
+    db::OdbInstanceInfo info;
+    EXPECT_TRUE(shell.ctx.timing.odb->FindInstance(
+        entry.second.substr(0, slash), &info))
+        << entry.second;
+  }
+
+  // Replaced, not merged (design section 4.3): a later
+  // write_def on a hierarchy-free design (demo/synth's
+  // optloop: one flat module, no submodule output ports)
+  // records that run's map, which is empty. A merge would
+  // leave the clocked entries, u_div/q among them, behind.
+  const std::string synth_dir = EOS_DEMO_SYNTH_DIR;
+  ASSERT_TRUE(shell.Run("read_verilog", {synth_dir + "/optloop.v", "optloop"})
+                  .ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {synth_dir + "/top.sdc"}).ok);
+  ASSERT_TRUE(shell.Run("elaborate").ok);
+  ASSERT_TRUE(shell.Run("synth_generic").ok);
+  ASSERT_TRUE(shell.Run("synth_map", {"-target", "area"}).ok);
+  const std::string opt_def = dir.Path("optloop.def");
+  const CommandResult opt_written = shell.Run(
+      "write_def", {opt_def, "-lef", mock_dir + "/eos_mock.lef",
+                    "-tlef", mock_dir + "/eos_mock.tlef"});
+  ASSERT_TRUE(opt_written.ok) << opt_written.message;
+  EXPECT_TRUE(shell.ctx.timing.sdc_pin_map.empty());
+
+  // The delay sequence end to end (A8), in a fresh session
+  // as the bridge test's delay leg runs it: its write_def
+  // records the map, and place and run_timing analyze with
+  // finite slack, like the area sequence.
+  Shell delay_shell;
+  BuildClockedDemoSession(delay_shell);
+  ASSERT_TRUE(delay_shell.Run("elaborate").ok);
+  ASSERT_TRUE(delay_shell.Run("synth_generic").ok);
+  ASSERT_TRUE(delay_shell.Run("synth_map", {"-target", "delay"}).ok);
+  const std::string delay_def = dir.Path("clk_top_delay.def");
+  const CommandResult delay_written = delay_shell.Run(
+      "write_def", {delay_def, "-lef", mock_dir + "/eos_mock.lef",
+                    "-tlef", mock_dir + "/eos_mock.tlef"});
+  ASSERT_TRUE(delay_written.ok) << delay_written.message;
+  EXPECT_NE(delay_shell.ctx.timing.sdc_pin_map.find("u_div/q"),
+            delay_shell.ctx.timing.sdc_pin_map.end());
+  ASSERT_TRUE(
+      delay_shell.Run("read_lef", {mock_dir + "/eos_mock.tlef"}).ok);
+  ASSERT_TRUE(delay_shell.Run("read_lef", {mock_dir + "/eos_mock.lef"}).ok);
+  ASSERT_TRUE(delay_shell.Run("read_def", {delay_def}).ok);
+  ASSERT_TRUE(delay_shell.Run("floorplan").ok);
+  const CommandResult place = delay_shell.Run("place");
+  ASSERT_TRUE(place.ok) << place.message;
+  EXPECT_NE(place.payload.find("scene=func_tt worst_slack_ns="),
+            std::string::npos);
+  EXPECT_EQ(place.payload.find("sta_slack_ns=unavailable"),
+            std::string::npos);
+  const CommandResult run = delay_shell.Run("run_timing");
+  ASSERT_TRUE(run.ok) << run.message;
+  EXPECT_NE(run.payload.find("source=odb"), std::string::npos);
+  EXPECT_TRUE(std::isfinite(PayloadSlack(run.payload)));
 }
 #endif  // EOS_CLOCKED_DEMO_DIR && EOS_MOCK_PDK_DIR
 
