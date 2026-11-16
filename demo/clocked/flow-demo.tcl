@@ -1,12 +1,14 @@
-# Full-flow demo script for the clocked design (F5 CTS unit).
+# Full-flow demo script for the clocked design (F6 route unit).
 # Run from demo/clocked: ../../build/apps/eos/eos flow-demo.tcl
 # The same commands can be typed in the GUI console entry line
 # instead, one per Return (the eos:: prefix is optional there).
-# The chain runs the whole front-to-CTS flow in one session:
+# The chain runs the whole front-to-route flow in one session:
 # scenario, library, filelist, SDC, elaborate, generic and
 # mapped synthesis, the DEF bridge out and back in, floorplan,
 # place, then one cts run per clock net (master first), the
-# CTS record query, the clock view, and a post-CTS timing run.
+# CTS record query, the clock view, a post-CTS timing run,
+# then route, the route record query, the clock view again,
+# and a post-route timing run.
 # Measured outputs for this sequence are recorded in README.md.
 eos::create_scenario func_tt func tt estimate
 eos::read_liberty tt ../../src/pd/rsz/tests/mock/eos_mock.lib
@@ -24,5 +26,9 @@ eos::place
 eos::cts -clock clk
 eos::cts -clock div_q
 eos::cts_summary
+eos::clock_network_summary
+eos::run_timing
+eos::route
+eos::route_summary
 eos::clock_network_summary
 eos::run_timing

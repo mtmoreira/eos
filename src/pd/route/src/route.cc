@@ -3,9 +3,11 @@
 #include "eos/pd/route.h"
 
 #include <exception>
+#include <map>
 #include <memory>
 #include <string>
 #include <tcl.h>
+#include <utility>
 #include <vector>
 
 #include "ant/AntennaChecker.hh"
@@ -15,6 +17,7 @@
 #include "grt/GlobalRouter.h"
 #include "grt/MakeGlobalRouter.h"
 #include "odb/db.h"
+#include "odb/dbWireCodec.h"
 #include "ord/OpenRoad.hh"
 #include "sta/MinMax.hh"
 #include "sta/Scene.hh"
@@ -376,6 +379,200 @@ Status RunRoute(odb::dbDatabase* db, const RouteOptions& options,
     sta::Sta::setSta(nullptr);
     return InvalidState(std::string("route: engine failure: ") + e.what());
   }
+}
+
+namespace {
+
+// Decodes one dbWire into the geometry's segments and vias,
+// following the in-tree DRC engine's DecodeWire walk: a path
+// run is flushed whenever a new path, junction, short,
+// virtual wire, via, tech via, or patch rect starts, and a
+// junction point seeds the new run, so a branch's first
+// segment runs from the junction point. RULE opcodes update
+// the run's width from the layer rule. RECT opcodes carry a
+// patch rect, which has no centerline: it is skipped, and
+// the wire's PATH runs carry the drawn geometry (the
+// detailed router writes patch rects only as end-of-line
+// extensions of a path run).
+void DecodeRouteWire(odb::dbWire* wire, const std::string& net,
+                     RouteGeometry* geometry) {
+  if (wire == nullptr) {
+    return;
+  }
+  odb::dbWireDecoder decoder;
+  decoder.begin(wire);
+  odb::dbTechLayer* layer = nullptr;
+  int width = 0;
+  std::vector<std::pair<int, int>> points;
+  std::map<int, odb::Point> junctions;
+  odb::Point last(0, 0);
+  bool have_last = false;
+
+  auto flush_run = [&]() {
+    if (points.size() >= 2 && layer != nullptr && width > 0) {
+      RouteWireSegment segment;
+      segment.net = net;
+      segment.layer = layer->getName();
+      segment.width = width;
+      segment.points = points;
+      geometry->segments.push_back(std::move(segment));
+    }
+    points.clear();
+  };
+
+  while (true) {
+    odb::dbWireDecoder::OpCode op = decoder.next();
+    if (op == odb::dbWireDecoder::END_DECODE) {
+      break;
+    }
+    switch (op) {
+      case odb::dbWireDecoder::PATH:
+      case odb::dbWireDecoder::JUNCTION:
+      case odb::dbWireDecoder::SHORT:
+      case odb::dbWireDecoder::VWIRE: {
+        flush_run();
+        layer = decoder.getLayer();
+        width = layer == nullptr
+                    ? 0
+                    : static_cast<int>(layer->getWidth());
+        if (op != odb::dbWireDecoder::PATH) {
+          std::map<int, odb::Point>::const_iterator it =
+              junctions.find(decoder.getJunctionValue());
+          if (it != junctions.end()) {
+            points.push_back({it->second.x(), it->second.y()});
+          }
+        }
+        break;
+      }
+      case odb::dbWireDecoder::POINT: {
+        int x = 0;
+        int y = 0;
+        decoder.getPoint(x, y);
+        odb::Point point(x, y);
+        junctions[decoder.getJunctionId()] = point;
+        points.push_back({x, y});
+        last = point;
+        have_last = true;
+        break;
+      }
+      case odb::dbWireDecoder::POINT_EXT: {
+        int x = 0;
+        int y = 0;
+        int ext = 0;
+        decoder.getPoint(x, y, ext);
+        odb::Point point(x, y);
+        junctions[decoder.getJunctionId()] = point;
+        // The extension runs past the point in the direction
+        // of travel from the previous point of this run.
+        if (!points.empty() && ext != 0) {
+          std::pair<int, int> prev = points.back();
+          int dx = (point.x() > prev.first) - (point.x() < prev.first);
+          int dy = (point.y() > prev.second) - (point.y() < prev.second);
+          point = odb::Point(point.x() + dx * ext,
+                             point.y() + dy * ext);
+        }
+        points.push_back({point.x(), point.y()});
+        last = point;
+        have_last = true;
+        break;
+      }
+      case odb::dbWireDecoder::VIA: {
+        flush_run();
+        if (have_last) {
+          odb::dbVia* via = decoder.getVia();
+          if (via != nullptr) {
+            odb::dbTechLayer* lower = via->getBottomLayer();
+            odb::dbTechLayer* upper = via->getTopLayer();
+            if (lower != nullptr && upper != nullptr) {
+              RouteVia route_via;
+              route_via.net = net;
+              route_via.lower_layer = lower->getName();
+              route_via.upper_layer = upper->getName();
+              route_via.x = last.x();
+              route_via.y = last.y();
+              geometry->vias.push_back(std::move(route_via));
+            }
+          }
+        }
+        break;
+      }
+      case odb::dbWireDecoder::TECH_VIA: {
+        flush_run();
+        if (have_last) {
+          odb::dbTechVia* via = decoder.getTechVia();
+          if (via != nullptr) {
+            odb::dbTechLayer* lower = via->getBottomLayer();
+            odb::dbTechLayer* upper = via->getTopLayer();
+            if (lower != nullptr && upper != nullptr) {
+              RouteVia route_via;
+              route_via.net = net;
+              route_via.lower_layer = lower->getName();
+              route_via.upper_layer = upper->getName();
+              route_via.x = last.x();
+              route_via.y = last.y();
+              geometry->vias.push_back(std::move(route_via));
+            }
+          }
+        }
+        break;
+      }
+      case odb::dbWireDecoder::RECT: {
+        // A patch rect: flush the run; the rect itself has
+        // no centerline and is not a drawn segment.
+        flush_run();
+        break;
+      }
+      case odb::dbWireDecoder::RULE: {
+        odb::dbTechLayerRule* rule = decoder.getRule();
+        if (rule != nullptr && rule->getWidth() > 0) {
+          width = rule->getWidth();
+        }
+        break;
+      }
+      case odb::dbWireDecoder::ITERM:
+      case odb::dbWireDecoder::BTERM:
+      case odb::dbWireDecoder::END_DECODE:
+        break;
+    }
+  }
+  flush_run();
+}
+
+}  // namespace
+
+Status QueryRouteGeometry(odb::dbDatabase* db,
+                          RouteGeometry* geometry) {
+  if (db == nullptr) {
+    return InvalidState("route: no database (run eos::import_odb first)");
+  }
+  odb::dbTech* tech = db->getTech();
+  if (tech == nullptr) {
+    return InvalidState(
+        "route: no technology data (import a technology file first)");
+  }
+  odb::dbBlock* block = db->getChip() ? db->getChip()->getBlock() : nullptr;
+  if (block == nullptr) {
+    return InvalidState(
+        "route: no mapped design (import a mapped netlist first)");
+  }
+  if (geometry == nullptr) {
+    return InvalidState("route: no geometry output");
+  }
+  geometry->segments.clear();
+  geometry->vias.clear();
+  geometry->unwired_nets.clear();
+  for (odb::dbNet* net : block->getNets()) {
+    if (net->getSigType().isSupply() || net->isSpecial()) {
+      continue;
+    }
+    odb::dbWire* wire = net->getWire();
+    if (wire == nullptr) {
+      geometry->unwired_nets.push_back(net->getName());
+      continue;
+    }
+    DecodeRouteWire(wire, net->getName(), geometry);
+  }
+  return Status::Ok();
 }
 
 }  // namespace eos::pd

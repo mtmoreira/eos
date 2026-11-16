@@ -751,9 +751,10 @@ void PanelsView::LocateIssue(const std::string& path,
   if (!view_.SelectHierarchyPath(path)) return;
   if (!view_.SetDiagramLevel(path)) return;
   // Locating an issue navigates the hierarchy: it clears the
-  // floorplan stage, so the center shows the schematic the
-  // issue belongs to.
+  // floorplan and route stages, so the center shows the
+  // schematic the issue belongs to.
   view_.ShowFloorplan(false);
+  view_.ShowRoute(false);
   view_.RefreshSchematic();
   if (view_.DiagramLevelIsLeaf() && on_highlight_gate_) {
     on_highlight_gate_(target);

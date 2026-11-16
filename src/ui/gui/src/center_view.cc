@@ -16,10 +16,12 @@ CenterView::CenterView(SessionView& view, QWidget* parent)
   schematic_ = new SchematicDiagram(view_, stack_);
   floorplan_ = new FloorplanDiagram(view_, stack_);
   placement_ = new PlacementDiagram(view_, stack_);
+  route_ = new RouteDiagram(view_, stack_);
   stack_->addWidget(diagram_);
   stack_->addWidget(schematic_);
   stack_->addWidget(floorplan_);
   stack_->addWidget(placement_);
+  stack_->addWidget(route_);
   layout->addWidget(stack_);
   diagram_->SetActionCallback([this] {
     if (on_action_) on_action_();
@@ -31,25 +33,29 @@ CenterView::CenterView(SessionView& view, QWidget* parent)
 }
 
 void CenterView::Refresh() {
-  showing_placement_ =
-      view_.ShowingPlacement() && view_.Placement().Loaded();
-  showing_floorplan_ = !showing_placement_ &&
+  showing_route_ = view_.ShowingRoute() && view_.Route().Loaded();
+  showing_placement_ = !showing_route_ && view_.ShowingPlacement() &&
+                       view_.Placement().Loaded();
+  showing_floorplan_ = !showing_route_ && !showing_placement_ &&
                        view_.ShowingFloorplan() &&
                        view_.Floorplan().Loaded();
-  showing_schematic_ = !showing_placement_ && !showing_floorplan_ &&
-                       view_.DiagramLevelIsLeaf();
+  showing_schematic_ = !showing_route_ && !showing_placement_ &&
+                       !showing_floorplan_ && view_.DiagramLevelIsLeaf();
   diagram_->Refresh();
   schematic_->Refresh();
   floorplan_->Refresh();
   placement_->Refresh();
+  route_->Refresh();
   stack_->setCurrentWidget(
-      showing_placement_
-          ? static_cast<QWidget*>(placement_)
-          : (showing_floorplan_
-                 ? static_cast<QWidget*>(floorplan_)
-                 : (showing_schematic_
-                        ? static_cast<QWidget*>(schematic_)
-                        : static_cast<QWidget*>(diagram_))));
+      showing_route_
+          ? static_cast<QWidget*>(route_)
+          : (showing_placement_
+                 ? static_cast<QWidget*>(placement_)
+                 : (showing_floorplan_
+                        ? static_cast<QWidget*>(floorplan_)
+                        : (showing_schematic_
+                               ? static_cast<QWidget*>(schematic_)
+                               : static_cast<QWidget*>(diagram_)))));
 }
 
 void CenterView::HighlightGate(const std::string& instance) {

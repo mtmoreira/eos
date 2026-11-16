@@ -2,9 +2,13 @@
 // See include/eos/pd/cts.h.
 #include "eos/pd/cts.h"
 
+#include <algorithm>
+#include <cmath>
 #include <exception>
 #include <memory>
+#include <set>
 #include <string>
+#include <vector>
 #include <tcl.h>
 
 #include "CtsOptions.h"
@@ -26,6 +30,139 @@ namespace {
 
 using foundation::ErrorCode;
 using foundation::Status;
+
+// Legalize the buffer instances the engine inserted: TritonCTS
+// places buffers at computed tree points, not on the site grid
+// and not necessarily inside the die (on the clocked demo one
+// buffer landed with its pins at negative x, outside the die).
+// A buffer off the grid or off the die gets no pin access from
+// the detailed router (its via check fails), so the run fails
+// with DRT-0073. The fix snaps each new buffer to the nearest
+// site column and row, clamps it inside the die, and walks
+// nearby grid points when the snapped spot overlaps another
+// instance. Only unrotated (R0, LEF N) buffers are moved: the
+// engine places its buffers unrotated, and any other
+// orientation is left alone rather than guessed at. The place record is a snapshot
+// of the pre-CTS placement, so this does not touch it; the
+// CTS report is counts only, so it is unaffected too.
+void LegalizeCtsBuffers(odb::dbBlock* block,
+                        const std::set<odb::dbInst*>& before)
+{
+  odb::dbSet<odb::dbRow> rows = block->getRows();
+  if (rows.empty()) {
+    return;
+  }
+  const odb::Rect die = block->getDieArea();
+  odb::dbRow* first_row = *rows.begin();
+  const int site_width = first_row->getSite()->getWidth();
+  const int row_height = first_row->getSite()->getHeight();
+  if (site_width <= 0 || row_height <= 0) {
+    return;
+  }
+  int grid_x0 = 0;
+  int grid_y0 = 0;
+  first_row->getOrigin(grid_x0, grid_y0);
+  std::vector<int> row_y;
+  for (odb::dbRow* row : rows) {
+    int rx = 0;
+    int ry = 0;
+    row->getOrigin(rx, ry);
+    row_y.push_back(ry);
+  }
+  std::sort(row_y.begin(), row_y.end());
+
+  // Occupied boxes: every instance except the one being moved.
+  // Rebuilt per buffer so already-legalized buffers count too.
+  auto overlaps = [](int x0, int y0, int x1, int y1,
+                     const std::vector<odb::Rect>& boxes) {
+    for (const odb::Rect& b : boxes) {
+      if (x0 < b.xMax() && b.xMin() < x1 && y0 < b.yMax() &&
+          b.yMin() < y1) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (odb::dbInst* inst : block->getInsts()) {
+    if (before.count(inst) != 0) {
+      continue;
+    }
+    if (inst->getOrient() != odb::dbOrientType::R0) {
+      continue;
+    }
+    odb::dbMaster* master = inst->getMaster();
+    if (master == nullptr) {
+      continue;
+    }
+    const int width = master->getWidth();
+    const int height = master->getHeight();
+    int x = 0;
+    int y = 0;
+    inst->getLocation(x, y);
+
+    // Nearest site column and row, then clamp the grid indices
+    // so the whole cell stays inside the die.
+    const int max_col =
+        (die.xMax() - width - grid_x0) / site_width;
+    const int max_row = static_cast<int>(row_y.size()) - 1;
+    if (max_col < 0 || max_row < 0) {
+      continue;
+    }
+    int col = static_cast<int>(
+        std::llround(static_cast<double>(x - grid_x0) / site_width));
+    col = std::max(0, std::min(max_col, col));
+    int row = 0;
+    int best = std::abs(y - row_y[0]);
+    for (int i = 1; i <= max_row; i++) {
+      const int d = std::abs(y - row_y[i]);
+      if (d < best) {
+        best = d;
+        row = i;
+      }
+    }
+
+    // Walk nearby grid points (increasing Manhattan distance)
+    // for the first spot that does not overlap another cell.
+    bool placed = false;
+    for (int radius = 0; radius <= 8 && !placed; radius++) {
+      for (int dc = -radius; dc <= radius && !placed; dc++) {
+        for (int dr = -radius; dr <= radius && !placed; dr++) {
+          if (std::abs(dc) + std::abs(dr) != radius) {
+            continue;
+          }
+          const int c = col + dc;
+          const int r = row + dr;
+          if (c < 0 || c > max_col || r < 0 || r > max_row) {
+            continue;
+          }
+          const int nx = grid_x0 + c * site_width;
+          const int ny = row_y[r];
+          if (nx < die.xMin() || nx + width > die.xMax() ||
+              ny < die.yMin() || ny + height > die.yMax()) {
+            continue;
+          }
+          std::vector<odb::Rect> boxes;
+          for (odb::dbInst* other : block->getInsts()) {
+            if (other == inst) {
+              continue;
+            }
+            boxes.push_back(other->getBBox()->getBox());
+          }
+          if (!overlaps(nx, ny, nx + width, ny + height, boxes)) {
+            inst->setLocation(nx, ny);
+            placed = true;
+          }
+        }
+      }
+    }
+    // No free spot nearby: keep the snapped position anyway;
+    // the router will fail on it the same way it did before.
+    if (!placed) {
+      inst->setLocation(grid_x0 + col * site_width, row_y[row]);
+    }
+  }
+}
 
 // ShimGuard mirrors the place runner's guard: the engines read
 // the database, network, and logger through the ord singleton, and
@@ -240,8 +377,21 @@ Status RunCts(odb::dbDatabase* db, const CtsOptions& options,
           "cts: design has no clock (name a clock net with -clock)");
     }
 
+    // Snapshot the instances before the engine runs, so the
+    // legalization below can tell the buffers it inserted from
+    // the gates that were already placed.
+    std::set<odb::dbInst*> before;
+    for (odb::dbInst* inst : block->getInsts()) {
+      before.insert(inst);
+    }
+
     triton.runTritonCts();
     triton.reportCtsMetrics();
+
+    // The engine places its buffers off the site grid and
+    // sometimes off the die; snap them legal so the router can
+    // reach their pins (see LegalizeCtsBuffers).
+    LegalizeCtsBuffers(block, before);
 
     cts::CtsOptions* parms = triton.getParms();
     CtsReport out;

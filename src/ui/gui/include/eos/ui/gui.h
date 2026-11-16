@@ -24,6 +24,7 @@
 #include "eos/ui/panels.h"
 #include "eos/ui/placement.h"
 #include "eos/ui/registry.h"
+#include "eos/ui/route.h"
 #include "eos/ui/schematic.h"
 #include "eos/ui/signoff.h"
 #include "eos/ui/timing.h"
@@ -344,6 +345,27 @@ class SessionView {
   // runs on every refresh, like the placement refresh.
   void RefreshCts();
 
+  // Route model, refreshed from the live session (see
+  // RefreshRoute). The routing canvas reads this: the
+  // recorded route run with the per-layer congestion sums
+  // and the live routed geometry, plus the run's post-route
+  // STA outcome (per-scene slacks, or the payload's
+  // unavailable statement when the run could not analyze).
+  const RouteModel& Route() const { return route_; }
+
+  // Re-reads the route model from the live session:
+  // dispatches route_summary WITHOUT an echo line (a model
+  // refresh is not a user action) and rebuilds the model
+  // when a route run has been recorded. A failed query or a
+  // malformed payload keeps the last good model and reports
+  // through the unguarded-refresh path, which stays silent
+  // while the model is empty. The query fails fast with no
+  // recorded run, so the refresh needs no gate of its own;
+  // and the query reads only the stored route record plus a
+  // live wire walk, so it runs on every refresh, like the
+  // placement refresh.
+  void RefreshRoute();
+
   // Signoff model, refreshed from the live session (see
   // RefreshSignoff). The Signoff panel reads this: the DRC,
   // LVS, and antenna verdicts parsed from the external PV
@@ -413,6 +435,17 @@ class SessionView {
   bool ShowingPlacement() const { return center_placement_; }
   void ShowPlacement(bool show) { center_placement_ = show; }
 
+  // Whether the center shows the routing canvas instead of
+  // the hierarchy views, the floorplan canvas, or the
+  // placement canvas. A successful route dispatch takes the
+  // user there; a hierarchy navigation, the Floorplan, Place,
+  // or CTS stage button, or a successful close_design takes
+  // them back. The center shows the canvas only while the
+  // route model is loaded, so a stale flag never shows a
+  // route that no longer exists.
+  bool ShowingRoute() const { return center_route_; }
+  void ShowRoute(bool show) { center_route_ = show; }
+
   // One engine log line for the log window: the local time the
   // line was drained, its severity ("error" for a line
   // carrying "ERROR:", "warning" for one carrying "Warning:",
@@ -479,6 +512,14 @@ class SessionView {
     return context_.cts.nets.empty() ? StepStatus::kPending
                                      : StepStatus::kDone;
   }
+  // Route (full-flow GUI unit F6): Done once a route run has
+  // succeeded in this session (the route record is set).
+  // The stepper widget itself is F11's; this is the state
+  // contract it wires.
+  StepStatus RouteStep() const {
+    return context_.route.routed ? StepStatus::kDone
+                                 : StepStatus::kPending;
+  }
 
  private:
   static std::string EchoLine(const std::string& name,
@@ -510,6 +551,7 @@ class SessionView {
   PlacementModel placement_;
   ClockNetworkModel clock_network_;
   CtsModel cts_;
+  RouteModel route_;
   SignoffModel signoff_;
   // The center view the user last chose: true for the
   // floorplan canvas, false for the hierarchy views. Set by a
@@ -525,6 +567,16 @@ class SessionView {
   // placement is the later stage, so a successful place takes
   // the user past the floorplan canvas.
   bool center_placement_ = false;
+  // The center view the user last chose: true for the
+  // routing canvas, false otherwise. Set by a successful
+  // route dispatch and by explicit stage navigation; cleared
+  // by a successful close_design, by hierarchy navigation,
+  // and by the Floorplan, Place, and CTS stage buttons. It
+  // wins over center_floorplan_ and center_placement_ while
+  // the route model is loaded: route is the later stage, so
+  // a successful route takes the user past the placement
+  // canvas.
+  bool center_route_ = false;
   // The navigation a just-run command asked for, consumed once
   // by the window on the next refresh (see ResultDestination).
   ResultDestination pending_navigation_ = ResultDestination::kNone;

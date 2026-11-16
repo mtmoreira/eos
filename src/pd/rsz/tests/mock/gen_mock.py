@@ -240,7 +240,7 @@ SITE_NAME = "em_site"
 # Tech layers: synthetic values, own names. Derived scalars via the
 # command formula R = RPERSQ / width, C = CPERSQDIST * width +
 # 2 * EDGECAPACITANCE (width in um, R in ohm/m, C in F/m):
-#   em1: R 1,000,000  C 5.0e-08
+#   em1: R 4,000,000  C 4.25e-08
 #   em2: R   750,000  C 3.8e-08
 #   em3: R   333,333  C 3.3e-08
 #   em5: R   100,000  C 2.6e-08
@@ -251,18 +251,34 @@ SITE_NAME = "em_site"
 #   MINWIDTH = width - 0.02 (just below the default wire width);
 #   AREA = width * 0.1 um2 (a 0.1 um long segment of default
 #   width); MINSTEP = 0.1 um on every layer.
+#   Directions MUST strictly alternate (H, V, H, V, ...): the
+#   global router fails the run with GRT-0126 when two adjacent
+#   routing layers share a preferred direction. em5 was
+#   VERTICAL (duplicating em4) until the F6 route probe hit
+#   GRT-0126 on the clocked demo; the tail em5-em10 follows
+#   the em1 phase from there.
+#   em1 is finer than the stack's ladder (0.05 um wide on a
+#   0.1 um pitch, against 0.2 um pins): the detailed router's
+#   pin-access stub is three wire widths long, and at the
+#   stack's 0.2 um width it reaches the edge-abutting cells'
+#   pins and fails the via check for every top-level pin
+#   (DRT-0074 on the clocked demo), while the fine width
+#   keeps the stub short enough to pass. The fine width
+#   changes em1's derived RC (R 4,000,000, C 4.25e-08),
+#   which the RSZ golden verdicts pin, so those were
+#   re-baselined with it (F6).
 LAYERS = [
     # name, direction, width_um, pitch_um, rpersq, cpersqdist, edgecap
-    ("em1", "HORIZONTAL", 0.2, 0.4, 0.20, 0.05, 0.020),
+    ("em1", "HORIZONTAL", 0.05, 0.1, 0.20, 0.05, 0.020),
     ("em2", "VERTICAL", 0.2, 0.4, 0.15, 0.04, 0.015),
     ("em3", "HORIZONTAL", 0.3, 0.6, 0.10, 0.03, 0.012),
     ("em4", "VERTICAL", 0.4, 0.8, 0.07, 0.025, 0.010),
-    ("em5", "VERTICAL", 0.5, 1.0, 0.05, 0.02, 0.008),
-    ("em6", "HORIZONTAL", 0.6, 1.2, 0.04, 0.018, 0.007),
-    ("em7", "VERTICAL", 0.8, 1.6, 0.03, 0.015, 0.006),
-    ("em8", "HORIZONTAL", 1.0, 2.0, 0.025, 0.012, 0.005),
-    ("em9", "VERTICAL", 1.2, 2.4, 0.02, 0.010, 0.004),
-    ("em10", "HORIZONTAL", 1.5, 3.0, 0.015, 0.008, 0.003),
+    ("em5", "HORIZONTAL", 0.5, 1.0, 0.05, 0.02, 0.008),
+    ("em6", "VERTICAL", 0.6, 1.2, 0.04, 0.018, 0.007),
+    ("em7", "HORIZONTAL", 0.8, 1.6, 0.03, 0.015, 0.006),
+    ("em8", "VERTICAL", 1.0, 2.0, 0.025, 0.012, 0.005),
+    ("em9", "HORIZONTAL", 1.2, 2.4, 0.02, 0.010, 0.004),
+    ("em10", "VERTICAL", 1.5, 3.0, 0.015, 0.008, 0.003),
 ]
 
 # ---------------------------------------------------------------- Liberty
@@ -483,8 +499,13 @@ def emit_tlef(path):
     out.append("UNITS")
     out.append("  DATABASE MICRONS 2000 ;")
     out.append("END UNITS")
-    for (name, direction, width, pitch, rpersq, cpersq, edgecap) \
-            in LAYERS:
+    # The manufacturing grid: FlexDR divides pin coordinates by
+    # it in its off-grid check, so a missing value (grid 0)
+    # crashes the detailed router with SIGFPE. 0.005 um matches
+    # the pd.route fixture's value.
+    out.append("MANUFACTURINGGRID 0.005 ;")
+    for idx, (name, direction, width, pitch, rpersq, cpersq, edgecap) \
+            in enumerate(LAYERS):
         out.append("LAYER %s" % name)
         out.append("  TYPE ROUTING ;")
         out.append("  DIRECTION %s ;" % direction)
@@ -498,6 +519,50 @@ def emit_tlef(path):
         out.append("  CAPACITANCE CPERSQDIST %s ;" % fmt(cpersq))
         out.append("  EDGECAPACITANCE %s ;" % fmt(edgecap))
         out.append("END %s" % name)
+        # The cut layer between this layer and the next goes
+        # here, interleaved with the routing layers (not
+        # appended at the end): a via's layers must be
+        # consecutive in the tech's layer order, and the
+        # fixture's VIA12 is written the same way.
+        if idx < len(LAYERS) - 1:
+            width_next = LAYERS[idx + 1][2]
+            cut = min(width, width_next) * 0.5
+            out.append("LAYER via%d" % (idx + 1))
+            out.append("  TYPE CUT ;")
+            out.append("  WIDTH %s ;" % fmt(cut))
+            out.append("END via%d" % (idx + 1))
+    # Vias between adjacent routing layers. The detailed
+    # router's pin access gives pins on the lowest layers
+    # no planar access (they sit at or below the via-access
+    # layer), so a pin's only access is a via up to the next
+    # layer, and the via check needs a via definition to
+    # grant it. With no vias at all, every pin on em1 got
+    # zero access points and the run failed with DRT-0073
+    # on the clocked demo (F6 probe). Each via's metal rect
+    # is a square of the layer's own wire width (so it meets
+    # that layer's MINWIDTH, width minus 0.02), and the cut
+    # is half the narrower width, so the metal encloses it.
+    # The cut layers are named via1..via9, the vias VIA12..
+    # VIA910, matching the pd.route fixture's VIA12 shape.
+    for k in range(len(LAYERS) - 1):
+        name_lo = LAYERS[k][0]
+        name_hi = LAYERS[k + 1][0]
+        width_lo = LAYERS[k][2]
+        width_hi = LAYERS[k + 1][2]
+        cut = min(width_lo, width_hi) * 0.5
+        out.append("VIA VIA%d%d" % (k + 1, k + 2))
+        out.append("  LAYER %s ;" % name_lo)
+        out.append("    RECT %s %s %s %s ;" % (
+            fmt(-width_lo / 2), fmt(-width_lo / 2),
+            fmt(width_lo / 2), fmt(width_lo / 2)))
+        out.append("  LAYER via%d ;" % (k + 1))
+        out.append("    RECT %s %s %s %s ;" % (
+            fmt(-cut / 2), fmt(-cut / 2), fmt(cut / 2), fmt(cut / 2)))
+        out.append("  LAYER %s ;" % name_hi)
+        out.append("    RECT %s %s %s %s ;" % (
+            fmt(-width_hi / 2), fmt(-width_hi / 2),
+            fmt(width_hi / 2), fmt(width_hi / 2)))
+        out.append("END VIA%d%d" % (k + 1, k + 2))
     out.append("END LIBRARY")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")

@@ -398,6 +398,7 @@ void ResetProject(CommandContext& ctx) {
   ctx.synth = CommandContext::SynthSession();
   ctx.place = CommandContext::PlaceSession();
   ctx.cts = CommandContext::CtsSession();
+  ctx.route = CommandContext::RouteSession();
   ctx.signoff = CommandContext::SignoffSession();
   ctx.drc = CommandContext::DrcSession();
   ctx.wire_rc_overrides.clear();
@@ -2163,6 +2164,50 @@ Result<int> ParseLefDbu(const std::string& path) {
                            ": no DATABASE MICRONS in UNITS");
 }
 
+// Reads the manufacturing grid from a tech LEF, in database
+// units: MANUFACTURINGGRID is in microns, so the value is
+// scaled by the file's DATABASE MICRONS and rounded. A tech
+// without the statement returns 1 (no snapping): the DEF
+// writer stays usable for flows that never route, and the
+// snap below activates exactly when the tech declares a grid.
+Result<int> ParseLefManufacturingGrid(const std::string& path,
+                                      int dbu_per_micron) {
+  std::ifstream in(path);
+  if (!in) {
+    return Status::Error(ErrorCode::kIoError,
+                         "could not read file: " + path);
+  }
+  std::string line;
+  int line_no = 0;
+  while (std::getline(in, line)) {
+    ++line_no;
+    const std::size_t hash = line.find('#');
+    if (hash != std::string::npos) line = line.substr(0, hash);
+    const std::vector<std::string> words =
+        SplitLine(TrimLine(line));
+    if (words.empty() || words[0] != "MANUFACTURINGGRID" ||
+        words.size() < 2) {
+      continue;
+    }
+    double grid_um = 0;
+    if (!ParseDoubleToken(words[1], &grid_um) || grid_um <= 0) {
+      return Status::Error(
+          ErrorCode::kInvalidArgument,
+          "tech LEF " + path + " line " + std::to_string(line_no) +
+              ": MANUFACTURINGGRID is not a positive number");
+    }
+    const int grid_dbu =
+        std::max(1, static_cast<int>(std::llround(
+                        grid_um * dbu_per_micron)));
+    return grid_dbu;
+  }
+  if (in.bad()) {
+    return Status::Error(ErrorCode::kIoError,
+                         "could not read file: " + path);
+  }
+  return 1;
+}
+
 // Writes the mapped netlist as DEF. The die area is a square at
 // 60 percent utilization over the summed macro areas, snapped up
 // to whole microns, unless the caller gives an explicit area.
@@ -2170,9 +2215,12 @@ Result<int> ParseLefDbu(const std::string& path) {
 // Input pins sit on the left die edge, output pins on the right,
 // spread evenly; each carries a small PORT rectangle on the
 // LEF's first pin layer, because odb creates a placed BPin only
-// from port geometry. Nets list the driver connection first,
-// then the loads in gate order, so the file reads the same way
-// every run.
+// from port geometry. Pin centers snap to the manufacturing
+// grid (see the snap below): the router fails the run on an
+// off-grid pin shape, and the even spread by integer division
+// lands off-grid whenever the division does not come out even.
+// Nets list the driver connection first, then the loads in gate
+// order, so the file reads the same way every run.
 struct DefWriteResult {
   std::array<int, 4> die_area = {0, 0, 0, 0};
   int nets = 0;
@@ -2181,6 +2229,7 @@ struct DefWriteResult {
 Result<DefWriteResult> WriteMappedDef(
     const std::string& path, const MappedNetlist& netlist,
     const LefData& lef, int dbu_per_micron,
+    int manufacturing_grid_dbu,
     const std::optional<std::array<int, 4>>& die_area_override) {
   auto fail = [&](const std::string& message) {
     return Status::Error(ErrorCode::kInvalidArgument, message);
@@ -2278,6 +2327,24 @@ Result<DefWriteResult> WriteMappedDef(
     die = {0, 0, side_dbu, side_dbu};
   }
   const int half_rect = std::max(1, dbu_per_micron / 20);
+  // Pin centers snap to the manufacturing grid: the bridge
+  // spreads pins evenly down the die edge by integer division
+  // (die height over pin count plus one), which lands
+  // off-grid whenever the division does not come out even,
+  // and the detailed router fails the run on an off-grid pin
+  // shape (DRT-0416). The snap rounds each center to the
+  // nearest grid multiple; the rect half-size snaps down to a
+  // grid multiple too, so every rect corner is on-grid. The
+  // pin stays on its die edge (only the along-edge coordinate
+  // moves, by less than half a grid step either way). A grid
+  // of 1 leaves every coordinate untouched.
+  const int grid = std::max(1, manufacturing_grid_dbu);
+  const int half_rect_snapped =
+      std::max(grid, (half_rect / grid) * grid);
+  const auto snap = [&](int value) {
+    const int rounded = (value + grid / 2) / grid * grid;
+    return rounded;
+  };
   std::ofstream out(path);
   if (!out) {
     return Status::Error(ErrorCode::kIoError,
@@ -2296,10 +2363,12 @@ Result<DefWriteResult> WriteMappedDef(
   }
   out << "END COMPONENTS\n";
   const auto pin_y = [&](std::size_t index, std::size_t count) {
-    return static_cast<int>((static_cast<long long>(index + 1) *
-                             (die[3] - die[1])) /
-                            static_cast<long long>(count + 1)) +
-           die[1];
+    const int raw =
+        static_cast<int>((static_cast<long long>(index + 1) *
+                          (die[3] - die[1])) /
+                         static_cast<long long>(count + 1)) +
+        die[1];
+    return snap(raw);
   };
   out << "\nPINS "
       << (netlist.inputs.size() + netlist.outputs.size()) << " ;\n";
@@ -2308,9 +2377,9 @@ Result<DefWriteResult> WriteMappedDef(
     out << "- " << name << " + NET " << name
         << " + DIRECTION INPUT + USE SIGNAL\n";
     out << "  + PORT\n";
-    out << "  + LAYER " << lef.pin_layer << " ( " << -half_rect << " "
-        << -half_rect << " ) ( " << half_rect << " " << half_rect
-        << " )\n";
+    out << "  + LAYER " << lef.pin_layer << " ( " << -half_rect_snapped
+        << " " << -half_rect_snapped << " ) ( " << half_rect_snapped
+        << " " << half_rect_snapped << " )\n";
     out << "  + PLACED ( " << die[0] << " "
         << pin_y(i, netlist.inputs.size()) << " ) N ;\n";
   }
@@ -2319,9 +2388,9 @@ Result<DefWriteResult> WriteMappedDef(
     out << "- " << name << " + NET " << name
         << " + DIRECTION OUTPUT + USE SIGNAL\n";
     out << "  + PORT\n";
-    out << "  + LAYER " << lef.pin_layer << " ( " << -half_rect << " "
-        << -half_rect << " ) ( " << half_rect << " " << half_rect
-        << " )\n";
+    out << "  + LAYER " << lef.pin_layer << " ( " << -half_rect_snapped
+        << " " << -half_rect_snapped << " ) ( " << half_rect_snapped
+        << " " << half_rect_snapped << " )\n";
     out << "  + PLACED ( " << die[2] << " "
         << pin_y(i, netlist.outputs.size()) << " ) N ;\n";
   }
@@ -11221,30 +11290,188 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         // synthesis loop uses). Routing itself succeeds whether or
         // not the session is configured for timing; when it is
         // not, the payload says so with the reason instead of
-        // inventing a number.
+        // inventing a number. The per-scene slacks are collected
+        // here into scene_slacks as well, so the route record
+        // stored below carries the same numbers the payload
+        // reports; when the STA leg cannot analyze, sta_note
+        // carries the payload's unavailable statement verbatim
+        // instead (the place record has no such field because
+        // place_summary prints no slack lines at all in that
+        // case, while the route record's contract is that
+        // route_summary agrees with the payload).
         bool from_odb = false;
         std::vector<analysis::SceneAnalysis> scenes;
+        std::vector<std::pair<std::string, double>> scene_slacks;
+        std::string sta_note;
         if (auto bad = BuildTimingScenes(ctx, from_odb, scenes)) {
-          payload += " sta_slack_ns=unavailable (" + bad->message + ")";
+          sta_note = "sta_slack_ns=unavailable (" + bad->message + ")";
+          payload += " " + sta_note;
         } else if (!from_odb) {
-          payload += " sta_slack_ns=unavailable (timing source is "
-                     "Verilog, not the routed database)";
+          sta_note =
+              "sta_slack_ns=unavailable (timing source is "
+              "Verilog, not the routed database)";
+          payload += " " + sta_note;
         } else {
           analysis::TimingService service;
           const Result<std::vector<analysis::SceneResult>> analyzed =
               service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
                               scenes);
           if (!analyzed.ok()) {
-            payload += " sta_slack_ns=unavailable (" +
+            sta_note = "sta_slack_ns=unavailable (" +
                        analyzed.status().message() + ")";
+            payload += " " + sta_note;
           } else {
             for (const analysis::SceneResult& result :
                  analyzed.value()) {
               payload += " scene=" + result.scenario.name +
                          " worst_slack_ns=" +
                          MetricText(result.metrics, "worst_slack_ns");
+              const auto slack =
+                  result.metrics.find("worst_slack_ns");
+              if (slack != result.metrics.end()) {
+                scene_slacks.push_back(
+                    {result.scenario.name, slack->second.value});
+              }
             }
           }
+        }
+        // The route record (full-flow GUI unit F6): the numbers
+        // the route_summary query reports. Only a successful run
+        // stores it; a failed run leaves the previous record
+        // untouched, like run_timing and last_results. A later
+        // successful run replaces the record: a re-run genuinely
+        // re-routes, so the record holds the latest run's
+        // numbers.
+        CommandContext::RouteSession entry;
+        entry.routed = true;
+        entry.routed_count = report.net_routed_count;
+        entry.total_count = report.net_total_count;
+        entry.guide_count = report.guide_count;
+        entry.total_overflow = report.total_overflow;
+        entry.violation_count = report.violation_count;
+        entry.detailed_iterations = report.detailed_iterations_used;
+        entry.detailed_bound = report.detailed_iteration_bound;
+        entry.stopped_at_bound = report.detailed_stopped_at_bound;
+        for (const pd::LayerCongestion& layer : report.per_layer) {
+          CommandContext::RouteSession::LayerResult layer_entry;
+          layer_entry.number = layer.layer;
+          layer_entry.name = layer.name;
+          layer_entry.capacity = layer.capacity;
+          layer_entry.usage = layer.usage;
+          layer_entry.overflow = layer.overflow;
+          entry.layers.push_back(std::move(layer_entry));
+        }
+        entry.liberty_corner = liberty_corner;
+        entry.scene_slacks = std::move(scene_slacks);
+        entry.sta_note = std::move(sta_note);
+        ctx.route = std::move(entry);
+        return CommandResult::Ok(payload);
+      });
+
+  // ---- route_summary (full-flow GUI unit F6) -----------------
+  // The structured route query the GUI's routing canvas reads:
+  // the session route record (the engine's counts, the
+  // per-layer congestion sums, the Liberty corner, the run's
+  // post-route STA outcome) plus the live routed geometry
+  // (one wire line per routed path segment, one via line per
+  // via, one unwired line per signal net with no wire) and
+  // the die and core rectangles in the header. It is a query,
+  // not a report: it runs no engine, writes no file, and
+  // changes no session state. The counts come from the stored
+  // record and the geometry from the live database at query
+  // time, so a later route run's geometry is what the query
+  // reports, while the counts come from the stored record,
+  // exactly the split place_summary makes between its record
+  // counts and its live instance rectangles. With an empty
+  // record it fails fast, mirroring place_summary's "no
+  // placement" posture; the record check comes first, so a
+  // fresh session reports "no routing" rather than a missing
+  // database.
+  add("route_summary", "route_summary",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "route_summary")) {
+          return *bad;
+        }
+        if (!ctx.route.routed) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no routing: eos::route first");
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
+        pd::FloorplanGeometry floorplan;
+        const foundation::Status floorplan_status =
+            pd::QueryFloorplanGeometry(ctx.timing.odb->RawDatabase(),
+                                       &floorplan);
+        if (!floorplan_status.ok()) return FromStatus(floorplan_status);
+        pd::RouteGeometry geometry;
+        const foundation::Status geometry_status =
+            pd::QueryRouteGeometry(ctx.timing.odb->RawDatabase(),
+                                   &geometry);
+        if (!geometry_status.ok()) return FromStatus(geometry_status);
+        auto area_text = [](const std::array<int, 4>& area) {
+          return std::to_string(area[0]) + "," + std::to_string(area[1]) +
+                 "," + std::to_string(area[2]) + "," +
+                 std::to_string(area[3]);
+        };
+        const CommandContext::RouteSession& record = ctx.route;
+        std::string payload =
+            "route routed=" + std::to_string(record.routed_count) +
+            " total=" + std::to_string(record.total_count) +
+            " guides=" + std::to_string(record.guide_count) +
+            " overflow=" + std::to_string(record.total_overflow) +
+            " violations=" + std::to_string(record.violation_count) +
+            " detailed_iterations=" +
+            std::to_string(record.detailed_iterations) +
+            " detailed_bound=" + std::to_string(record.detailed_bound) +
+            " stopped_at_bound=" +
+            std::string(record.stopped_at_bound ? "true" : "false") +
+            " liberty_corner=" + record.liberty_corner +
+            " die=" + area_text(floorplan.die_area) +
+            " core=" + area_text(floorplan.core_area);
+        for (const CommandContext::RouteSession::LayerResult& layer :
+             record.layers) {
+          payload += "\nlayer number=" + std::to_string(layer.number) +
+                     " name=" + layer.name +
+                     " capacity=" + std::to_string(layer.capacity) +
+                     " usage=" + std::to_string(layer.usage) +
+                     " overflow=" + std::to_string(layer.overflow);
+        }
+        for (const pd::RouteWireSegment& segment : geometry.segments) {
+          std::string points;
+          for (const auto& point : segment.points) {
+            if (!points.empty()) points += ",";
+            points += std::to_string(point.first) + "," +
+                      std::to_string(point.second);
+          }
+          payload += "\nwire net=" + segment.net +
+                     " layer=" + segment.layer +
+                     " width=" + std::to_string(segment.width) +
+                     " points=" + points;
+        }
+        for (const pd::RouteVia& via : geometry.vias) {
+          payload += "\nvia net=" + via.net +
+                     " layers=" + via.lower_layer + "-" +
+                     via.upper_layer +
+                     " x=" + std::to_string(via.x) +
+                     " y=" + std::to_string(via.y);
+        }
+        for (const std::string& net : geometry.unwired_nets) {
+          payload += "\nunwired net=" + net;
+        }
+        for (const auto& slack : record.scene_slacks) {
+          payload += "\nslack scene=" + slack.first +
+                     " worst_slack_ns=" + FormatNumber(slack.second);
+        }
+        if (!record.sta_note.empty()) {
+          payload += "\nsta_note " + record.sta_note;
         }
         return CommandResult::Ok(payload);
       });
@@ -13172,8 +13399,12 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (!lef.ok()) return FromStatus(lef.status());
         const Result<int> dbu = ParseLefDbu(tlef_path);
         if (!dbu.ok()) return FromStatus(dbu.status());
+        const Result<int> grid =
+            ParseLefManufacturingGrid(tlef_path, dbu.value());
+        if (!grid.ok()) return FromStatus(grid.status());
         const Result<DefWriteResult> written = WriteMappedDef(
-            dest, parsed.value(), lef.value(), dbu.value(), die_area);
+            dest, parsed.value(), lef.value(), dbu.value(),
+            grid.value(), die_area);
         if (!written.ok()) return FromStatus(written.status());
         // The payload counts the flattened netlist the DEF
         // was written from, not the file: the two agree on a
