@@ -136,6 +136,9 @@ std::string DesignFingerprint(const CommandContext& ctx,
   add_part(ctx.timing.top_cell);
   add_part(ctx.timing.sdc_path);
   add_part(ctx.timing.spef_path);
+  for (const auto& entry : ctx.timing.sdc_pin_map) {
+    add_part("pin_map:" + entry.first + "=" + entry.second);
+  }
   for (const auto& entry : ctx.timing.liberty_by_corner) {
     add_part(entry.first + "=" + entry.second);
   }
@@ -548,6 +551,15 @@ struct MappedNetlist {
   // Internal nets, in wire-declaration order.
   std::vector<std::string> wires;
   std::vector<MappedGate> gates;
+  // Submodule output port bits to their flat nets (SDC
+  // pin-resolution unit): the key in SDC spelling
+  // (<instance path>/<port>, or <instance path>/<port>[<bit>]
+  // for a ranged port), the value the canonical flat net name.
+  // The flattener records it (it knows both spellings); the
+  // driver completion beside WriteMappedDef turns nets into
+  // driver pins. Empty for a flat input, which has no module
+  // instances by construction.
+  std::map<std::string, std::string> port_pin_nets;
 };
 
 struct VerilogToken {
@@ -1754,6 +1766,19 @@ class BridgeFlattener {
             nodes_[id].connected = true;
           }
           child_ports[{pin.first, child_bits[k]}] = id;
+          if (child_decl.direction == 1) {
+            // An output port bit: record its hierarchical key
+            // (SDC spelling) against the parent-side node, for
+            // the SDC pin map (SDC pin-resolution unit). Input
+            // port bits get no record: after flattening they
+            // are a net and its loads, never one pin.
+            port_bit_nodes_.push_back(
+                {instance_path + "/" + pin.first +
+                     (child_decl.ranged
+                          ? "[" + std::to_string(child_bits[k]) + "]"
+                          : ""),
+                 id});
+          }
         }
       }
       if (auto bad = FlattenModule(child, instance_path, child_ports,
@@ -1889,6 +1914,14 @@ class BridgeFlattener {
     }
     std::sort(wires.begin(), wires.end());
     for (const auto& wire : wires) netlist.wires.push_back(wire.second);
+    // The SDC pin map's net half: each recorded output port
+    // bit's flat net is its group's canonical name (SDC
+    // pin-resolution unit). The driver completion happens
+    // beside WriteMappedDef, where the LEF lives.
+    for (const auto& recorded : port_bit_nodes_) {
+      netlist.port_pin_nets[recorded.first] =
+          canonical[Find(recorded.second)];
+    }
     if (netlist.inputs.empty() && netlist.outputs.empty() &&
         netlist.gates.empty()) {
       return Status::Error(ErrorCode::kInvalidArgument,
@@ -1905,6 +1938,9 @@ class BridgeFlattener {
   std::map<std::string, int> node_ids_;
   std::map<int, ConstantMark> constants_;
   std::vector<FlatGate> gates_;
+  // (hierarchical key, node id) for every submodule output
+  // port bit, in flatten order (SDC pin-resolution unit).
+  std::vector<std::pair<std::string, int>> port_bit_nodes_;
   int assign_counter_ = 0;
 };
 
@@ -2225,6 +2261,48 @@ struct DefWriteResult {
   std::array<int, 4> die_area = {0, 0, 0, 0};
   int nets = 0;
 };
+
+// Completes the bridge's port-bit-to-net record into the SDC
+// pin map (SDC pin-resolution design, section 4.2): each entry
+// whose flat net has a driver gate maps to that gate's single
+// output pin, <driver instance>/<output pin>. The scan mirrors
+// WriteMappedDef's LEF one-output scan below; in the write_def
+// flow that rule has already been enforced on the same inputs,
+// so a gate this scan cannot interpret simply contributes no
+// driver. Entries whose net has no driver (a feedthrough from
+// a top-level input, a bit the backend left undriven) are
+// omitted: there is no flat pin to name.
+analysis::SdcPinMap BridgeSdcPinMap(const MappedNetlist& netlist,
+                                    const LefData& lef) {
+  std::map<std::string, std::string> net_driver;
+  std::map<std::string, std::string> gate_output_pin;
+  for (const MappedGate& gate : netlist.gates) {
+    const auto found = lef.macros.find(gate.cell);
+    if (found == lef.macros.end()) continue;
+    std::string output_net;
+    std::string output_pin;
+    int output_pins = 0;
+    for (const auto& pin : gate.pins) {
+      const auto pin_found = found->second.pins.find(pin.first);
+      if (pin_found != found->second.pins.end() && pin_found->second) {
+        ++output_pins;
+        output_net = pin.second;
+        output_pin = pin.first;
+      }
+    }
+    if (output_pins != 1) continue;
+    gate_output_pin[gate.instance] = output_pin;
+    net_driver.emplace(output_net, gate.instance);
+  }
+  analysis::SdcPinMap map;
+  for (const auto& entry : netlist.port_pin_nets) {
+    const auto driver = net_driver.find(entry.second);
+    if (driver == net_driver.end()) continue;
+    map[entry.first] =
+        driver->second + "/" + gate_output_pin[driver->second];
+  }
+  return map;
+}
 
 Result<DefWriteResult> WriteMappedDef(
     const std::string& path, const MappedNetlist& netlist,
@@ -4755,7 +4833,7 @@ WaiverEvaluations EvaluateWaivers(CommandContext& ctx) {
       const Result<std::vector<analysis::CoverageResult>> analyzed =
           from_odb
               ? service.AnalyzeCoverage(*ctx.timing.odb, ctx.timing.sdc_path,
-                                        scenes)
+                                        scenes, ctx.timing.sdc_pin_map)
               : service.AnalyzeCoverage(
                     analysis::VerilogDesign{ctx.timing.verilog_path,
                                             ctx.timing.top_cell,
@@ -5227,7 +5305,8 @@ std::string ReportClockBrace(const std::vector<std::string>& sources) {
     const Result<std::vector<analysis::CheckReportsResult>> result =
         from_odb
             ? service.AnalyzeCheckReports(*ctx.timing.odb,
-                                          ctx.timing.sdc_path, scenes)
+                                          ctx.timing.sdc_path, scenes,
+                                          ctx.timing.sdc_pin_map)
             : service.AnalyzeCheckReports(
                   analysis::VerilogDesign{ctx.timing.verilog_path,
                                           ctx.timing.top_cell,
@@ -10821,7 +10900,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           analysis::TimingService service;
           const Result<std::vector<analysis::SceneResult>> analyzed =
               service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
-                              scenes);
+                              scenes, ctx.timing.sdc_pin_map);
           if (!analyzed.ok()) {
             payload += " sta_slack_ns=unavailable (" +
                        analyzed.status().message() + ")";
@@ -11071,7 +11150,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           analysis::TimingService service;
           const Result<std::vector<analysis::SceneResult>> analyzed =
               service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
-                              scenes);
+                              scenes, ctx.timing.sdc_pin_map);
           if (!analyzed.ok()) {
             sta_note = "sta_slack_ns=unavailable (" +
                        analyzed.status().message() + ")";
@@ -11315,7 +11394,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           analysis::TimingService service;
           const Result<std::vector<analysis::SceneResult>> analyzed =
               service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
-                              scenes);
+                              scenes, ctx.timing.sdc_pin_map);
           if (!analyzed.ok()) {
             sta_note = "sta_slack_ns=unavailable (" +
                        analyzed.status().message() + ")";
@@ -11569,7 +11648,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           analysis::TimingService service;
           const Result<std::vector<analysis::SceneResult>> analyzed =
               service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
-                              scenes);
+                              scenes, ctx.timing.sdc_pin_map);
           if (!analyzed.ok()) {
             payload += " sta_slack_ns=unavailable (" +
                        analyzed.status().message() + ")";
@@ -13406,6 +13485,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             dest, parsed.value(), lef.value(), dbu.value(),
             grid.value(), die_area);
         if (!written.ok()) return FromStatus(written.status());
+        // The SDC pin map (SDC pin-resolution unit): stored on
+        // success only, replacing any previous map wholesale (a
+        // new mapping renumbers the flat instances, so a merged
+        // map would carry stale spellings). The payload does not
+        // change: the map is internal session state, observable
+        // through the timing results it enables.
+        ctx.timing.sdc_pin_map =
+            BridgeSdcPinMap(parsed.value(), lef.value());
         // The payload counts the flattened netlist the DEF
         // was written from, not the file: the two agree on a
         // flat ABC netlist, and on a hierarchical Yosys
@@ -13731,7 +13818,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const Result<std::vector<analysis::SceneResult>> analyzed =
             from_odb
                 ? service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
-                                  scenes)
+                                  scenes, ctx.timing.sdc_pin_map)
                 : service.Analyze(
                       analysis::VerilogDesign{ctx.timing.verilog_path,
                                               ctx.timing.top_cell,
@@ -13811,7 +13898,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                     from_odb
                         ? service.ReportPaths(*ctx.timing.odb,
                                               ctx.timing.sdc_path, scenes,
-                                              request)
+                                              request,
+                                              ctx.timing.sdc_pin_map)
                         : service.ReportPaths(
                               analysis::VerilogDesign{ctx.timing.verilog_path,
                                                       ctx.timing.top_cell,
@@ -13992,7 +14080,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const Result<std::vector<analysis::ScenePathReports>> reported =
             from_odb
                 ? service.ReportPaths(*ctx.timing.odb, ctx.timing.sdc_path,
-                                      scenes, request)
+                                      scenes, request,
+                                      ctx.timing.sdc_pin_map)
                 : service.ReportPaths(
                       analysis::VerilogDesign{ctx.timing.verilog_path,
                                               ctx.timing.top_cell,
@@ -14233,7 +14322,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const Result<std::vector<analysis::ScenePathReports>> reported =
             from_odb
                 ? service.ReportPaths(*ctx.timing.odb, ctx.timing.sdc_path,
-                                      scenes, request)
+                                      scenes, request,
+                                      ctx.timing.sdc_pin_map)
                 : service.ReportPaths(
                       analysis::VerilogDesign{ctx.timing.verilog_path,
                                               ctx.timing.top_cell,
@@ -14363,7 +14453,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const Result<std::vector<analysis::SceneResult>> analyzed =
             from_odb
                 ? service.Analyze(*ctx.timing.odb, ctx.timing.sdc_path,
-                                  scenes)
+                                  scenes, ctx.timing.sdc_pin_map)
                 : service.Analyze(
                       analysis::VerilogDesign{ctx.timing.verilog_path,
                                               ctx.timing.top_cell,
@@ -14762,7 +14852,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                       from_odb
                           ? service.ReportPaths(
                                 *ctx.timing.odb, ctx.timing.sdc_path,
-                                one_scene, request)
+                                one_scene, request, ctx.timing.sdc_pin_map)
                           : service.ReportPaths(
                                 analysis::VerilogDesign{
                                     ctx.timing.verilog_path,
@@ -14919,7 +15009,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const Result<std::vector<analysis::CoverageResult>> analyzed =
             from_odb
                 ? service.AnalyzeCoverage(*ctx.timing.odb,
-                                          ctx.timing.sdc_path, scenes)
+                                          ctx.timing.sdc_path, scenes,
+                                          ctx.timing.sdc_pin_map)
                 : service.AnalyzeCoverage(
                       analysis::VerilogDesign{ctx.timing.verilog_path,
                                               ctx.timing.top_cell,
@@ -15184,7 +15275,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const Result<std::vector<analysis::QorResult>> analyzed =
             from_odb
                 ? service.AnalyzeQor(*ctx.timing.odb, ctx.timing.sdc_path,
-                                     selected)
+                                     selected, ctx.timing.sdc_pin_map)
                 : service.AnalyzeQor(
                       analysis::VerilogDesign{ctx.timing.verilog_path,
                                               ctx.timing.top_cell,
@@ -16675,7 +16766,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           return from_odb
                      ? service.ReportPaths(*ctx.timing.odb,
                                            ctx.timing.sdc_path, analyzed,
-                                           request)
+                                           request, ctx.timing.sdc_pin_map)
                      : service.ReportPaths(
                            analysis::VerilogDesign{
                                ctx.timing.verilog_path, ctx.timing.top_cell,
@@ -16691,7 +16782,8 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const Result<std::vector<analysis::CoverageResult>> coverage =
             from_odb
                 ? service.AnalyzeCoverage(*ctx.timing.odb,
-                                          ctx.timing.sdc_path, analyzed)
+                                          ctx.timing.sdc_path, analyzed,
+                                          ctx.timing.sdc_pin_map)
                 : service.AnalyzeCoverage(
                       analysis::VerilogDesign{ctx.timing.verilog_path,
                                               ctx.timing.top_cell,
@@ -16701,7 +16793,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const Result<std::vector<analysis::QorResult>> qor =
             from_odb
                 ? service.AnalyzeQor(*ctx.timing.odb, ctx.timing.sdc_path,
-                                     analyzed)
+                                     analyzed, ctx.timing.sdc_pin_map)
                 : service.AnalyzeQor(
                       analysis::VerilogDesign{ctx.timing.verilog_path,
                                               ctx.timing.top_cell,

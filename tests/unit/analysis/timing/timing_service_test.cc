@@ -463,6 +463,67 @@ END NETS
 END DESIGN
 )DEF";
 
+// The generated-clock fixture (SDC pin-resolution unit): two
+// flops with hierarchy-path instance names, as the bridge's
+// flat DEF spells them. u_div/_0_ is the divider: its Q drives
+// the net the second flop's CK hangs off, so the SDC below
+// names its hierarchical port pin (u_div/q) as the generated
+// clock's target, exactly as demo/clocked's clk_top.sdc does.
+// By construction the setup endpoints are the two D pins:
+// u_div/_0_/D under clk (10 ns, slack 9.9) and u_cnt/_0_/D
+// under clk_div (20 ns, slack 19.9).
+const char kDefGenClock[] = R"DEF(VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 2 ;
+- u_div/_0_ DFF + PLACED ( 1000 1000 ) N ;
+- u_cnt/_0_ DFF + PLACED ( 3000 1000 ) N ;
+END COMPONENTS
+PINS 4 ;
+- clk + NET clk + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 5000 ) N ;
+- din + NET din + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 6000 ) N ;
+- d + NET d + DIRECTION INPUT + USE SIGNAL + PLACED ( 0 7000 ) N ;
+- q + NET q + DIRECTION OUTPUT + USE SIGNAL + PLACED ( 10000 5000 ) N ;
+END PINS
+NETS 5 ;
+- clk ( PIN clk ) ( u_div/_0_ CK ) ;
+- din ( PIN din ) ( u_div/_0_ D ) ;
+- div_q ( u_div/_0_ Q ) ( u_cnt/_0_ CK ) ;
+- d ( PIN d ) ( u_cnt/_0_ D ) ;
+- q ( u_cnt/_0_ Q ) ( PIN q ) ;
+END NETS
+END DESIGN
+)DEF";
+
+// The generated-clock SDC in hierarchical spelling (the user's
+// words), in flat spelling (the twin the translation must be
+// indistinguishable from), and with a target that resolves
+// nowhere. The input delays constrain the two D endpoints (an
+// undelayed input port's paths are unconstrained in OpenSTA,
+// and this fixture has no reg-to-reg data path): din under
+// clk, slack 9.9; d under clk_div, slack 19.9.
+const char kSdcGenClock[] =
+    "create_clock -name clk -period 10 [get_ports clk]\n"
+    "create_generated_clock -name clk_div -divide_by 2 "
+    "-source [get_ports clk] [get_pins u_div/q]\n"
+    "set_input_delay -clock clk 0 [get_ports din]\n"
+    "set_input_delay -clock clk_div 0 [get_ports d]\n";
+const char kSdcGenClockFlat[] =
+    "create_clock -name clk -period 10 [get_ports clk]\n"
+    "create_generated_clock -name clk_div -divide_by 2 "
+    "-source [get_ports clk] [get_pins u_div/_0_/Q]\n"
+    "set_input_delay -clock clk 0 [get_ports din]\n"
+    "set_input_delay -clock clk_div 0 [get_ports d]\n";
+const char kSdcGenClockBadPin[] =
+    "create_clock -name clk -period 10 [get_ports clk]\n"
+    "create_generated_clock -name clk_div -divide_by 2 "
+    "-source [get_ports clk] [get_pins u_div/nope]\n"
+    "set_input_delay -clock clk 0 [get_ports din]\n"
+    "set_input_delay -clock clk_div 0 [get_ports d]\n";
+
 class TempDir {
  public:
   TempDir()
@@ -817,6 +878,127 @@ TEST(TimingService, OdbDesignAnalyzedThroughNetlist) {
   ExpectFixtureMetrics(results.value()[0], 9.4, 0.0);
   EXPECT_NEAR(Metric(results.value()[0], "worst_hold_slack_ns"), 0.45,
               1e-6);
+}
+
+// The defect and its fix at service level (SDC pin-resolution
+// design, section 7): the generated clock's target names a
+// submodule output port in hierarchical spelling, which the
+// flat database cannot resolve. Without a pin map the analysis
+// fails and the status names the SDC file (the defect,
+// reproduced); with the map the analysis succeeds with finite
+// metrics; and the with-map metrics equal, exactly, the
+// metrics of the same design analyzed with a twin SDC written
+// directly in flat spelling and no map: translation produces
+// the same analysis as the SDC the user would have written
+// against the flat database, not merely a successful one.
+TEST(TimingService, OdbGeneratedClockResolvesThroughPinMap) {
+  TempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kLef)).ok());
+  ASSERT_TRUE(
+      database.ReadDef(dir.Write("top.def", kDefGenClock)).ok());
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  const std::string sdc = dir.Write("gen.sdc", kSdcGenClock);
+  TimingService service;
+
+  const auto no_map = service.Analyze(
+      database, sdc, {EstimateScene(1, "func_tt", "tt", liberty)});
+  ASSERT_FALSE(no_map.ok());
+  EXPECT_NE(no_map.status().message().find("gen.sdc"),
+            std::string::npos)
+      << no_map.status().message();
+
+  const SdcPinMap map{{"u_div/q", "u_div/_0_/Q"}};
+  const auto with_map = service.Analyze(
+      database, sdc, {EstimateScene(1, "func_tt", "tt", liberty)}, map);
+  ASSERT_TRUE(with_map.ok()) << with_map.status().message();
+  ASSERT_EQ(with_map.value().size(), 1u);
+  const double worst = Metric(with_map.value()[0], "worst_slack_ns");
+  EXPECT_TRUE(std::isfinite(worst));
+  EXPECT_NEAR(worst, 9.9, 1e-6);
+
+  const auto twin = service.Analyze(
+      database, dir.Write("gen_flat.sdc", kSdcGenClockFlat),
+      {EstimateScene(1, "func_tt", "tt", liberty)});
+  ASSERT_TRUE(twin.ok()) << twin.status().message();
+  ASSERT_EQ(twin.value().size(), 1u);
+  ASSERT_EQ(with_map.value()[0].metrics.size(),
+            twin.value()[0].metrics.size());
+  for (const auto& entry : with_map.value()[0].metrics) {
+    const auto found = twin.value()[0].metrics.find(entry.first);
+    ASSERT_NE(found, twin.value()[0].metrics.end()) << entry.first;
+    EXPECT_EQ(found->second.value, entry.second.value) << entry.first;
+    EXPECT_EQ(found->second.unit, entry.second.unit) << entry.first;
+  }
+}
+
+// A reference the map does not cover reaches the engine
+// byte-identical and fails exactly as the no-map leg does
+// (design D10): the translator is not a filter. Both legs run
+// through a translated session (the map is non-empty), so both
+// also pin message fidelity (design section 4.4): the failure
+// names the user's SDC file and line, never the scratch file.
+TEST(TimingService, OdbPinMapUnmappedReferenceFailsFast) {
+  TempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kLef)).ok());
+  ASSERT_TRUE(
+      database.ReadDef(dir.Write("top.def", kDefGenClock)).ok());
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  TimingService service;
+
+  const SdcPinMap unrelated{{"u_other/q", "u_other/_0_/Q"}};
+  const auto unmapped = service.Analyze(
+      database, dir.Write("gen.sdc", kSdcGenClock),
+      {EstimateScene(1, "func_tt", "tt", liberty)}, unrelated);
+  ASSERT_FALSE(unmapped.ok());
+  EXPECT_NE(unmapped.status().message().find("gen.sdc"),
+            std::string::npos)
+      << unmapped.status().message();
+  EXPECT_EQ(unmapped.status().message().find("eos_timing_service_sdc"),
+            std::string::npos)
+      << unmapped.status().message();
+
+  const SdcPinMap map{{"u_div/q", "u_div/_0_/Q"}};
+  const auto bad_pin = service.Analyze(
+      database, dir.Write("gen_bad.sdc", kSdcGenClockBadPin),
+      {EstimateScene(1, "func_tt", "tt", liberty)}, map);
+  ASSERT_FALSE(bad_pin.ok());
+  EXPECT_NE(bad_pin.status().message().find("gen_bad.sdc"),
+            std::string::npos)
+      << bad_pin.status().message();
+  EXPECT_NE(bad_pin.status().message().find("line 2"),
+            std::string::npos)
+      << bad_pin.status().message();
+  EXPECT_EQ(bad_pin.status().message().find("eos_timing_service_sdc"),
+            std::string::npos)
+      << bad_pin.status().message();
+}
+
+// The shared prologue carries the map to the other ODB
+// overloads (design section 4.4): ReportPaths on the with-map
+// fixture returns paths instead of the SDC failure.
+// AnalyzeCoverage, AnalyzeQor, and AnalyzeCheckReports share
+// the same prologue helper by construction and are not
+// separately fixtured.
+TEST(TimingService, OdbPinMapAppliesToReportPaths) {
+  TempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kLef)).ok());
+  ASSERT_TRUE(
+      database.ReadDef(dir.Write("top.def", kDefGenClock)).ok());
+  const std::string liberty = dir.Write("cells.lib", kLiberty);
+  TimingService service;
+  PathReportRequest request;
+  request.kind = CheckKind::kSetup;
+  request.max_paths = 4;
+  const SdcPinMap map{{"u_div/q", "u_div/_0_/Q"}};
+  const auto reported = service.ReportPaths(
+      database, dir.Write("gen.sdc", kSdcGenClock),
+      {EstimateScene(1, "func_tt", "tt", liberty)}, request, map);
+  ASSERT_TRUE(reported.ok()) << reported.status().message();
+  ASSERT_EQ(reported.value().size(), 1u);
+  EXPECT_FALSE(reported.value()[0].paths.empty());
 }
 
 TEST(TimingService, ExtractedSceneWithoutSpefIsRejected) {
