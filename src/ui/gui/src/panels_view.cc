@@ -447,6 +447,55 @@ std::string RenderCts(const CtsModel& model) {
   return out;
 }
 
+// The Timing tab's Extraction section (full-flow GUI unit
+// F7): the recorded extract run under the per-scene timing
+// lines it pairs, in its own labeled block so the section
+// stands on its own rather than joining the blocks (the F5
+// shape). Counts are the record's. A run whose STA leg could
+// not analyze shows its unavailable statement verbatim
+// instead of a slack line. The comparison lines pair the
+// estimated and extracted worst slacks per (mode, corner);
+// when no pair has run yet the section says so, so the panel
+// never implies a comparison that has not run. The word is
+// "extracted", never a signoff word: the mock model's values
+// are invented fixture values.
+std::string RenderExtract(const ExtractModel& model) {
+  if (!model.Loaded()) return "";
+  std::string out = "\nExtraction (post-route):\n";
+  out += "  nets " + std::to_string(model.Nets()) + ", RSEGs " +
+         std::to_string(model.Rsegs()) + ", capacitance nodes " +
+         std::to_string(model.CapNodes()) +
+         ", coupling segments " + std::to_string(model.CcSegs()) +
+         "\n";
+  out += "  SPEF: " + model.SpefPath() + "\n";
+  out += "  model: " + model.ModelPath() + "\n";
+  for (const ExtractSlack& slack : model.Slacks()) {
+    out += "  post-route estimated worst slack (" + slack.scene +
+           "): " + FormatSlack(slack.worst_slack_ns) + " ns\n";
+  }
+  if (!model.StaNote().empty()) {
+    out += "  " + model.StaNote() + "\n";
+  }
+  if (model.Compares().empty()) {
+    out += "  extracted comparison: not run yet (create the "
+           "extracted scenario, set_spef, and run_timing)\n";
+  }
+  for (const ExtractCompare& compare : model.Compares()) {
+    out += "  " + compare.mode + "/" + compare.corner +
+           ": estimated " +
+           FormatSlack(compare.estimated_worst_slack_ns) +
+           " ns (scene " + compare.estimate_scene +
+           ") vs extracted " +
+           FormatSlack(compare.extracted_worst_slack_ns) +
+           " ns (scene " + compare.extracted_scene + "); hold " +
+           FormatSlack(compare.estimated_worst_hold_slack_ns) +
+           " ns vs " +
+           FormatSlack(compare.extracted_worst_hold_slack_ns) +
+           " ns\n";
+  }
+  return out;
+}
+
 std::string IssueKindText(const std::string& kind) {
   if (kind == "extraction_artifact") return "extraction artifact";
   if (kind == "resolved_artifact") {
@@ -690,8 +739,9 @@ void PanelsView::Refresh() {
   const PanelsModel& panels = view_.Panels();
   sources_->setPlainText(QString::fromStdString(RenderSources(panels)));
   results_->setPlainText(QString::fromStdString(RenderResults(panels)));
-  timing_->setPlainText(
-      QString::fromStdString(RenderTiming(view_.Timing())));
+  timing_->setPlainText(QString::fromStdString(
+      RenderTiming(view_.Timing()) +
+      RenderExtract(view_.Extract())));
   clocks_->setPlainText(QString::fromStdString(
       RenderClockNetwork(view_.ClockNetwork()) +
       RenderCts(view_.Cts())));

@@ -316,7 +316,10 @@ def test_real_repo_check_passes_and_rules_hold():
     # F6 splits the six clocked route tests out of ui.registry
     # into per-test entries (fresh process each, design section
     # 14), the 72nd through 77th ctest entries.
-    assert len(all_tests) == 77
+    # F7 splits the five clocked extract tests out of
+    # ui.registry into per-test entries, the 78th through 82nd
+    # ctest entries.
+    assert len(all_tests) == 82
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),

@@ -152,6 +152,20 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       });
       continue;
     }
+    if (std::string(stage) == "Extract") {
+      extract_button_ = new QPushButton(stage, stages);
+      extract_button_->setFlat(true);
+      extract_button_->setEnabled(false);
+      stages_layout->addWidget(extract_button_);
+      connect(extract_button_, &QPushButton::clicked, [this]() {
+        // PanelsView is created below; clicks only happen after
+        // construction, so it is set by then.
+        view_.ShowRoute(false);
+        panels_->ShowTab(3);
+        Refresh();
+      });
+      continue;
+    }
     if (std::string(stage) == "Signoff") {
       signoff_button_ = new QPushButton(stage, stages);
       signoff_button_->setFlat(true);
@@ -330,6 +344,10 @@ bool MainWindow::RouteEnabled() const {
   return route_button_ != nullptr && route_button_->isEnabled();
 }
 
+bool MainWindow::ExtractEnabled() const {
+  return extract_button_ != nullptr && extract_button_->isEnabled();
+}
+
 bool MainWindow::SignoffEnabled() const {
   return signoff_button_ != nullptr && signoff_button_->isEnabled();
 }
@@ -449,6 +467,7 @@ void MainWindow::Refresh() {
   view_.RefreshClockNetwork();
   view_.RefreshCts();
   view_.RefreshRoute();
+  view_.RefreshExtract();
   view_.RefreshSignoff();
   view_.RefreshLog();
   browser_->Refresh();
@@ -520,6 +539,13 @@ void MainWindow::RefreshSteps() {
     route_button_->setEnabled(view_.Route().Loaded());
     route_button_->setStyleSheet(
         view_.ShowingRoute() ? "font-weight: bold;" : "");
+  }
+  // Extract stays disabled until an extract run is recorded,
+  // and stays enabled once it is: the flag comes from the
+  // live model, so a later refresh never disables it while
+  // the record is still loaded.
+  if (extract_button_ != nullptr) {
+    extract_button_->setEnabled(view_.Extract().Loaded());
   }
   // Signoff stays disabled until verdicts are loaded, and stays
   // enabled once they are: the flag comes from the live model,

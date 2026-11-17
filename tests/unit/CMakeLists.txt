@@ -328,7 +328,7 @@ target_compile_definitions(eda_ui_registry_unit_test
     EOS_DEMO_SYNTH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/synth"
     EOS_CLOCKED_DEMO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/clocked")
 add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test
-  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone)
+  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone:CoreCommands.ExtractRunsClockedDemoEndToEnd:CoreCommands.ExtractSummaryReportsRecordedRun:CoreCommands.ExtractRerunReplacesRecord:CoreCommands.ExtractRunTimingAgreesWithExtractSlack:CoreCommands.ExtractedStaComparesAgainstEstimated)
 # F6 (design section 14): the six clocked route tests each run in
 # their own process. The vendored Yosys kernel orders cells by
 # IdString pool index, a process-global assigned in first-internment
@@ -357,6 +357,27 @@ add_test(NAME ui.registry.route.timing_posture
 add_test(NAME ui.registry.route.records
   COMMAND eda_ui_registry_unit_test
     --gtest_filter=CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone)
+# F7 (design section 7): the five clocked extract tests each run
+# in their own process, for the same reason as the F6 route
+# entries above: they run the full synth-to-route chain and
+# assert fresh-process-exact counts and slack agreements. The
+# tests stay in this binary; only their ctest entries are
+# separate.
+add_test(NAME ui.registry.extract.end_to_end
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.ExtractRunsClockedDemoEndToEnd)
+add_test(NAME ui.registry.extract.summary
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.ExtractSummaryReportsRecordedRun)
+add_test(NAME ui.registry.extract.rerun
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.ExtractRerunReplacesRecord)
+add_test(NAME ui.registry.extract.timing_agreement
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.ExtractRunTimingAgreesWithExtractSlack)
+add_test(NAME ui.registry.extract.comparison
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.ExtractedStaComparesAgainstEstimated)
 
 if(TCL_FOUND)
   add_executable(eda_ui_tcl_unit_test ui/tcl/tcl_shell_test.cc)

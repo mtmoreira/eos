@@ -16,6 +16,7 @@
 
 #include "eos/ui/clock_network.h"
 #include "eos/ui/cts.h"
+#include "eos/ui/extract.h"
 #include "eos/ui/diagram.h"
 #include "eos/ui/console_entry.h"
 #include "eos/ui/floorplan.h"
@@ -366,6 +367,27 @@ class SessionView {
   // placement refresh.
   void RefreshRoute();
 
+  // Extract model, refreshed from the live session (see
+  // RefreshExtract). The Timing panel's Extraction section
+  // reads this: the recorded extract run with the engine's
+  // counts, the SPEF and model paths, the run's post-route
+  // estimated STA outcome, and the estimated-versus-
+  // extracted comparison paired from the latest run_timing.
+  const ExtractModel& Extract() const { return extract_; }
+
+  // Re-reads the extract model from the live session:
+  // dispatches extract_summary WITHOUT an echo line (a model
+  // refresh is not a user action) and rebuilds the model
+  // when an extract run has been recorded. A failed query
+  // or a malformed payload keeps the last good model and
+  // reports through the unguarded-refresh path, which stays
+  // silent while the model is empty. The query fails fast
+  // with no recorded run, so the refresh needs no gate of
+  // its own; and the query itself reads only the stored
+  // extract record plus last_results, so it runs on every
+  // refresh, like the placement refresh.
+  void RefreshExtract();
+
   // Signoff model, refreshed from the live session (see
   // RefreshSignoff). The Signoff panel reads this: the DRC,
   // LVS, and antenna verdicts parsed from the external PV
@@ -520,6 +542,14 @@ class SessionView {
     return context_.route.routed ? StepStatus::kDone
                                  : StepStatus::kPending;
   }
+  // Extract (full-flow GUI unit F7): Done once an extract
+  // run has succeeded in this session (the extract record
+  // is set). The stepper widget itself is F11's; this is
+  // the state contract it wires.
+  StepStatus ExtractStep() const {
+    return context_.extract.extracted ? StepStatus::kDone
+                                      : StepStatus::kPending;
+  }
 
  private:
   static std::string EchoLine(const std::string& name,
@@ -552,6 +582,7 @@ class SessionView {
   ClockNetworkModel clock_network_;
   CtsModel cts_;
   RouteModel route_;
+  ExtractModel extract_;
   SignoffModel signoff_;
   // The center view the user last chose: true for the
   // floorplan canvas, false for the hierarchy views. Set by a
