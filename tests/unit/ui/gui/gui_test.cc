@@ -326,6 +326,9 @@ TEST(GuiSessionView, StepStatesFollowSessionFlags) {
   EXPECT_EQ(view.PlacementStep(), StepStatus::kPending);
   EXPECT_EQ(view.CtsStep(), StepStatus::kPending);
   EXPECT_EQ(view.RouteStep(), StepStatus::kPending);
+  EXPECT_EQ(view.ExtractStep(), StepStatus::kPending);
+  EXPECT_EQ(view.FinishStep(), StepStatus::kPending);
+  EXPECT_EQ(view.GdsStep(), StepStatus::kPending);
   context.synth.parsed = true;
   EXPECT_EQ(view.ReadStep(), StepStatus::kDone);
   context.synth.elaborated = true;
@@ -340,6 +343,26 @@ TEST(GuiSessionView, StepStatesFollowSessionFlags) {
   EXPECT_EQ(view.CtsStep(), StepStatus::kDone);
   context.route.routed = true;
   EXPECT_EQ(view.RouteStep(), StepStatus::kDone);
+  context.extract.extracted = true;
+  EXPECT_EQ(view.ExtractStep(), StepStatus::kDone);
+  context.finish.finished = true;
+  EXPECT_EQ(view.FinishStep(), StepStatus::kDone);
+  context.gds.written = true;
+  EXPECT_EQ(view.GdsStep(), StepStatus::kDone);
+  // F11: FloorplanStep is the one model-based contract (F3
+  // gave floorplan no session record): it reads the floorplan
+  // model, so it flips when a floorplan_summary payload loads,
+  // and it agrees with Floorplan().Loaded() on both sides.
+  EXPECT_EQ(view.FloorplanStep(), StepStatus::kPending);
+  EXPECT_FALSE(view.Floorplan().Loaded());
+  RegisterFloorplanCommand(
+      registry,
+      "floorplan die=0,0,5000,5000 core=0,0,5000,5000 rows=0 "
+      "track_grids=0 io_placed=0 io_total=0",
+      true);
+  view.RefreshFloorplan();
+  EXPECT_TRUE(view.Floorplan().Loaded());
+  EXPECT_EQ(view.FloorplanStep(), StepStatus::kDone);
 }
 
 TEST(GuiSessionView, DispatchSeesSharedContext) {
@@ -5795,6 +5818,10 @@ struct AutoNavView {
   // the Signoff stage button starts disabled and only enables
   // once verdicts load.
   bool signoff_ok = false;
+  // The stub floorplan_summary fails until the test flips
+  // this: floorplan's state is its model, which loads only
+  // once the summary answers.
+  bool floorplan_ok = false;
   AutoNavView() : view(registry, context) {
     OutlineTestApp();
     auto elaborate = registry.Register(
@@ -5941,6 +5968,48 @@ struct AutoNavView {
           return CommandResult::Ok(kGdsSummaryPayload);
         });
     EXPECT_TRUE(gds_summary.ok());
+    // F11: the stub synth_map records a mapped design, like
+    // the real command; the stub place records a run and the
+    // stub place_summary fails until the record is set, like
+    // the real query. The stub floorplan_summary answers with
+    // the optloop floorplan payload: floorplan's state is its
+    // model, so the summary is the model's only source.
+    auto synth_map = registry.Register(
+        "synth_map", "synth_map",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          ctx.synth.mapped = true;
+          return CommandResult::Ok("cells=4 types=AND2:3,BUF:1");
+        });
+    EXPECT_TRUE(synth_map.ok());
+    auto place = registry.Register(
+        "place", "place",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          ctx.place.placed = true;
+          return CommandResult::Ok(
+              "placed=4 total=4 hpwl=12345 overlaps=0");
+        });
+    EXPECT_TRUE(place.ok());
+    auto place_summary = registry.Register(
+        "place_summary", "place_summary",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          if (!ctx.place.placed) {
+            return CommandResult::Fail(
+                eos::ui::Diag::kInvalidConfiguration,
+                "no placement: eos::place first");
+          }
+          return CommandResult::Ok(kPlacementPayload);
+        });
+    EXPECT_TRUE(place_summary.ok());
+    auto floorplan_summary = registry.Register(
+        "floorplan_summary", "floorplan_summary",
+        [this](CommandContext&, const std::vector<std::string>&) {
+          if (!floorplan_ok) {
+            return CommandResult::Fail(
+                eos::ui::Diag::kInvalidConfiguration, "no floorplan");
+          }
+          return CommandResult::Ok(kFloorplanPayload);
+        });
+    EXPECT_TRUE(floorplan_summary.ok());
     auto signoff = registry.Register(
         "signoff_summary", "signoff_summary",
         [this](CommandContext&, const std::vector<std::string>&) {
@@ -5963,6 +6032,26 @@ QPushButton* AutoNavButtonWithPrefix(MainWindow& window,
     }
   }
   return nullptr;
+}
+
+// F11: finds a stepper button by its step name. Step buttons
+// are identified by their ": Pending"/": Done" suffix, which
+// stage buttons never carry; the prefix helper alone would
+// find the stage button first for the seven shared names.
+QPushButton* AutoNavStepButton(MainWindow& window,
+                               const std::string& step) {
+  for (QPushButton* button : window.findChildren<QPushButton*>()) {
+    const std::string text = button->text().toStdString();
+    if (text == step + ": Pending" || text == step + ": Done") {
+      return button;
+    }
+  }
+  return nullptr;
+}
+
+std::string AutoNavStepText(MainWindow& window, const std::string& step) {
+  QPushButton* button = AutoNavStepButton(window, step);
+  return button == nullptr ? std::string() : button->text().toStdString();
 }
 
 TEST(MainWindowAutoNav, ElaborateEnablesAndShowsSynthesisTab) {
@@ -6042,7 +6131,7 @@ TEST(MainWindowAutoNav, ConsoleEntrySequenceEndsOnResults) {
   QPushButton* generic = AutoNavButtonWithPrefix(window, "Generic synth");
   ASSERT_NE(generic, nullptr);
   generic->click();
-  EXPECT_EQ(window.CurrentTab(), 4);
+  EXPECT_EQ(window.CurrentTab(), 5);
   QPushButton* synthesis =
       AutoNavButtonWithPrefix(window, "Synthesis");
   ASSERT_NE(synthesis, nullptr);
@@ -6059,7 +6148,7 @@ TEST(MainWindowAutoNav, SignoffSummaryShowsSignoffTab) {
   ASSERT_TRUE(fixture.view.Dispatch("signoff_summary", {}).ok);
   window.Refresh();
   EXPECT_TRUE(window.SignoffEnabled());
-  EXPECT_EQ(window.CurrentTab(), 6);
+  EXPECT_EQ(window.CurrentTab(), 7);
 }
 
 TEST(MainWindowAutoNav, SignoffButtonShowsSignoffTab) {
@@ -6068,7 +6157,7 @@ TEST(MainWindowAutoNav, SignoffButtonShowsSignoffTab) {
   fixture.signoff_ok = true;
   ASSERT_TRUE(fixture.view.Dispatch("signoff_summary", {}).ok);
   window.Refresh();
-  ASSERT_EQ(window.CurrentTab(), 6);
+  ASSERT_EQ(window.CurrentTab(), 7);
   // Move away through the stepper's Read step (Sources tab),
   // then take the Signoff stage button back to Signoff.
   QPushButton* read = AutoNavButtonWithPrefix(window, "Read");
@@ -6079,7 +6168,7 @@ TEST(MainWindowAutoNav, SignoffButtonShowsSignoffTab) {
   ASSERT_NE(signoff, nullptr);
   EXPECT_TRUE(signoff->isEnabled());
   signoff->click();
-  EXPECT_EQ(window.CurrentTab(), 6);
+  EXPECT_EQ(window.CurrentTab(), 7);
 }
 
 // F5: the CTS stage button starts disabled, enables once a
@@ -6223,6 +6312,213 @@ TEST(MainWindowAutoNav, FinishButtonShowsGdsCanvas) {
   ASSERT_NE(finish_button, nullptr);
   EXPECT_TRUE(finish_button->isEnabled());
   finish_button->click();
+  EXPECT_TRUE(fixture.view.ShowingGds());
+}
+
+// F11: the stepper covers the whole flow: eleven step
+// buttons, all Pending on a fresh window, each flipping to
+// Done as its stage's record lands, and all back to Pending
+// when the session clears.
+TEST(MainWindowAutoNav, StepperCoversTheFlow) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  const char* steps[11] = {"Read",    "Elaborate", "Generic synth",
+                           "Synthesis", "Floorplan", "Place",
+                           "CTS",     "Route",     "Extract",
+                           "Finish",  "GDS export"};
+  window.Refresh();
+  for (const char* step : steps) {
+    EXPECT_EQ(AutoNavStepText(window, step),
+              std::string(step) + ": Pending")
+        << step;
+  }
+  fixture.context.synth.parsed = true;
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "Read"), "Read: Done");
+  ASSERT_TRUE(fixture.view.Dispatch("elaborate", {}).ok);
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "Elaborate"), "Elaborate: Done");
+  fixture.context.synth.generic_optimized = true;
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "Generic synth"),
+            "Generic synth: Done");
+  ASSERT_TRUE(fixture.view.Dispatch("synth_map", {}).ok);
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "Synthesis"), "Synthesis: Done");
+  // Floorplan's step is model-based: once the fixture's
+  // summary stub answers, the model loads on refresh, and the
+  // step reads Done exactly when the Floorplan stage button
+  // is enabled (both read Floorplan().Loaded()).
+  fixture.floorplan_ok = true;
+  window.Refresh();
+  ASSERT_TRUE(fixture.view.Floorplan().Loaded());
+  EXPECT_EQ(AutoNavStepText(window, "Floorplan"), "Floorplan: Done");
+  QPushButton* floorplan_button =
+      AutoNavButtonWithPrefix(window, "Floorplan");
+  ASSERT_NE(floorplan_button, nullptr);
+  EXPECT_TRUE(floorplan_button->isEnabled());
+  ASSERT_TRUE(fixture.view.Dispatch("place", {}).ok);
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "Place"), "Place: Done");
+  ASSERT_TRUE(fixture.view.Dispatch("cts", {"-clock", "clk"}).ok);
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "CTS"), "CTS: Done");
+  ASSERT_TRUE(fixture.view.Dispatch("route", {}).ok);
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "Route"), "Route: Done");
+  ASSERT_TRUE(fixture.view
+                  .Dispatch("extract_parasitics",
+                            {"clk_top.spef", "-model", "eos_mock.rules"})
+                  .ok);
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "Extract"), "Extract: Done");
+  ASSERT_TRUE(fixture.view.Dispatch("finish", {}).ok);
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "Finish"), "Finish: Done");
+  ASSERT_TRUE(fixture.view.Dispatch("write_gds", {"clk_top.gds"}).ok);
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "GDS export"), "GDS export: Done");
+  // Clearing the session returns all eleven to Pending. The
+  // stub close_design resets the record fields the way the
+  // real command's ResetProject does; Dispatch's own
+  // close_design branch clears the models and center flags.
+  auto close_design = fixture.registry.Register(
+      "close_design", "close_design",
+      [](CommandContext& ctx, const std::vector<std::string>&) {
+        ctx.synth = CommandContext::SynthSession();
+        ctx.place = CommandContext::PlaceSession();
+        ctx.cts = CommandContext::CtsSession();
+        ctx.route = CommandContext::RouteSession();
+        ctx.extract = CommandContext::ExtractSession();
+        ctx.finish = CommandContext::FinishSession();
+        ctx.gds = CommandContext::GdsSession();
+        return CommandResult::Ok("");
+      });
+  ASSERT_TRUE(close_design.ok());
+  ASSERT_TRUE(fixture.view.Dispatch("close_design", {}).ok);
+  // The cleared design has no floorplan: the summary fails
+  // fast again, as the real query does without rows.
+  fixture.floorplan_ok = false;
+  window.Refresh();
+  for (const char* step : steps) {
+    EXPECT_EQ(AutoNavStepText(window, step),
+              std::string(step) + ": Pending")
+        << step;
+  }
+}
+
+// F11: the tab steps land where their stage buttons land:
+// the three original steps on Sources, Issues, and the Opt
+// log (index 5 since the Clocks tab was inserted), Synthesis
+// on Results, CTS on Clocks, Extract on Timing.
+TEST(MainWindowAutoNav, StepperTabStepClicksLand) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  window.Refresh();
+  QPushButton* read = AutoNavStepButton(window, "Read");
+  ASSERT_NE(read, nullptr);
+  read->click();
+  EXPECT_EQ(window.CurrentTab(), 1);
+  QPushButton* elaborate = AutoNavStepButton(window, "Elaborate");
+  ASSERT_NE(elaborate, nullptr);
+  elaborate->click();
+  EXPECT_EQ(window.CurrentTab(), 0);
+  QPushButton* generic = AutoNavStepButton(window, "Generic synth");
+  ASSERT_NE(generic, nullptr);
+  generic->click();
+  EXPECT_EQ(window.CurrentTab(), 5);
+  QPushButton* synthesis = AutoNavStepButton(window, "Synthesis");
+  ASSERT_NE(synthesis, nullptr);
+  synthesis->click();
+  EXPECT_EQ(window.CurrentTab(), 2);
+  ASSERT_TRUE(fixture.view.Dispatch("cts", {"-clock", "clk"}).ok);
+  window.Refresh();
+  QPushButton* cts_step = AutoNavStepButton(window, "CTS");
+  ASSERT_NE(cts_step, nullptr);
+  cts_step->click();
+  EXPECT_EQ(window.CurrentTab(), 4);
+  // The CTS stage button from the same posture lands on the
+  // same tab.
+  read = AutoNavStepButton(window, "Read");
+  ASSERT_NE(read, nullptr);
+  read->click();
+  EXPECT_EQ(window.CurrentTab(), 1);
+  QPushButton* cts_button = AutoNavButtonWithPrefix(window, "CTS");
+  ASSERT_NE(cts_button, nullptr);
+  EXPECT_TRUE(cts_button->isEnabled());
+  cts_button->click();
+  EXPECT_EQ(window.CurrentTab(), 4);
+  ASSERT_TRUE(fixture.view
+                  .Dispatch("extract_parasitics",
+                            {"clk_top.spef", "-model", "eos_mock.rules"})
+                  .ok);
+  window.Refresh();
+  QPushButton* extract_step = AutoNavStepButton(window, "Extract");
+  ASSERT_NE(extract_step, nullptr);
+  extract_step->click();
+  EXPECT_EQ(window.CurrentTab(), 3);
+}
+
+// F11: the canvas steps land where their stage buttons land:
+// each step click sets the same Showing* flag as the stage
+// button's click from the same posture, with the stage's
+// model loaded.
+TEST(MainWindowAutoNav, StepperCanvasStepClicksLand) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  fixture.floorplan_ok = true;
+  window.Refresh();
+  ASSERT_TRUE(fixture.view.Floorplan().Loaded());
+  QPushButton* floorplan_step = AutoNavStepButton(window, "Floorplan");
+  ASSERT_NE(floorplan_step, nullptr);
+  floorplan_step->click();
+  EXPECT_TRUE(fixture.view.ShowingFloorplan());
+  QPushButton* elaboration =
+      AutoNavButtonWithPrefix(window, "Elaboration");
+  ASSERT_NE(elaboration, nullptr);
+  elaboration->click();
+  EXPECT_FALSE(fixture.view.ShowingFloorplan());
+  QPushButton* floorplan_button =
+      AutoNavButtonWithPrefix(window, "Floorplan");
+  ASSERT_NE(floorplan_button, nullptr);
+  EXPECT_TRUE(floorplan_button->isEnabled());
+  floorplan_button->click();
+  EXPECT_TRUE(fixture.view.ShowingFloorplan());
+
+  ASSERT_TRUE(fixture.view.Dispatch("place", {}).ok);
+  window.Refresh();
+  ASSERT_TRUE(fixture.view.Placement().Loaded());
+  elaboration->click();
+  EXPECT_FALSE(fixture.view.ShowingPlacement());
+  QPushButton* place_step = AutoNavStepButton(window, "Place");
+  ASSERT_NE(place_step, nullptr);
+  place_step->click();
+  EXPECT_TRUE(fixture.view.ShowingPlacement());
+
+  ASSERT_TRUE(fixture.view.Dispatch("route", {}).ok);
+  window.Refresh();
+  ASSERT_TRUE(fixture.view.Route().Loaded());
+  elaboration->click();
+  EXPECT_FALSE(fixture.view.ShowingRoute());
+  QPushButton* route_step = AutoNavStepButton(window, "Route");
+  ASSERT_NE(route_step, nullptr);
+  route_step->click();
+  EXPECT_TRUE(fixture.view.ShowingRoute());
+
+  ASSERT_TRUE(fixture.view.Dispatch("finish", {}).ok);
+  window.Refresh();
+  ASSERT_TRUE(fixture.view.Finish().Loaded());
+  elaboration->click();
+  EXPECT_FALSE(fixture.view.ShowingGds());
+  QPushButton* finish_step = AutoNavStepButton(window, "Finish");
+  ASSERT_NE(finish_step, nullptr);
+  finish_step->click();
+  EXPECT_TRUE(fixture.view.ShowingGds());
+  elaboration->click();
+  EXPECT_FALSE(fixture.view.ShowingGds());
+  QPushButton* gds_step = AutoNavStepButton(window, "GDS export");
+  ASSERT_NE(gds_step, nullptr);
+  gds_step->click();
   EXPECT_TRUE(fixture.view.ShowingGds());
 }
 

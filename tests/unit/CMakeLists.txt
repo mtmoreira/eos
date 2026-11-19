@@ -334,7 +334,7 @@ target_compile_definitions(eda_ui_registry_unit_test
     EOS_DEMO_SYNTH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/synth"
     EOS_CLOCKED_DEMO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/clocked")
 add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test
-  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone:CoreCommands.ExtractRunsClockedDemoEndToEnd:CoreCommands.ExtractSummaryReportsRecordedRun:CoreCommands.ExtractRerunReplacesRecord:CoreCommands.ExtractRunTimingAgreesWithExtractSlack:CoreCommands.ExtractedStaComparesAgainstEstimated:CoreCommands.FinishRunsClockedDemoEndToEnd:CoreCommands.FinishSummaryReportsRecordedRuns:CoreCommands.FinishRerunReplacesRecords:CoreCommands.FinishLeavesEarlierRecordsAlone:CoreCommands.GdsRoundTripMatchesExportRecord)
+  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone:CoreCommands.ExtractRunsClockedDemoEndToEnd:CoreCommands.ExtractSummaryReportsRecordedRun:CoreCommands.ExtractRerunReplacesRecord:CoreCommands.ExtractRunTimingAgreesWithExtractSlack:CoreCommands.ExtractedStaComparesAgainstEstimated:CoreCommands.FinishRunsClockedDemoEndToEnd:CoreCommands.FinishSummaryReportsRecordedRuns:CoreCommands.FinishRerunReplacesRecords:CoreCommands.FinishLeavesEarlierRecordsAlone:CoreCommands.GdsRoundTripMatchesExportRecord:CoreCommands.RestoreClearsStageRecords)
 # F6 (design section 14): the six clocked route tests each run in
 # their own process. The vendored Yosys kernel orders cells by
 # IdString pool index, a process-global assigned in first-internment
@@ -405,6 +405,12 @@ add_test(NAME ui.registry.finish.records
 add_test(NAME ui.registry.finish.round_trip
   COMMAND eda_ui_registry_unit_test
     --gtest_filter=CoreCommands.GdsRoundTripMatchesExportRecord)
+# F11 (design section 7): the restore-records test runs the
+# full synth-to-finish chain, so it gets its own process in
+# the same isolation pattern as the F6/F7/F8 entries above.
+add_test(NAME ui.registry.restore.records
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.RestoreClearsStageRecords)
 
 if(TCL_FOUND)
   add_executable(eda_ui_tcl_unit_test ui/tcl/tcl_shell_test.cc)

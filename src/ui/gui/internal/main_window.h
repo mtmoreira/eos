@@ -105,7 +105,7 @@ class MainWindow : public QMainWindow {
   void SubmitEntry();
 
   SessionView& view_;
-  QPushButton* step_buttons_[3];
+  QPushButton* step_buttons_[11];
   QLabel* checkpoint_label_ = nullptr;
   // Stage buttons: Elaboration shows the hierarchy views,
   // Floorplan shows the floorplan canvas when a floorplan is

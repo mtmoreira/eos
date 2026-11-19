@@ -12763,6 +12763,73 @@ TEST(CoreCommands, GdsRoundTripMatchesExportRecord) {
   EXPECT_EQ(cut_at_origin, vias_at_origin);
 }
 
+// F11 A5 (D9): a restore clears the physical-stage and
+// verdict records along with the timing and synth sessions
+// it already cleared. Before this unit the records survived
+// a restore untouched; the summaries hid it by failing fast
+// without a database, but the GUI step contracts read the
+// records directly, so the records themselves are judged
+// here, on the context fields.
+TEST(CoreCommands, RestoreClearsStageRecords) {
+  TimingTempDir dir;
+  // The checkpoint file: a small project saved by a helper
+  // shell (the construction of the restore tests above).
+  const std::string checkpoint_path = dir.Path("records.eosproj");
+  {
+    Shell helper;
+    ASSERT_TRUE(helper.Run("create_design", {"top"}).ok);
+    ASSERT_TRUE(helper.Run("create_port", {"clk", "in"}).ok);
+    ASSERT_TRUE(helper.Run("bind_clock", {"c1", "clk"}).ok);
+    ASSERT_TRUE(
+        helper
+            .Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+            .ok);
+    ASSERT_TRUE(helper.Run("checkpoint", {checkpoint_path}).ok);
+  }
+  Shell shell;
+  BuildFinishedClockedDemoSession(shell, dir);
+  ASSERT_TRUE(shell.Run("write_gds", {dir.Path("clk_top.gds")}).ok);
+  // Every stage record is set, and the summaries answer.
+  ASSERT_TRUE(shell.ctx.place.placed);
+  ASSERT_FALSE(shell.ctx.cts.nets.empty());
+  ASSERT_TRUE(shell.ctx.route.routed);
+  ASSERT_TRUE(shell.ctx.extract.extracted);
+  ASSERT_TRUE(shell.ctx.finish.finished);
+  ASSERT_TRUE(shell.ctx.gds.written);
+  ASSERT_TRUE(shell.Run("place_summary").ok);
+  ASSERT_TRUE(shell.Run("cts_summary").ok);
+  ASSERT_TRUE(shell.Run("route_summary").ok);
+  const CommandResult restored = shell.Run("restore", {checkpoint_path});
+  ASSERT_TRUE(restored.ok) << restored.message;
+  // The restore payload's shape is unchanged.
+  EXPECT_NE(restored.payload.find("restored=1 design=top "),
+            std::string::npos);
+  EXPECT_NE(restored.payload.find(" bindings_restored="),
+            std::string::npos);
+  // Every physical and verdict record is at its default.
+  EXPECT_FALSE(shell.ctx.place.placed);
+  EXPECT_TRUE(shell.ctx.cts.nets.empty());
+  EXPECT_FALSE(shell.ctx.route.routed);
+  EXPECT_FALSE(shell.ctx.extract.extracted);
+  EXPECT_FALSE(shell.ctx.finish.finished);
+  EXPECT_FALSE(shell.ctx.gds.written);
+  EXPECT_FALSE(shell.ctx.signoff.has_record);
+  EXPECT_FALSE(shell.ctx.drc.has_record);
+  // The summaries that check their record first fail fast
+  // with their not-run texts; place_summary returns not-ok
+  // (its first gate after a restore is the top-block check,
+  // its record check second).
+  const CommandResult cts_summary = shell.Run("cts_summary");
+  ASSERT_FALSE(cts_summary.ok);
+  EXPECT_NE(cts_summary.message.find("no clock tree: eos::cts first"),
+            std::string::npos);
+  const CommandResult route_summary = shell.Run("route_summary");
+  ASSERT_FALSE(route_summary.ok);
+  EXPECT_NE(route_summary.message.find("no routing: eos::route first"),
+            std::string::npos);
+  EXPECT_FALSE(shell.Run("place_summary").ok);
+}
+
 // F6 A7: on demo/synth, after the optloop flow through
 // place, bare route succeeds: route needs a placed design
 // and a Liberty, not a clock. The mirror image of F5's A8.

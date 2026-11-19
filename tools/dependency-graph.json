@@ -1890,6 +1890,16 @@
         "tests/unit/ui/registry/registry_test.cc"
       ]
     },
+    "ui.registry.restore.records": {
+      "modules": [
+        "checkpoint",
+        "gds",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
     "ui.registry.route.clock_view": {
       "modules": [
         "checkpoint",
