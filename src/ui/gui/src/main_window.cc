@@ -39,8 +39,9 @@ const char* kStepNames[3] = {"Read", "Elaborate", "Generic synth"};
 // Elaborate shows Issues (0, the default landing view after
 // Elaborate), Generic synth shows Opt log (4).
 const int kStepTabs[3] = {1, 0, 4};
-const char* kLaterStages[9] = {"Synthesis", "Floorplan", "Place", "CTS",
-                                "Route",     "Extract",   "STA", "ECO",
+const char* kLaterStages[10] = {"Synthesis", "Floorplan", "Place",
+                                "CTS",       "Route",    "Extract",
+                                "Finish",    "STA",      "ECO",
                                 "Signoff"};
 
 std::string StepText(const char* name, StepStatus status) {
@@ -83,6 +84,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
     view_.ShowFloorplan(false);
     view_.ShowPlacement(false);
     view_.ShowRoute(false);
+    view_.ShowGds(false);
     Refresh();
   });
   for (const char* stage : kLaterStages) {
@@ -107,6 +109,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       connect(floorplan_button_, &QPushButton::clicked, [this]() {
         view_.ShowPlacement(false);
         view_.ShowRoute(false);
+        view_.ShowGds(false);
         view_.ShowFloorplan(true);
         Refresh();
       });
@@ -120,6 +123,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       connect(placement_button_, &QPushButton::clicked, [this]() {
         view_.ShowFloorplan(false);
         view_.ShowRoute(false);
+        view_.ShowGds(false);
         view_.ShowPlacement(true);
         Refresh();
       });
@@ -134,6 +138,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
         // PanelsView is created below; clicks only happen after
         // construction, so it is set by then.
         view_.ShowRoute(false);
+        view_.ShowGds(false);
         panels_->ShowTab(4);
         Refresh();
       });
@@ -147,6 +152,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       connect(route_button_, &QPushButton::clicked, [this]() {
         view_.ShowFloorplan(false);
         view_.ShowPlacement(false);
+        view_.ShowGds(false);
         view_.ShowRoute(true);
         Refresh();
       });
@@ -161,7 +167,22 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
         // PanelsView is created below; clicks only happen after
         // construction, so it is set by then.
         view_.ShowRoute(false);
+        view_.ShowGds(false);
         panels_->ShowTab(3);
+        Refresh();
+      });
+      continue;
+    }
+    if (std::string(stage) == "Finish") {
+      finish_button_ = new QPushButton(stage, stages);
+      finish_button_->setFlat(true);
+      finish_button_->setEnabled(false);
+      stages_layout->addWidget(finish_button_);
+      connect(finish_button_, &QPushButton::clicked, [this]() {
+        view_.ShowFloorplan(false);
+        view_.ShowPlacement(false);
+        view_.ShowRoute(false);
+        view_.ShowGds(true);
         Refresh();
       });
       continue;
@@ -228,6 +249,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
     view_.ShowFloorplan(false);
     view_.ShowPlacement(false);
     view_.ShowRoute(false);
+    view_.ShowGds(false);
     view_.SetDiagramLevel(view_.SelectedHierarchyPath());
     Refresh();
   });
@@ -348,6 +370,10 @@ bool MainWindow::ExtractEnabled() const {
   return extract_button_ != nullptr && extract_button_->isEnabled();
 }
 
+bool MainWindow::FinishEnabled() const {
+  return finish_button_ != nullptr && finish_button_->isEnabled();
+}
+
 bool MainWindow::SignoffEnabled() const {
   return signoff_button_ != nullptr && signoff_button_->isEnabled();
 }
@@ -455,6 +481,11 @@ void MainWindow::Refresh() {
       view_.ShowFloorplan(false);
       view_.ShowPlacement(false);
       break;
+    case SessionView::ResultDestination::kGds:
+      view_.ShowFloorplan(false);
+      view_.ShowPlacement(false);
+      view_.ShowRoute(false);
+      break;
   }
   view_.RefreshHierarchy();
   view_.RefreshDiagram();
@@ -468,6 +499,8 @@ void MainWindow::Refresh() {
   view_.RefreshCts();
   view_.RefreshRoute();
   view_.RefreshExtract();
+  view_.RefreshFinish();
+  view_.RefreshGds();
   view_.RefreshSignoff();
   view_.RefreshLog();
   browser_->Refresh();
@@ -546,6 +579,16 @@ void MainWindow::RefreshSteps() {
   // the record is still loaded.
   if (extract_button_ != nullptr) {
     extract_button_->setEnabled(view_.Extract().Loaded());
+  }
+  // Finish stays disabled until a finish run is recorded,
+  // and stays enabled once it is: the flag comes from the
+  // live model, so a later refresh never disables it while
+  // the record is still loaded. It is bold while the GDS
+  // canvas is showing, following the route button's pattern.
+  if (finish_button_ != nullptr) {
+    finish_button_->setEnabled(view_.Finish().Loaded());
+    finish_button_->setStyleSheet(
+        view_.ShowingGds() ? "font-weight: bold;" : "");
   }
   // Signoff stays disabled until verdicts are loaded, and stays
   // enabled once they are: the flag comes from the live model,

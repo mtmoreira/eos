@@ -401,10 +401,17 @@
       "via": {}
     },
     "gds": {
-      "depends_on": [],
+      "depends_on": [
+        "errors"
+      ],
       "layer": "L1",
       "path": "src/io/gds",
-      "via": {}
+      "via": {
+        "errors": [
+          "cmake-link",
+          "include"
+        ]
+      }
     },
     "geom": {
       "depends_on": [],
@@ -699,6 +706,7 @@
         "finish",
         "floorplan",
         "flow",
+        "gds",
         "ids",
         "ledger",
         "odb",
@@ -763,6 +771,10 @@
           "include"
         ],
         "flow": [
+          "cmake-link",
+          "include"
+        ],
+        "gds": [
           "cmake-link",
           "include"
         ],
@@ -1309,6 +1321,14 @@
         "tests/unit/foundation/ids/ids_test.cc"
       ]
     },
+    "io.gds": {
+      "modules": [
+        "gds"
+      ],
+      "sources": [
+        "tests/unit/io/gds/gds_test.cc"
+      ]
+    },
     "io.sdc": {
       "modules": [
         "sdc"
@@ -1341,6 +1361,7 @@
       "modules": [
         "finish",
         "floorplan",
+        "gds",
         "odb",
         "place",
         "route"
@@ -1762,6 +1783,7 @@
     "ui.registry": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1771,6 +1793,7 @@
     "ui.registry.extract.comparison": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1780,6 +1803,7 @@
     "ui.registry.extract.end_to_end": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1789,6 +1813,7 @@
     "ui.registry.extract.rerun": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1798,6 +1823,7 @@
     "ui.registry.extract.summary": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1807,6 +1833,57 @@
     "ui.registry.extract.timing_agreement": {
       "modules": [
         "checkpoint",
+        "gds",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.registry.finish.end_to_end": {
+      "modules": [
+        "checkpoint",
+        "gds",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.registry.finish.records": {
+      "modules": [
+        "checkpoint",
+        "gds",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.registry.finish.rerun": {
+      "modules": [
+        "checkpoint",
+        "gds",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.registry.finish.round_trip": {
+      "modules": [
+        "checkpoint",
+        "gds",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.registry.finish.summary": {
+      "modules": [
+        "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1816,6 +1893,7 @@
     "ui.registry.route.clock_view": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1825,6 +1903,7 @@
     "ui.registry.route.end_to_end": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1834,6 +1913,7 @@
     "ui.registry.route.records": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1843,6 +1923,7 @@
     "ui.registry.route.rerun": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1852,6 +1933,7 @@
     "ui.registry.route.summary": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [
@@ -1861,6 +1943,7 @@
     "ui.registry.route.timing_posture": {
       "modules": [
         "checkpoint",
+        "gds",
         "registry"
       ],
       "sources": [

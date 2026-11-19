@@ -4385,7 +4385,7 @@ library ("eos_mock") {
     }
   }
   cell ("EM_FILL") {
-    area : 2.000000;
+    area : 0.400000;
     cell_footprint : "EM_FILL";
   }
   cell ("EM_TAP") {

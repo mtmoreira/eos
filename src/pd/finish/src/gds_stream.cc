@@ -496,8 +496,16 @@ bool WriteGdsStream(odb::dbDatabase* db, const std::string& path,
               if (layer == nullptr) {
                 continue;
               }
-              w.RectBoundary(GdsLayer(tech, layer), box->xMin(),
-                             box->yMin(), box->xMax(), box->yMax());
+              // Via boxes are stored at via-local coordinates;
+              // translate by the decoder's last point, the via's
+              // placed point (the DRC engine's ViaBoxRect rule).
+              // With no preceding point, keep the local emission:
+              // the guard never invents a position.
+              const int dx = have_last_point ? last_point.x : 0;
+              const int dy = have_last_point ? last_point.y : 0;
+              w.RectBoundary(GdsLayer(tech, layer), box->xMin() + dx,
+                             box->yMin() + dy, box->xMax() + dx,
+                             box->yMax() + dy);
             }
           }
           break;
@@ -511,8 +519,11 @@ bool WriteGdsStream(odb::dbDatabase* db, const std::string& path,
               if (layer == nullptr) {
                 continue;
               }
-              w.RectBoundary(GdsLayer(tech, layer), box->xMin(),
-                             box->yMin(), box->xMax(), box->yMax());
+              const int dx = have_last_point ? last_point.x : 0;
+              const int dy = have_last_point ? last_point.y : 0;
+              w.RectBoundary(GdsLayer(tech, layer), box->xMin() + dx,
+                             box->yMin() + dy, box->xMax() + dx,
+                             box->yMax() + dy);
             }
           }
           break;

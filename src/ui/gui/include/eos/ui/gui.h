@@ -19,7 +19,9 @@
 #include "eos/ui/extract.h"
 #include "eos/ui/diagram.h"
 #include "eos/ui/console_entry.h"
+#include "eos/ui/finish.h"
 #include "eos/ui/floorplan.h"
+#include "eos/ui/gds.h"
 #include "eos/ui/hierarchy.h"
 #include "eos/ui/issues.h"
 #include "eos/ui/panels.h"
@@ -388,6 +390,48 @@ class SessionView {
   // refresh, like the placement refresh.
   void RefreshExtract();
 
+  // Finish model, refreshed from the live session (see
+  // RefreshFinish). The Signoff panel's Finish section and
+  // the GDS canvas's counts column read this: the recorded
+  // finish run's four values.
+  const FinishModel& Finish() const { return finish_; }
+
+  // Re-reads the finish model from the live session:
+  // dispatches finish_summary WITHOUT an echo line (a model
+  // refresh is not a user action) and rebuilds the model
+  // when a finish run has been recorded. A failed query or
+  // a malformed payload keeps the last good model and
+  // reports through the unguarded-refresh path, which stays
+  // silent while the model is empty. The query fails fast
+  // with no recorded run, so the refresh needs no gate of
+  // its own; and the query itself reads only the stored
+  // finish record, so it runs on every refresh, like the
+  // extract refresh.
+  void RefreshFinish();
+
+  // GDS model, refreshed from the live session (see
+  // RefreshGds). The GDS canvas reads this: the recorded
+  // export's header, the file's structure and layer
+  // censuses, the flattened top-structure geometry, and the
+  // top's SREFs.
+  const GdsModel& Gds() const { return gds_; }
+
+  // Re-reads the GDS model from the live session:
+  // dispatches gds_summary WITHOUT an echo line (a model
+  // refresh is not a user action), but only when the model
+  // is empty or the GDS record's (path, size) pair differs
+  // from the pair the loaded model was built from: the
+  // query re-reads and re-flattens the whole file, so
+  // re-dispatching it on every refresh would re-read the
+  // file for nothing (the keyed-refresh precedent of the
+  // issues and timing models). The key is updated only
+  // after a successful load, so a failed query or a
+  // malformed payload keeps the last good model and is
+  // retried on the next refresh; failures report through
+  // the unguarded-refresh path, which stays silent while
+  // the model is empty.
+  void RefreshGds();
+
   // Signoff model, refreshed from the live session (see
   // RefreshSignoff). The Signoff panel reads this: the DRC,
   // LVS, and antenna verdicts parsed from the external PV
@@ -428,6 +472,7 @@ class SessionView {
     kSynthesis,
     kCenter,
     kSignoff,
+    kGds,
   };
 
   // Returns the pending navigation and clears it.
@@ -467,6 +512,17 @@ class SessionView {
   // route that no longer exists.
   bool ShowingRoute() const { return center_route_; }
   void ShowRoute(bool show) { center_route_ = show; }
+
+  // Whether the center shows the GDS canvas instead of the
+  // hierarchy views or the floorplan, placement, or routing
+  // canvases. A successful finish or write_gds dispatch
+  // takes the user there; a hierarchy navigation, a stage
+  // button for an earlier canvas, or a successful
+  // close_design takes them back. The center shows the
+  // canvas only while the GDS model is loaded, so a stale
+  // flag never shows an export that no longer exists.
+  bool ShowingGds() const { return center_gds_; }
+  void ShowGds(bool show) { center_gds_ = show; }
 
   // One engine log line for the log window: the local time the
   // line was drained, its severity ("error" for a line
@@ -550,6 +606,22 @@ class SessionView {
     return context_.extract.extracted ? StepStatus::kDone
                                       : StepStatus::kPending;
   }
+  // Finish (full-flow GUI unit F8): Done once a finish run
+  // has succeeded in this session (the finish record is
+  // set). The stepper widget itself is F11's; this is the
+  // state contract it wires.
+  StepStatus FinishStep() const {
+    return context_.finish.finished ? StepStatus::kDone
+                                    : StepStatus::kPending;
+  }
+  // GDS export (full-flow GUI unit F8): Done once a
+  // write_gds run has succeeded in this session (the GDS
+  // record is set). The stepper widget itself is F11's;
+  // this is the state contract it wires.
+  StepStatus GdsStep() const {
+    return context_.gds.written ? StepStatus::kDone
+                                : StepStatus::kPending;
+  }
 
  private:
   static std::string EchoLine(const std::string& name,
@@ -583,6 +655,12 @@ class SessionView {
   CtsModel cts_;
   RouteModel route_;
   ExtractModel extract_;
+  FinishModel finish_;
+  GdsModel gds_;
+  // The GDS record's (path, size) pair the loaded GDS model
+  // was built from (see RefreshGds). Empty when no GDS
+  // model is loaded.
+  std::string gds_key_;
   SignoffModel signoff_;
   // The center view the user last chose: true for the
   // floorplan canvas, false for the hierarchy views. Set by a
@@ -608,6 +686,16 @@ class SessionView {
   // a successful route takes the user past the placement
   // canvas.
   bool center_route_ = false;
+  // The center view the user last chose: true for the GDS
+  // canvas, false otherwise. Set by a successful finish or
+  // write_gds dispatch and by explicit stage navigation;
+  // cleared by a successful close_design, by hierarchy
+  // navigation, and by the Floorplan, Place, and Route
+  // stage buttons. It wins over center_route_ while the
+  // GDS model is loaded: the export is the later stage, so
+  // a successful finish or export takes the user past the
+  // routing canvas.
+  bool center_gds_ = false;
   // The navigation a just-run command asked for, consumed once
   // by the window on the next refresh (see ResultDestination).
   ResultDestination pending_navigation_ = ResultDestination::kNone;

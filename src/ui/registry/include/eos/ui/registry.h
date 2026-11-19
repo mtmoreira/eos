@@ -413,6 +413,47 @@ struct CommandContext {
   };
   ExtractSession extract;
 
+  // Finish session state (full-flow GUI unit F8): the most
+  // recent successful finish run's report, field for field
+  // (the pd::FinishReport the runner filled). Like the
+  // extract session, this is interface session state, not
+  // project state: it is cleared when the design closes
+  // (ResetProject), and a restore does not bring it back.
+  // Only a successful finish run updates it; a failed run
+  // leaves the previous record untouched. It is a single
+  // run, not a history: a later successful run replaces
+  // the record (the runner's re-run posture is idempotent
+  // counting, so the replacement normally agrees with the
+  // run it replaces).
+  struct FinishSession {
+    bool finished = false;
+    int filler_count = 0;
+    int grid_shape_count = 0;
+    int metal_fill_count = 0;
+    bool with_pdn = false;
+  };
+  FinishSession finish;
+
+  // GDS export session state (full-flow GUI unit F8): the
+  // most recent successful write_gds run's report, field
+  // for field (the pd::WriteGdsReport the runner filled).
+  // The same session posture as the finish session beside
+  // it: interface state, cleared by ResetProject, updated
+  // only on success, replaced wholesale by a later export
+  // (including one naming a different path; the earlier
+  // file stays on disk, unrecorded). The geometry itself
+  // is never stored here: gds_summary reads the recorded
+  // file through the GDS reader at query time, so the
+  // record never holds a second copy of the file.
+  struct GdsSession {
+    bool written = false;
+    std::string path;
+    long long size_bytes = 0;
+    int instance_count = 0;
+    int structure_count = 0;
+  };
+  GdsSession gds;
+
   // Synthesis session state (unit S1): the design the synthesis
   // commands have parsed, elaborated and generically optimized,
   // as one advancing state machine. Like the timing session,

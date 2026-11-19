@@ -431,6 +431,55 @@ command and lands on the Timing tab, whose Extraction
 section renders the record and, once the extracted run
 exists, the comparison.
 
+### Finish and GDS export on this design (F8, measured)
+
+The F8 sequence continues the F7 one in the same session:
+`finish`, `finish_summary`, `write_gds clk_top.gds`,
+`gds_summary`. The posture is a bare finish: the mock
+Liberty has no pg pins and the design has no power or
+ground nets, so no PDN is built, and no metal-fill rules
+file exists. The filler master is the mock's `EM_FILL`,
+a `CLASS CORE SPACER` cell one site wide (0.2 um), so it
+tiles any row gap the placed design leaves.
+
+- `finish`: `fillers=1085 grid_shapes=0 metal_fills=0
+  pdn=false`. The filler count is the placed rows' gap
+  total at one filler per site.
+- `finish_summary`: the same four values under the
+  `finish` lead word, read from the finish record.
+- `write_gds clk_top.gds`: `size=233416 instances=1259
+  structures=21`. The instance count is the 174 design
+  instances (168 placed plus 6 CTS buffers) plus the
+  1085 fillers; the structure count is the top plus the
+  20 masters those instances use.
+- `gds_summary`: the header agrees with the export
+  payload (`gds path=clk_top.gds size=233416
+  instances=1259 structures=21 library=eos
+  dbu_per_micron=2000`, the last from the file's own
+  UNITS and the mock tech's 2000 DBU per micron). The
+  top structure line reads `structure name=clk_top
+  top=1 boundaries=2961 paths=220 srefs=1259`, and the
+  layer census is `via1 boundaries=2024 paths=102`,
+  `em2 boundaries=987 paths=118`, `via2 boundaries=8
+  paths=0`, `em3 boundaries=8 paths=0`. The 987 em2
+  boundaries are the routed vias' boxes on that layer;
+  with this unit's writer fix, every via boundary in
+  the file is centered at its via point (before the
+  fix, all of them were emitted at the layout origin).
+
+In the GUI, the Finish stage button runs `finish` and
+lands on the GDS canvas, the sixth center page, which
+draws the exported geometry with a per-layer selector;
+the Signoff tab gains a Finish section rendering the
+finish record and the export header. The Mac check for
+this unit: pull, build by the typed route, launch from
+this folder, run the full console sequence through the
+tail above, and see the finish counts and the exported
+GDS path and size in the canvas counts column matching
+the payloads, the geometry (wires, vias on their nets,
+filler and instance pin shapes) drawn in the center,
+and `clk_top.gds` on disk at the recorded size.
+
 ### The clock table in a read_sdc-only session (F2 caveat, fixed)
 
 Before the clock-network unit, this was the F2 caveat:

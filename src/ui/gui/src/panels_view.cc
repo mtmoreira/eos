@@ -496,6 +496,37 @@ std::string RenderExtract(const ExtractModel& model) {
   return out;
 }
 
+// The Signoff tab's Finish section (full-flow GUI unit
+// F8): the recorded finish run and, once an export exists,
+// the recorded export, appended after the signoff verdicts
+// in their own labeled block. F8 renders no verdict of its
+// own (D14): the section reports the two records, nothing
+// more. Each half renders its not-run-yet line while its
+// record is empty, so the section never implies a run that
+// has not happened.
+std::string RenderFinish(const FinishModel& finish,
+                         const GdsModel& gds) {
+  std::string out = "\nFinish:\n";
+  if (!finish.Loaded()) {
+    out += "  (no finish run yet: run eos::finish first)\n";
+  } else {
+    out += "  fillers " + std::to_string(finish.Fillers()) +
+           ", grid shapes " + std::to_string(finish.GridShapes()) +
+           ", metal fills " + std::to_string(finish.MetalFills()) +
+           ", pdn " + (finish.Pdn() ? "true" : "false") + "\n";
+  }
+  if (!gds.Loaded()) {
+    out += "  (no GDS exported yet: run eos::write_gds first)\n";
+  } else {
+    out += "  GDS: " + gds.Path() + " (" +
+           std::to_string(gds.Size()) + " bytes), " +
+           std::to_string(gds.Structures()) + " structures, " +
+           std::to_string(gds.Instances()) + " instances, library " +
+           gds.Library() + "\n";
+  }
+  return out;
+}
+
 std::string IssueKindText(const std::string& kind) {
   if (kind == "extraction_artifact") return "extraction artifact";
   if (kind == "resolved_artifact") {
@@ -746,8 +777,9 @@ void PanelsView::Refresh() {
       RenderClockNetwork(view_.ClockNetwork()) +
       RenderCts(view_.Cts())));
   optlog_->setPlainText(QString::fromStdString(RenderOptLog(panels)));
-  signoff_->setPlainText(
-      QString::fromStdString(RenderSignoff(view_.Signoff())));
+  signoff_->setPlainText(QString::fromStdString(
+      RenderSignoff(view_.Signoff()) +
+      RenderFinish(view_.Finish(), view_.Gds())));
   RefreshMessages();
 }
 
@@ -805,6 +837,7 @@ void PanelsView::LocateIssue(const std::string& path,
   // schematic the issue belongs to.
   view_.ShowFloorplan(false);
   view_.ShowRoute(false);
+  view_.ShowGds(false);
   view_.RefreshSchematic();
   if (view_.DiagramLevelIsLeaf() && on_highlight_gate_) {
     on_highlight_gate_(target);
