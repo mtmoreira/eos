@@ -34,9 +34,18 @@
 // and a layer selector beside the canvas. Route wins over
 // placement while its model is loaded: route is the later
 // stage, so a successful route takes the user past the
-// placement canvas.
+// placement canvas. When the user has chosen the GDS stage
+// (a successful finish or write_gds dispatch takes them
+// there, a hierarchy navigation or an earlier stage button
+// takes them back) and the GDS model is loaded, the center
+// shows the GDS canvas instead: the flattened export
+// geometry, with the finish counts, the export record, the
+// per-layer census, and a layer selector beside the canvas.
+// GDS wins over route while its model is loaded: the export
+// is the later stage, so a successful finish or export
+// takes the user past the routing canvas.
 //
-// The five pages share the same navigation callbacks (block
+// The six pages share the same navigation callbacks (block
 // click, breadcrumb) through a single action callback, so the
 // main window refreshes the same way whichever page is
 // showing.
@@ -51,6 +60,7 @@
 #include "eos/ui/gui.h"
 #include "block_diagram.h"
 #include "floorplan_diagram.h"
+#include "gds_diagram.h"
 #include "placement_diagram.h"
 #include "route_diagram.h"
 #include "schematic_diagram.h"
@@ -61,8 +71,10 @@ class CenterView : public QWidget {
  public:
   explicit CenterView(SessionView& view, QWidget* parent = nullptr);
 
-  // Refreshes all five pages from the session and shows the
-  // page for the current state: the routing canvas when the
+  // Refreshes all six pages from the session and shows the
+  // page for the current state: the GDS canvas when the
+  // user chose the GDS stage and the GDS model is loaded,
+  // the routing canvas when the
   // user chose the route stage and the route model is loaded,
   // the placement canvas when the user chose the placement
   // stage and the placement model is loaded, the floorplan
@@ -83,11 +95,13 @@ class CenterView : public QWidget {
   bool ShowingFloorplan() const { return showing_floorplan_; }
   bool ShowingPlacement() const { return showing_placement_; }
   bool ShowingRoute() const { return showing_route_; }
+  bool ShowingGds() const { return showing_gds_; }
   BlockDiagram* Diagram() { return diagram_; }
   SchematicDiagram* Schematic() { return schematic_; }
   FloorplanDiagram* Floorplan() { return floorplan_; }
   PlacementDiagram* Placement() { return placement_; }
   RouteDiagram* Route() { return route_; }
+  GdsDiagram* Gds() { return gds_; }
 
  private:
   SessionView& view_;
@@ -97,10 +111,12 @@ class CenterView : public QWidget {
   FloorplanDiagram* floorplan_;
   PlacementDiagram* placement_;
   RouteDiagram* route_;
+  GdsDiagram* gds_;
   bool showing_schematic_ = false;
   bool showing_floorplan_ = false;
   bool showing_placement_ = false;
   bool showing_route_ = false;
+  bool showing_gds_ = false;
   std::function<void()> on_action_;
 };
 

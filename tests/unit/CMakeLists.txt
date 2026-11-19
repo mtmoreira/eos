@@ -40,6 +40,11 @@ target_link_libraries(eda_io_sdc_unit_test
   PRIVATE eda_io_sdc GTest::gtest GTest::gtest_main)
 add_test(NAME io.sdc COMMAND eda_io_sdc_unit_test)
 
+add_executable(eda_io_gds_unit_test io/gds/gds_test.cc)
+target_link_libraries(eda_io_gds_unit_test
+  PRIVATE eda_io_gds GTest::gtest GTest::gtest_main)
+add_test(NAME io.gds COMMAND eda_io_gds_unit_test)
+
 add_executable(eda_analysis_sta_unit_test analysis/sta/sta_test.cc)
 target_link_libraries(eda_analysis_sta_unit_test
   PRIVATE eda_analysis_sta GTest::gtest GTest::gtest_main)
@@ -205,7 +210,7 @@ add_test(NAME pv.signoff COMMAND eda_pv_signoff_unit_test
 add_executable(eda_pd_finish_unit_test pd/finish/finish_test.cc)
 target_link_libraries(eda_pd_finish_unit_test
   PRIVATE eda_pd_finish eda_pd_route eda_pd_place eda_pd_floorplan
-          eda_db_odb GTest::gtest GTest::gtest_main)
+          eda_db_odb eda_io_gds GTest::gtest GTest::gtest_main)
 add_test(NAME pd.finish COMMAND eda_pd_finish_unit_test)
 
 add_executable(eda_pd_dbsta_unit_test pd/dbsta/dbsta_test.cc)
@@ -318,7 +323,8 @@ add_test(NAME pd.rsz.mock.fallback_zero_drive
 
 add_executable(eda_ui_registry_unit_test ui/registry/registry_test.cc)
 target_link_libraries(eda_ui_registry_unit_test
-  PRIVATE eda_ui_registry eda_db_checkpoint GTest::gtest GTest::gtest_main)
+  PRIVATE eda_ui_registry eda_db_checkpoint eda_io_gds
+          GTest::gtest GTest::gtest_main)
 # F0: the mock-PDK bridge test reads the demo design and the mock
 # PDK from the source tree, like the GUI icon check reads its
 # assets from a path. The defines carry quoted absolute paths.
@@ -328,7 +334,7 @@ target_compile_definitions(eda_ui_registry_unit_test
     EOS_DEMO_SYNTH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/synth"
     EOS_CLOCKED_DEMO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/clocked")
 add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test
-  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone:CoreCommands.ExtractRunsClockedDemoEndToEnd:CoreCommands.ExtractSummaryReportsRecordedRun:CoreCommands.ExtractRerunReplacesRecord:CoreCommands.ExtractRunTimingAgreesWithExtractSlack:CoreCommands.ExtractedStaComparesAgainstEstimated)
+  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone:CoreCommands.ExtractRunsClockedDemoEndToEnd:CoreCommands.ExtractSummaryReportsRecordedRun:CoreCommands.ExtractRerunReplacesRecord:CoreCommands.ExtractRunTimingAgreesWithExtractSlack:CoreCommands.ExtractedStaComparesAgainstEstimated:CoreCommands.FinishRunsClockedDemoEndToEnd:CoreCommands.FinishSummaryReportsRecordedRuns:CoreCommands.FinishRerunReplacesRecords:CoreCommands.FinishLeavesEarlierRecordsAlone:CoreCommands.GdsRoundTripMatchesExportRecord)
 # F6 (design section 14): the six clocked route tests each run in
 # their own process. The vendored Yosys kernel orders cells by
 # IdString pool index, a process-global assigned in first-internment
@@ -378,6 +384,27 @@ add_test(NAME ui.registry.extract.timing_agreement
 add_test(NAME ui.registry.extract.comparison
   COMMAND eda_ui_registry_unit_test
     --gtest_filter=CoreCommands.ExtractedStaComparesAgainstEstimated)
+# F8 (design section 7): the five clocked finish tests each
+# run in their own process, for the same reason as the F6
+# route and F7 extract entries above: they run the full
+# synth-to-extract chain and assert fresh-process-exact
+# counts and payload agreements. The tests stay in this
+# binary; only their ctest entries are separate.
+add_test(NAME ui.registry.finish.end_to_end
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.FinishRunsClockedDemoEndToEnd)
+add_test(NAME ui.registry.finish.summary
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.FinishSummaryReportsRecordedRuns)
+add_test(NAME ui.registry.finish.rerun
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.FinishRerunReplacesRecords)
+add_test(NAME ui.registry.finish.records
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.FinishLeavesEarlierRecordsAlone)
+add_test(NAME ui.registry.finish.round_trip
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.GdsRoundTripMatchesExportRecord)
 
 if(TCL_FOUND)
   add_executable(eda_ui_tcl_unit_test ui/tcl/tcl_shell_test.cc)

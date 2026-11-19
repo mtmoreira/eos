@@ -8,13 +8,17 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include <gtest/gtest.h>
 
 #include "eos/db/odb.h"
+#include "eos/io/gds.h"
+#include "eos/pd/route.h"
 
 #include "odb/db.h"
 #include "odb/dbWireCodec.h"
@@ -106,7 +110,7 @@ TEST(Registry, CoreSetIsComplete) {
   // The F5 CTS unit adds cts_summary (one command).
   // The F6 route unit adds route_summary (one command).
   // The F7 extract unit adds extract_summary (one command).
-  EXPECT_EQ(shell.registry.Names().size(), 127u);
+  EXPECT_EQ(shell.registry.Names().size(), 129u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -11615,6 +11619,17 @@ static void BuildExtractedClockedDemoSession(Shell& shell,
   ASSERT_TRUE(extract.ok) << extract.message;
 }
 
+// The extracted clocked demo session plus one bare finish
+// run (the F8 chain), the starting point of the F8 finish
+// acceptance tests that do not need the finish payload
+// itself.
+static void BuildFinishedClockedDemoSession(Shell& shell,
+                                            TimingTempDir& dir) {
+  BuildExtractedClockedDemoSession(shell, dir);
+  const CommandResult finish = shell.Run("finish", {});
+  ASSERT_TRUE(finish.ok) << finish.message;
+}
+
 // Parses one integer header value out of a route payload's
 // first line ("key=<value>" among space-separated terms).
 // Returns -1 when the key is absent or the value is not an
@@ -11920,6 +11935,180 @@ TEST(CoreCommands, ExtractSummaryFailsFastBeforeExtract) {
                           "first"),
       std::string::npos);
   EXPECT_FALSE(shell.ctx.extract.extracted);
+}
+
+// Builds the small routed fixture session of
+// FinishAndWriteGdsRunOnRoutedDesign (imported, floorplanned,
+// placed, routed; no synth), the fast starting point of the
+// non-isolated F8 summary tests.
+static void BuildRoutedFixtureSession(Shell& shell,
+                                      TimingTempDir& dir) {
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kFinishLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  ASSERT_TRUE(shell.Run("route", {}).ok);
+}
+
+// F8 A2, the fail-fast half: finish_summary with an empty
+// record fails with the section 3.4 message, in a fresh
+// session and in a routed session that has not finished.
+TEST(CoreCommands, FinishSummaryFailsFastBeforeFinish) {
+  Shell shell;
+  const CommandResult fresh = shell.Run("finish_summary");
+  ASSERT_FALSE(fresh.ok);
+  EXPECT_EQ(fresh.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(fresh.message.find("no finish: eos::finish first"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.finish.finished);
+
+  TimingTempDir dir;
+  Shell routed;
+  BuildRoutedFixtureSession(routed, dir);
+  const CommandResult result = routed.Run("finish_summary");
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no finish: eos::finish first"),
+            std::string::npos);
+  EXPECT_FALSE(routed.ctx.finish.finished);
+}
+
+// F8 A2, the fail-fast half: gds_summary with an empty
+// record fails with the section 3.5 message, in a fresh
+// session and in a finished session that has not exported.
+TEST(CoreCommands, GdsSummaryFailsFastBeforeWriteGds) {
+  Shell shell;
+  const CommandResult fresh = shell.Run("gds_summary");
+  ASSERT_FALSE(fresh.ok);
+  EXPECT_EQ(fresh.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(fresh.message.find("no gds: eos::write_gds first"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.gds.written);
+
+  TimingTempDir dir;
+  Shell finished;
+  BuildRoutedFixtureSession(finished, dir);
+  ASSERT_TRUE(finished.Run("finish", {}).ok);
+  const CommandResult result = finished.Run("gds_summary");
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no gds: eos::write_gds first"),
+            std::string::npos);
+  EXPECT_FALSE(finished.ctx.gds.written);
+}
+
+// F8 A2 on the small routed fixture: after finish,
+// finish_summary's payload is the finish payload's four
+// values under the finish lead word, exactly; the finish
+// record holds the run's report field for field.
+TEST(CoreCommands, FinishSummaryReportsRecordedRun) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kFinishLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  ASSERT_TRUE(shell.Run("route", {}).ok);
+  const CommandResult finish = shell.Run("finish", {});
+  ASSERT_TRUE(finish.ok) << finish.message;
+  ASSERT_TRUE(shell.ctx.finish.finished);
+  EXPECT_EQ(shell.ctx.finish.filler_count,
+            static_cast<int>(RouteHeaderInt(finish.payload, "fillers")));
+  EXPECT_EQ(shell.ctx.finish.grid_shape_count,
+            static_cast<int>(
+                RouteHeaderInt(finish.payload, "grid_shapes")));
+  EXPECT_EQ(shell.ctx.finish.metal_fill_count,
+            static_cast<int>(
+                RouteHeaderInt(finish.payload, "metal_fills")));
+  EXPECT_FALSE(shell.ctx.finish.with_pdn);
+  const CommandResult summary = shell.Run("finish_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_EQ(summary.payload, "finish " + finish.payload);
+}
+
+// F8 A8's file leg: with a GDS record in place, deleting
+// the exported file outside the session makes gds_summary
+// fail, naming the recorded path: never a header-only
+// success over a missing file.
+TEST(CoreCommands, GdsSummaryFailsFastOnMissingFile) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kFinishLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  ASSERT_TRUE(shell.Run("route", {}).ok);
+  ASSERT_TRUE(shell.Run("finish", {}).ok);
+  const std::string gds_path = dir.Path("top.gds");
+  ASSERT_TRUE(shell.Run("write_gds", {gds_path}).ok);
+  ASSERT_TRUE(shell.ctx.gds.written);
+  const CommandResult before = shell.Run("gds_summary");
+  ASSERT_TRUE(before.ok) << before.message;
+  std::error_code ec;
+  ASSERT_TRUE(std::filesystem::remove(gds_path, ec));
+  const CommandResult result = shell.Run("gds_summary");
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidState);
+  EXPECT_NE(result.message.find("cannot read GDS file " + gds_path),
+            std::string::npos);
+}
+
+// F8 A8's record leg: a failed finish after a successful
+// one leaves both records holding the successful runs. On
+// the finish fixture (no supply nets in the DEF), a -pdn
+// finish fails fast; the finish record and the GDS record
+// keep the earlier successful runs, and both summaries
+// still report them.
+TEST(CoreCommands, FailedFinishKeepsSuccessfulRecords) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kFinishLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kFloorplanDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+  Shell shell;
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(
+      shell.Run("read_liberty",
+                {"tt", dir.Write("cells.lib", kTimingLiberty)}).ok);
+  ASSERT_TRUE(shell.Run("floorplan", {}).ok);
+  ASSERT_TRUE(shell.Run("place", {}).ok);
+  ASSERT_TRUE(shell.Run("route", {}).ok);
+  const CommandResult finish = shell.Run("finish", {});
+  ASSERT_TRUE(finish.ok) << finish.message;
+  ASSERT_TRUE(shell.Run("write_gds", {dir.Path("top.gds")}).ok);
+  const CommandResult summary_before = shell.Run("finish_summary");
+  ASSERT_TRUE(summary_before.ok) << summary_before.message;
+  const CommandResult failed = shell.Run("finish", {"-pdn"});
+  ASSERT_FALSE(failed.ok);
+  ASSERT_TRUE(shell.ctx.finish.finished);
+  ASSERT_TRUE(shell.ctx.gds.written);
+  const CommandResult summary_after = shell.Run("finish_summary");
+  ASSERT_TRUE(summary_after.ok) << summary_after.message;
+  EXPECT_EQ(summary_after.payload, summary_before.payload);
+  const CommandResult gds_summary = shell.Run("gds_summary");
+  ASSERT_TRUE(gds_summary.ok) << gds_summary.message;
 }
 
 // F7 A7: on a placed-but-unrouted fixture session (imported,
@@ -12239,6 +12428,339 @@ TEST(CoreCommands, ExtractedStaComparesAgainstEstimated) {
                 SceneLineValue(final_run.payload, "func_tt_ext",
                                "worst_hold_slack_ns")),
             std::string::npos);
+}
+
+// F8 A1: the full chain runs in one session through the
+// bare finish call on the routed, extracted clocked design
+// (the D7 posture: the mock Liberty has no pg pins and the
+// design has no power or ground nets, so no PDN is built);
+// fillers are above zero (the exact count is the run's,
+// asserted against the record, not a figure the design
+// invents); grid and metal counts are zero; and the export
+// that follows reports a nonzero size with the record
+// holding its path, size, and counts field for field.
+TEST(CoreCommands, FinishRunsClockedDemoEndToEnd) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildExtractedClockedDemoSession(shell, dir);
+  const CommandResult finish = shell.Run("finish", {});
+  ASSERT_TRUE(finish.ok) << finish.message;
+  const long long fillers = RouteHeaderInt(finish.payload, "fillers");
+  ASSERT_GT(fillers, 0);
+  EXPECT_EQ(RouteHeaderInt(finish.payload, "grid_shapes"), 0);
+  EXPECT_EQ(RouteHeaderInt(finish.payload, "metal_fills"), 0);
+  EXPECT_NE(finish.payload.find("pdn=false"), std::string::npos);
+  ASSERT_TRUE(shell.ctx.finish.finished);
+  EXPECT_EQ(shell.ctx.finish.filler_count,
+            static_cast<int>(fillers));
+  EXPECT_EQ(shell.ctx.finish.grid_shape_count, 0);
+  EXPECT_EQ(shell.ctx.finish.metal_fill_count, 0);
+  EXPECT_FALSE(shell.ctx.finish.with_pdn);
+  const std::string gds_path = dir.Path("clk_top.gds");
+  const CommandResult written = shell.Run("write_gds", {gds_path});
+  ASSERT_TRUE(written.ok) << written.message;
+  const long long size = RouteHeaderInt(written.payload, "size");
+  ASSERT_GT(size, 0);
+  ASSERT_TRUE(shell.ctx.gds.written);
+  EXPECT_EQ(shell.ctx.gds.path, gds_path);
+  EXPECT_EQ(shell.ctx.gds.size_bytes, size);
+  EXPECT_EQ(shell.ctx.gds.instance_count,
+            static_cast<int>(
+                RouteHeaderInt(written.payload, "instances")));
+  EXPECT_EQ(shell.ctx.gds.structure_count,
+            static_cast<int>(
+                RouteHeaderInt(written.payload, "structures")));
+  std::error_code ec;
+  EXPECT_EQ(std::filesystem::file_size(gds_path, ec),
+            static_cast<std::uintmax_t>(size));
+}
+
+// F8 A2 + A3: after the runs, finish_summary's payload is
+// the finish payload's four values under the finish lead
+// word, exactly, and gds_summary's header reports the
+// write_gds payload's path, size, instances, and
+// structures exactly, with the mock's 2000 DBU per micron
+// derived from the file's own UNITS.
+TEST(CoreCommands, FinishSummaryReportsRecordedRuns) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildExtractedClockedDemoSession(shell, dir);
+  const CommandResult finish = shell.Run("finish", {});
+  ASSERT_TRUE(finish.ok) << finish.message;
+  const CommandResult finish_summary = shell.Run("finish_summary");
+  ASSERT_TRUE(finish_summary.ok) << finish_summary.message;
+  EXPECT_EQ(finish_summary.payload, "finish " + finish.payload);
+  const std::string gds_path = dir.Path("clk_top.gds");
+  const CommandResult written = shell.Run("write_gds", {gds_path});
+  ASSERT_TRUE(written.ok) << written.message;
+  const CommandResult summary = shell.Run("gds_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("gds path=" + gds_path + " "),
+            std::string::npos);
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "size"),
+            RouteHeaderInt(written.payload, "size"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "instances"),
+            RouteHeaderInt(written.payload, "instances"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "structures"),
+            RouteHeaderInt(written.payload, "structures"));
+  EXPECT_EQ(RouteHeaderInt(summary.payload, "dbu_per_micron"),
+            2000);
+  EXPECT_NE(summary.payload.find("library="), std::string::npos);
+}
+
+// F8 A3: a second finish reports counts identical to the
+// first and the record holds the second run's values; a
+// second write_gds to a different path replaces the GDS
+// record wholesale, and gds_summary then reports the
+// second export.
+TEST(CoreCommands, FinishRerunReplacesRecords) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildFinishedClockedDemoSession(shell, dir);
+  const CommandResult first_summary = shell.Run("finish_summary");
+  ASSERT_TRUE(first_summary.ok) << first_summary.message;
+  const CommandResult second = shell.Run("finish", {});
+  ASSERT_TRUE(second.ok) << second.message;
+  EXPECT_EQ(second.payload,
+            first_summary.payload.substr(std::string("finish ").size()));
+  const CommandResult second_summary = shell.Run("finish_summary");
+  ASSERT_TRUE(second_summary.ok) << second_summary.message;
+  EXPECT_EQ(second_summary.payload, first_summary.payload);
+  const std::string first_path = dir.Path("first.gds");
+  ASSERT_TRUE(shell.Run("write_gds", {first_path}).ok);
+  EXPECT_EQ(shell.ctx.gds.path, first_path);
+  const std::string second_path = dir.Path("second.gds");
+  const CommandResult rewritten = shell.Run("write_gds", {second_path});
+  ASSERT_TRUE(rewritten.ok) << rewritten.message;
+  ASSERT_TRUE(shell.ctx.gds.written);
+  EXPECT_EQ(shell.ctx.gds.path, second_path);
+  EXPECT_EQ(shell.ctx.gds.size_bytes,
+            RouteHeaderInt(rewritten.payload, "size"));
+  const CommandResult summary = shell.Run("gds_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("gds path=" + second_path + " "),
+            std::string::npos);
+}
+
+// F8 A4: the finish and export runs leave the earlier
+// stages' records untouched: CTS, route, and extract
+// summaries and the clock view are byte-identical before
+// and after. place_summary is judged on its measured
+// shape (as-built refinement, design section 15): its
+// counts and slacks come from the place record, but its
+// instance rectangles come from the live database (the F4
+// handler's stated contract), so after finish the listing
+// legitimately gains the filler instances finish placed.
+// The place leg therefore requires the header and every
+// pre-finish line byte-identical and in order, with the
+// only added lines being EM_FILL filler instances whose
+// count equals the finish run's filler count.
+TEST(CoreCommands, FinishLeavesEarlierRecordsAlone) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildExtractedClockedDemoSession(shell, dir);
+  const std::string place_before = shell.Run("place_summary").payload;
+  const std::string cts_before = shell.Run("cts_summary").payload;
+  const std::string clock_before =
+      shell.Run("clock_network_summary").payload;
+  const std::string route_before = shell.Run("route_summary").payload;
+  const std::string extract_before =
+      shell.Run("extract_summary").payload;
+  ASSERT_FALSE(place_before.empty());
+  ASSERT_FALSE(cts_before.empty());
+  ASSERT_FALSE(route_before.empty());
+  ASSERT_FALSE(extract_before.empty());
+  const CommandResult finish_run = shell.Run("finish", {});
+  ASSERT_TRUE(finish_run.ok) << finish_run.message;
+  const int fillers = RouteHeaderInt(finish_run.payload, "fillers");
+  ASSERT_GT(fillers, 0);
+  ASSERT_TRUE(shell.Run("write_gds", {dir.Path("clk_top.gds")}).ok);
+  ASSERT_TRUE(shell.Run("finish_summary").ok);
+  ASSERT_TRUE(shell.Run("gds_summary").ok);
+  EXPECT_EQ(shell.Run("cts_summary").payload, cts_before);
+  EXPECT_EQ(shell.Run("clock_network_summary").payload, clock_before);
+  EXPECT_EQ(shell.Run("route_summary").payload, route_before);
+  EXPECT_EQ(shell.Run("extract_summary").payload, extract_before);
+  const std::string place_after = shell.Run("place_summary").payload;
+  std::vector<std::string> kept;
+  int added_fillers = 0;
+  std::istringstream lines(place_after);
+  std::string line;
+  while (std::getline(lines, line)) {
+    if (line.rfind("inst name=", 0) == 0 &&
+        line.find(" master=EM_FILL ") != std::string::npos) {
+      ++added_fillers;
+    } else {
+      kept.push_back(line);
+    }
+  }
+  std::string rejoined;
+  for (std::size_t i = 0; i < kept.size(); ++i) {
+    if (i > 0) rejoined += "\n";
+    rejoined += kept[i];
+  }
+  EXPECT_EQ(rejoined, place_before);
+  EXPECT_EQ(added_fillers, fillers);
+}
+
+// The centers of one layer's boundary lines in a gds_summary
+// payload (boundaries named by the layer token prefix), as
+// (cx, cy) pairs in payload order.
+static std::vector<std::pair<int, int>> GdsBoundaryCenters(
+    const std::string& payload, const std::string& layer_prefix) {
+  std::vector<std::pair<int, int>> centers;
+  std::istringstream in(payload);
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.rfind("boundary ", 0) != 0) continue;
+    const std::size_t layer_at = line.find("layer=");
+    const std::size_t points_at = line.find("points=");
+    if (layer_at == std::string::npos ||
+        points_at == std::string::npos) {
+      continue;
+    }
+    const std::string layer =
+        line.substr(layer_at + 6, line.find(' ', layer_at) -
+                                      (layer_at + 6));
+    if (layer.rfind(layer_prefix, 0) != 0) continue;
+    int min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+    bool first = true;
+    // Parse the comma list directly: x,y,x,y,...
+    const std::string text =
+        line.substr(points_at + std::string("points=").size());
+    std::size_t begin = 0;
+    int index = 0;
+    while (begin <= text.size()) {
+      const std::size_t comma = text.find(',', begin);
+      const std::string part = text.substr(
+          begin, comma == std::string::npos ? comma : comma - begin);
+      if (part.empty()) break;
+      const int value = std::stoi(part);
+      if (index % 2 == 0) {
+        if (first) {
+          min_x = max_x = value;
+        } else {
+          min_x = std::min(min_x, value);
+          max_x = std::max(max_x, value);
+        }
+      } else {
+        if (first) {
+          min_y = max_y = value;
+          first = false;
+        } else {
+          min_y = std::min(min_y, value);
+          max_y = std::max(max_y, value);
+        }
+      }
+      ++index;
+      if (comma == std::string::npos) break;
+      begin = comma + 1;
+    }
+    centers.push_back({(min_x + max_x) / 2, (min_y + max_y) / 2});
+  }
+  return centers;
+}
+
+// F8 A5 + A6: the export read back through the reader
+// agrees with the GDS record on every shared field (the
+// structure count, the top structure's SREF count against
+// instances, the per-layer boundary and path totals against
+// gds_summary's layer lines), and every via point the
+// routed geometry reports carries a cut-layer boundary
+// centered on it in the flattened summary, with no
+// cut-layer boundary centered at the origin (no via point
+// sits there in this design). A6 is the via fix's verdict
+// at demo scale; it fails on the unfixed writer.
+TEST(CoreCommands, GdsRoundTripMatchesExportRecord) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildFinishedClockedDemoSession(shell, dir);
+  const std::string gds_path = dir.Path("clk_top.gds");
+  const CommandResult written = shell.Run("write_gds", {gds_path});
+  ASSERT_TRUE(written.ok) << written.message;
+  const CommandResult summary = shell.Run("gds_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  const foundation::Result<io::GdsLibrary> library =
+      io::ReadGdsFile(gds_path);
+  ASSERT_TRUE(library.ok()) << library.status().message();
+  EXPECT_EQ(library.value().structures.size(),
+            static_cast<std::size_t>(shell.ctx.gds.structure_count));
+  EXPECT_EQ(CountRouteLines(summary.payload, "structure "),
+            shell.ctx.gds.structure_count);
+  EXPECT_EQ(CountRouteLines(summary.payload, "sref "),
+            shell.ctx.gds.instance_count);
+  // The top structure (the one no SREF names) and its SREF
+  // count against the record's instances.
+  std::map<std::string, bool> referenced;
+  for (const io::GdsStructure& structure :
+       library.value().structures) {
+    for (const io::GdsSref& sref : structure.srefs) {
+      referenced[sref.target] = true;
+    }
+  }
+  int top_srefs = -1;
+  long long file_boundaries = 0;
+  long long file_paths = 0;
+  std::map<std::pair<int, int>, std::pair<long long, long long>>
+      file_layers;
+  for (const io::GdsStructure& structure :
+       library.value().structures) {
+    if (!referenced[structure.name]) {
+      top_srefs = static_cast<int>(structure.srefs.size());
+    }
+    file_boundaries +=
+        static_cast<long long>(structure.boundaries.size());
+    file_paths += static_cast<long long>(structure.paths.size());
+    for (const io::GdsBoundary& boundary : structure.boundaries) {
+      file_layers[{boundary.layer, boundary.datatype}].first++;
+    }
+    for (const io::GdsPath& path : structure.paths) {
+      file_layers[{path.layer, path.datatype}].second++;
+    }
+  }
+  EXPECT_EQ(top_srefs, shell.ctx.gds.instance_count);
+  // The summary's layer lines recount the file's per-layer
+  // totals exactly.
+  long long summary_boundaries = 0;
+  long long summary_paths = 0;
+  {
+    std::istringstream in(summary.payload);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.rfind("layer ", 0) != 0) continue;
+      summary_boundaries += RouteHeaderInt(line, "boundaries");
+      summary_paths += RouteHeaderInt(line, "paths");
+    }
+  }
+  EXPECT_EQ(summary_boundaries, file_boundaries);
+  EXPECT_EQ(summary_paths, file_paths);
+  EXPECT_GT(file_boundaries, 0);
+  EXPECT_GT(file_paths, 0);
+  // A6: every via point carries a cut-layer boundary
+  // centered on it; none sits at the origin.
+  ASSERT_TRUE(shell.ctx.timing.odb.has_value());
+  pd::RouteGeometry geometry;
+  ASSERT_TRUE(pd::QueryRouteGeometry(
+                  shell.ctx.timing.odb->RawDatabase(), &geometry)
+                  .ok());
+  ASSERT_FALSE(geometry.vias.empty());
+  const std::vector<std::pair<int, int>> cut_centers =
+      GdsBoundaryCenters(summary.payload, "via");
+  ASSERT_FALSE(cut_centers.empty());
+  const std::set<std::pair<int, int>> center_set(cut_centers.begin(),
+                                                cut_centers.end());
+  int vias_at_origin = 0;
+  for (const pd::RouteVia& via : geometry.vias) {
+    EXPECT_TRUE(center_set.count({via.x, via.y}) == 1)
+        << "no cut-layer boundary centered at via point " << via.x
+        << "," << via.y << " (net " << via.net << ")";
+    if (via.x == 0 && via.y == 0) ++vias_at_origin;
+  }
+  int cut_at_origin = 0;
+  for (const auto& center : cut_centers) {
+    if (center.first == 0 && center.second == 0) ++cut_at_origin;
+  }
+  EXPECT_EQ(cut_at_origin, vias_at_origin);
 }
 
 // F6 A7: on demo/synth, after the optloop flow through

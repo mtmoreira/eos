@@ -74,8 +74,11 @@ using eos::ui::DisplayInstance;
 using eos::ui::DisplayType;
 using eos::ui::FaninCone;
 using eos::ui::FanoutCone;
+using eos::ui::FinishModel;
 using eos::ui::FloorplanModel;
 using eos::ui::FloorplanRect;
+using eos::ui::GdsDiagram;
+using eos::ui::GdsModel;
 using eos::ui::PlacementModel;
 using eos::ui::PlacementRect;
 using eos::ui::RouteLayer;
@@ -2290,6 +2293,83 @@ void RegisterRouteSummaryCommand(CommandRegistry& registry,
   EXPECT_TRUE(status.ok());
 }
 
+// F8: the recorded finish run as finish_summary reports it:
+// the finish payload's four values under the finish lead
+// word, on the bare-finish posture.
+const char kFinishSummaryPayload[] =
+    "finish fillers=12 grid_shapes=0 metal_fills=0 pdn=false";
+
+// F8: the recorded export as gds_summary reports it: a
+// two-structure file (one master with a single pin
+// boundary, a top with two boundaries and one path) whose
+// top references the master three times. The layer lines
+// count the file's elements (the master's boundary counts
+// once, however many SREFs pull it in); the boundary lines
+// are the flattened top: the top's own two, then one
+// transformed copy of the master's boundary per SREF
+// (placed, reflected at 90 degrees, at 180 degrees).
+const char kGdsSummaryPayload[] =
+    "gds path=clk_top.gds size=4321 instances=3 structures=2 "
+    "library=EOSMOCK dbu_per_micron=1000\n"
+    "structure name=BUF_X1 top=0 boundaries=1 paths=0 srefs=0\n"
+    "structure name=top top=1 boundaries=2 paths=1 srefs=3\n"
+    "layer gds=1 name=em1 datatype=0 boundaries=2 paths=0\n"
+    "layer gds=2 name=via1 datatype=0 boundaries=1 paths=0\n"
+    "layer gds=3 name=em2 datatype=0 boundaries=0 paths=1\n"
+    "boundary structure=top layer=em1 gds_layer=1 datatype=0 "
+    "points=0,0,400,0,400,400,0,400\n"
+    "boundary structure=top layer=via1 gds_layer=2 datatype=0 "
+    "points=90,90,150,90,150,150,90,150\n"
+    "boundary structure=BUF_X1 layer=em1 gds_layer=1 datatype=0 "
+    "points=1000,2000,1100,2000,1100,2100,1000,2100\n"
+    "boundary structure=BUF_X1 layer=em1 gds_layer=1 datatype=0 "
+    "points=2000,2000,2000,2100,2100,2100,2100,2000\n"
+    "boundary structure=BUF_X1 layer=em1 gds_layer=1 datatype=0 "
+    "points=3000,2000,2900,2000,2900,1900,3000,1900\n"
+    "path structure=top layer=em2 gds_layer=3 datatype=0 "
+    "width=50 points=0,0,500,0\n"
+    "sref structure=top target=BUF_X1 x=1000 y=2000 reflect=0 "
+    "angle=none\n"
+    "sref structure=top target=BUF_X1 x=2000 y=2000 reflect=1 "
+    "angle=90\n"
+    "sref structure=top target=BUF_X1 x=3000 y=2000 reflect=0 "
+    "angle=180\n";
+
+void RegisterFinishSummaryCommand(CommandRegistry& registry,
+                                  const std::string& payload,
+                                  bool ok) {
+  auto status = registry.Register(
+      "finish_summary", "finish_summary",
+      [payload, ok](CommandContext&, const std::vector<std::string>&) {
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "query broken");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
+// The gds_summary stub counts its dispatches: the keyed
+// RefreshGds test judges the refresh by how often the
+// query actually ran.
+void RegisterGdsSummaryCommand(CommandRegistry& registry,
+                               const std::string& payload, bool ok,
+                               int* calls) {
+  auto status = registry.Register(
+      "gds_summary", "gds_summary",
+      [payload, ok, calls](CommandContext&,
+                           const std::vector<std::string>&) {
+        if (calls != nullptr) ++*calls;
+        if (!ok) {
+          return CommandResult::Fail(eos::ui::Diag::kInvalidConfiguration,
+                                     "query broken");
+        }
+        return CommandResult::Ok(payload);
+      });
+  EXPECT_TRUE(status.ok());
+}
+
 void FillPanelsContext(CommandContext& context) {
   context.synth.parsed = true;
   context.synth.top_cell = "optloop";
@@ -3969,6 +4049,173 @@ TEST(ExtractModel, RejectsMalformedPayloads) {
   EXPECT_EQ(model.Compares().size(), 1u);
 }
 
+TEST(FinishModel, ParsesRecordedRun) {
+  FinishModel model;
+  ASSERT_TRUE(model.LoadPayload(kFinishSummaryPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.Fillers(), 12u);
+  EXPECT_EQ(model.GridShapes(), 0u);
+  EXPECT_EQ(model.MetalFills(), 0u);
+  EXPECT_FALSE(model.Pdn());
+
+  FinishModel pdn;
+  ASSERT_TRUE(pdn.LoadPayload(
+      "finish fillers=3 grid_shapes=40 metal_fills=7 pdn=true"));
+  EXPECT_TRUE(pdn.Pdn());
+  EXPECT_EQ(pdn.GridShapes(), 40u);
+  EXPECT_EQ(pdn.MetalFills(), 7u);
+}
+
+TEST(FinishModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      // No header lead word.
+      "fillers=12 grid_shapes=0 metal_fills=0 pdn=false\n",
+      // A missing key.
+      "finish fillers=12 grid_shapes=0 metal_fills=0\n",
+      // An unknown key.
+      "finish fillers=12 grid_shapes=0 metal_fills=0 pdn=false "
+      "bogus=1\n",
+      // A bad number.
+      "finish fillers=x grid_shapes=0 metal_fills=0 pdn=false\n",
+      // A pdn value that is not true or false.
+      "finish fillers=12 grid_shapes=0 metal_fills=0 pdn=yes\n",
+      // A second line: the payload is the header alone.
+      "finish fillers=12 grid_shapes=0 metal_fills=0 pdn=false\n"
+      "finish fillers=1 grid_shapes=0 metal_fills=0 pdn=false\n",
+  };
+  for (const char* payload : bad) {
+    FinishModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+  // A malformed load keeps the previous model.
+  FinishModel model;
+  ASSERT_TRUE(model.LoadPayload(kFinishSummaryPayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.Fillers(), 12u);
+}
+
+TEST(GdsModel, ParsesRecordedExport) {
+  GdsModel model;
+  ASSERT_TRUE(model.LoadPayload(kGdsSummaryPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.Path(), "clk_top.gds");
+  EXPECT_EQ(model.Size(), 4321u);
+  EXPECT_EQ(model.Instances(), 3u);
+  EXPECT_EQ(model.Structures(), 2u);
+  EXPECT_EQ(model.Library(), "EOSMOCK");
+  EXPECT_DOUBLE_EQ(model.DbuPerMicron(), 1000.0);
+  ASSERT_EQ(model.StructureInfos().size(), 2u);
+  EXPECT_EQ(model.StructureInfos()[0].name, "BUF_X1");
+  EXPECT_FALSE(model.StructureInfos()[0].top);
+  EXPECT_EQ(model.StructureInfos()[1].name, "top");
+  EXPECT_TRUE(model.StructureInfos()[1].top);
+  EXPECT_EQ(model.StructureInfos()[1].srefs, 3u);
+  ASSERT_EQ(model.LayerInfos().size(), 3u);
+  EXPECT_EQ(model.LayerInfos()[0].gds_layer, 1);
+  EXPECT_EQ(model.LayerInfos()[0].name, "em1");
+  EXPECT_EQ(model.LayerInfos()[0].boundaries, 2u);
+  EXPECT_EQ(model.LayerInfos()[2].name, "em2");
+  EXPECT_EQ(model.LayerInfos()[2].paths, 1u);
+  ASSERT_EQ(model.Boundaries().size(), 5u);
+  EXPECT_EQ(model.Boundaries()[0].structure, "top");
+  EXPECT_EQ(model.Boundaries()[2].structure, "BUF_X1");
+  ASSERT_EQ(model.Paths().size(), 1u);
+  EXPECT_TRUE(model.Paths()[0].has_width);
+  EXPECT_EQ(model.Paths()[0].width, 50);
+  ASSERT_EQ(model.Srefs().size(), 3u);
+  EXPECT_FALSE(model.Srefs()[0].has_angle);
+  EXPECT_TRUE(model.Srefs()[1].reflect);
+  ASSERT_TRUE(model.Srefs()[1].has_angle);
+  EXPECT_DOUBLE_EQ(model.Srefs()[1].angle_degrees, 90.0);
+  EXPECT_EQ(model.BoundariesForLayer("em1").size(), 4u);
+  EXPECT_EQ(model.BoundariesForLayer("via1").size(), 1u);
+  EXPECT_TRUE(model.PathsForLayer("em1").empty());
+  EXPECT_EQ(model.PathsForLayer("em2").size(), 1u);
+  ASSERT_TRUE(model.HasBoundingBox());
+  EXPECT_EQ(model.BoundingBox(),
+            (std::array<int, 4>{0, 0, 3000, 2100}));
+}
+
+TEST(GdsModel, RejectsMalformedPayloads) {
+  const char* bad[] = {
+      // No header.
+      "structure name=top top=1 boundaries=0 paths=0 srefs=0\n",
+      // A header missing a key (no library).
+      "gds path=clk_top.gds size=4321 instances=3 structures=2 "
+      "dbu_per_micron=1000\n",
+      // The structure recount disagrees with the header.
+      "gds path=clk_top.gds size=4321 instances=0 structures=2 "
+      "library=EOSMOCK dbu_per_micron=1000\n"
+      "structure name=top top=1 boundaries=0 paths=0 srefs=0\n",
+      // The sref recount disagrees with the header instances.
+      "gds path=clk_top.gds size=4321 instances=2 structures=2 "
+      "library=EOSMOCK dbu_per_micron=1000\n"
+      "structure name=BUF_X1 top=0 boundaries=1 paths=0 srefs=0\n"
+      "structure name=top top=1 boundaries=0 paths=0 srefs=3\n"
+      "sref structure=top target=BUF_X1 x=0 y=0 reflect=0 "
+      "angle=none\n"
+      "sref structure=top target=BUF_X1 x=1 y=1 reflect=0 "
+      "angle=none\n"
+      "sref structure=top target=BUF_X1 x=2 y=2 reflect=0 "
+      "angle=none\n",
+      // A duplicate structure name.
+      "gds path=clk_top.gds size=4321 instances=0 structures=2 "
+      "library=EOSMOCK dbu_per_micron=1000\n"
+      "structure name=top top=1 boundaries=0 paths=0 srefs=0\n"
+      "structure name=top top=0 boundaries=0 paths=0 srefs=0\n",
+      // Layer pairs out of ascending order.
+      "gds path=clk_top.gds size=4321 instances=0 structures=1 "
+      "library=EOSMOCK dbu_per_micron=1000\n"
+      "structure name=top top=1 boundaries=0 paths=0 srefs=0\n"
+      "layer gds=3 name=em2 datatype=0 boundaries=0 paths=0\n"
+      "layer gds=1 name=em1 datatype=0 boundaries=0 paths=0\n",
+      // A boundary naming an undeclared structure.
+      "gds path=clk_top.gds size=4321 instances=0 structures=1 "
+      "library=EOSMOCK dbu_per_micron=1000\n"
+      "structure name=top top=1 boundaries=1 paths=0 srefs=0\n"
+      "layer gds=1 name=em1 datatype=0 boundaries=1 paths=0\n"
+      "boundary structure=ghost layer=em1 gds_layer=1 datatype=0 "
+      "points=0,0,10,0,10,10\n",
+      // A boundary naming an undeclared layer pair.
+      "gds path=clk_top.gds size=4321 instances=0 structures=1 "
+      "library=EOSMOCK dbu_per_micron=1000\n"
+      "structure name=top top=1 boundaries=1 paths=0 srefs=0\n"
+      "layer gds=1 name=em1 datatype=0 boundaries=1 paths=0\n"
+      "boundary structure=top layer=em9 gds_layer=9 datatype=0 "
+      "points=0,0,10,0,10,10\n",
+      // A boundary whose layer name disagrees with the census.
+      "gds path=clk_top.gds size=4321 instances=0 structures=1 "
+      "library=EOSMOCK dbu_per_micron=1000\n"
+      "structure name=top top=1 boundaries=1 paths=0 srefs=0\n"
+      "layer gds=1 name=em1 datatype=0 boundaries=1 paths=0\n"
+      "boundary structure=top layer=em2 gds_layer=1 datatype=0 "
+      "points=0,0,10,0,10,10\n",
+      // A boundary with too few points.
+      "gds path=clk_top.gds size=4321 instances=0 structures=1 "
+      "library=EOSMOCK dbu_per_micron=1000\n"
+      "structure name=top top=1 boundaries=1 paths=0 srefs=0\n"
+      "layer gds=1 name=em1 datatype=0 boundaries=1 paths=0\n"
+      "boundary structure=top layer=em1 gds_layer=1 datatype=0 "
+      "points=0,0,10,0\n",
+      // An unknown line kind.
+      "gds path=clk_top.gds size=4321 instances=0 structures=1 "
+      "library=EOSMOCK dbu_per_micron=1000\n"
+      "structure name=top top=1 boundaries=0 paths=0 srefs=0\n"
+      "bogus x=1\n",
+  };
+  for (const char* payload : bad) {
+    GdsModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+  // A malformed load keeps the previous model.
+  GdsModel model;
+  ASSERT_TRUE(model.LoadPayload(kGdsSummaryPayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.Boundaries().size(), 5u);
+}
+
 // Writes one SDC text to a fresh temp file and removes it on
 // destruction: the session tests below read it through the
 // real registry.
@@ -5639,6 +5886,61 @@ struct AutoNavView {
           return CommandResult::Ok(kExtractSummaryPayload);
         });
     EXPECT_TRUE(extract_summary.ok());
+    // F8: the stub finish records a run; the stub
+    // finish_summary fails until the record is set, like
+    // the real query. The stub write_gds records an export
+    // (and fails until finish has run, like the real
+    // command); the stub gds_summary fails until the
+    // export record is set.
+    auto finish = registry.Register(
+        "finish", "finish",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          ctx.finish.finished = true;
+          ctx.finish.filler_count = 12;
+          return CommandResult::Ok(
+              "fillers=12 grid_shapes=0 metal_fills=0 pdn=false");
+        });
+    EXPECT_TRUE(finish.ok());
+    auto finish_summary = registry.Register(
+        "finish_summary", "finish_summary",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          if (!ctx.finish.finished) {
+            return CommandResult::Fail(
+                eos::ui::Diag::kInvalidConfiguration,
+                "no finish: eos::finish first");
+          }
+          return CommandResult::Ok(kFinishSummaryPayload);
+        });
+    EXPECT_TRUE(finish_summary.ok());
+    auto write_gds = registry.Register(
+        "write_gds", "write_gds",
+        [](CommandContext& ctx, const std::vector<std::string>& args) {
+          if (!ctx.finish.finished) {
+            return CommandResult::Fail(
+                eos::ui::Diag::kInvalidState,
+                "finish has not run on this design");
+          }
+          ctx.gds.written = true;
+          ctx.gds.path = args.empty() ? "" : args[0];
+          ctx.gds.size_bytes = 4321;
+          ctx.gds.instance_count = 3;
+          ctx.gds.structure_count = 2;
+          return CommandResult::Ok(
+              "gds=" + ctx.gds.path +
+              " size=4321 instances=3 structures=2");
+        });
+    EXPECT_TRUE(write_gds.ok());
+    auto gds_summary = registry.Register(
+        "gds_summary", "gds_summary",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          if (!ctx.gds.written) {
+            return CommandResult::Fail(
+                eos::ui::Diag::kInvalidConfiguration,
+                "no gds: eos::write_gds first");
+          }
+          return CommandResult::Ok(kGdsSummaryPayload);
+        });
+    EXPECT_TRUE(gds_summary.ok());
     auto signoff = registry.Register(
         "signoff_summary", "signoff_summary",
         [this](CommandContext&, const std::vector<std::string>&) {
@@ -5868,6 +6170,62 @@ TEST(MainWindowAutoNav, ExtractRunShowsTimingTab) {
   EXPECT_EQ(window.CurrentTab(), 3);
 }
 
+// F8: the Finish stage button starts disabled, enables
+// once a finish run is recorded, and a console finish
+// lands on the center GDS canvas (the finish record loads
+// the counts column; the canvas itself waits for an
+// export's geometry).
+TEST(MainWindowAutoNav, FinishRunShowsGdsCanvas) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  EXPECT_FALSE(window.FinishEnabled());
+  ASSERT_TRUE(fixture.view.Dispatch("finish", {}).ok);
+  window.Refresh();
+  EXPECT_TRUE(window.FinishEnabled());
+  EXPECT_EQ(fixture.view.FinishStep(), StepStatus::kDone);
+  EXPECT_TRUE(fixture.view.Finish().Loaded());
+  EXPECT_TRUE(fixture.view.ShowingGds());
+}
+
+// F8: a console write_gds lands on the center GDS canvas
+// with the export loaded, and the GDS step reports done.
+TEST(MainWindowAutoNav, WriteGdsShowsGdsCanvas) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  ASSERT_TRUE(fixture.view.Dispatch("finish", {}).ok);
+  ASSERT_TRUE(
+      fixture.view.Dispatch("write_gds", {"clk_top.gds"}).ok);
+  window.Refresh();
+  EXPECT_EQ(fixture.view.GdsStep(), StepStatus::kDone);
+  EXPECT_TRUE(fixture.view.Gds().Loaded());
+  EXPECT_TRUE(fixture.view.ShowingGds());
+}
+
+// F8: the Finish stage button shows the GDS canvas too:
+// after moving away through the Elaboration stage button
+// (it clears the center flags), the Finish button takes
+// the user back to the canvas.
+TEST(MainWindowAutoNav, FinishButtonShowsGdsCanvas) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  ASSERT_TRUE(fixture.view.Dispatch("finish", {}).ok);
+  ASSERT_TRUE(
+      fixture.view.Dispatch("write_gds", {"clk_top.gds"}).ok);
+  window.Refresh();
+  EXPECT_TRUE(fixture.view.ShowingGds());
+  QPushButton* elaboration =
+      AutoNavButtonWithPrefix(window, "Elaboration");
+  ASSERT_NE(elaboration, nullptr);
+  elaboration->click();
+  EXPECT_FALSE(fixture.view.ShowingGds());
+  QPushButton* finish_button =
+      AutoNavButtonWithPrefix(window, "Finish");
+  ASSERT_NE(finish_button, nullptr);
+  EXPECT_TRUE(finish_button->isEnabled());
+  finish_button->click();
+  EXPECT_TRUE(fixture.view.ShowingGds());
+}
+
 // A SessionView with the nested hierarchy, so the center can
 // switch between the block diagram (non-leaf levels) and the
 // schematic (the leaf adder module).
@@ -6035,6 +6393,100 @@ TEST(CenterView, ShowsRouteWhenRouteStageChosen) {
   EXPECT_FALSE(center.ShowingRoute());
 }
 
+// F8: the center shows the GDS canvas when the GDS stage
+// is chosen: one polygon per flattened boundary and one
+// polyline per flattened path. The GDS page wins over the
+// route page when both stages are chosen and both models
+// are loaded (the later stage takes the center).
+TEST(CenterView, ShowsGdsWhenGdsStageChosen) {
+  CenterViewFixture fixture;
+  RegisterRouteSummaryCommand(fixture.registry, kRouteSummaryPayload,
+                              true);
+  RegisterFinishSummaryCommand(fixture.registry,
+                               kFinishSummaryPayload, true);
+  int gds_calls = 0;
+  RegisterGdsSummaryCommand(fixture.registry, kGdsSummaryPayload,
+                            true, &gds_calls);
+  fixture.view.RefreshRoute();
+  fixture.context.gds.written = true;
+  fixture.context.gds.path = "clk_top.gds";
+  fixture.context.gds.size_bytes = 4321;
+  fixture.view.RefreshGds();
+  ASSERT_TRUE(fixture.view.Route().Loaded());
+  ASSERT_TRUE(fixture.view.Gds().Loaded());
+  CenterView center(fixture.view);
+  center.Refresh();
+  EXPECT_FALSE(center.ShowingGds());
+  EXPECT_FALSE(center.ShowingRoute());
+  // Both stages chosen: the GDS canvas wins over route.
+  fixture.view.ShowRoute(true);
+  fixture.view.ShowGds(true);
+  center.Refresh();
+  EXPECT_TRUE(center.ShowingGds());
+  EXPECT_FALSE(center.ShowingRoute());
+  // Five flattened boundaries and one flattened path, each
+  // drawn as one polygon item.
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(
+                center.Gds()->Scene())
+                .size(),
+            6u);
+  // Hierarchy navigation clears the stage.
+  fixture.view.ShowGds(false);
+  center.Refresh();
+  EXPECT_FALSE(center.ShowingGds());
+}
+
+// F8: the layer selector filters the canvas to one layer's
+// geometry, and the counts column names the finish run,
+// the export, and the layer census.
+TEST(CenterView, GdsLayerSelectorFiltersGeometry) {
+  CenterViewFixture fixture;
+  RegisterFinishSummaryCommand(fixture.registry,
+                               kFinishSummaryPayload, true);
+  int gds_calls = 0;
+  RegisterGdsSummaryCommand(fixture.registry, kGdsSummaryPayload,
+                            true, &gds_calls);
+  fixture.view.RefreshFinish();
+  fixture.context.gds.written = true;
+  fixture.context.gds.path = "clk_top.gds";
+  fixture.context.gds.size_bytes = 4321;
+  fixture.view.RefreshGds();
+  CenterView center(fixture.view);
+  fixture.view.ShowGds(true);
+  center.Refresh();
+  GdsDiagram* diagram = center.Gds();
+  ASSERT_NE(diagram, nullptr);
+  EXPECT_EQ(diagram->SelectedLayer(), "");
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(diagram->Scene())
+                .size(),
+            6u);
+  diagram->SelectLayer("em1");
+  EXPECT_EQ(diagram->SelectedLayer(), "em1");
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(diagram->Scene())
+                .size(),
+            4u);
+  diagram->SelectLayer("via1");
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(diagram->Scene())
+                .size(),
+            1u);
+  diagram->SelectLayer("em2");
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(diagram->Scene())
+                .size(),
+            1u);
+  diagram->SelectLayer("");
+  EXPECT_EQ(OutlineSceneItems<QGraphicsPolygonItem>(diagram->Scene())
+                .size(),
+            6u);
+  EXPECT_NE(diagram->CountsText().find("Finish: fillers=12"),
+            std::string::npos);
+  EXPECT_NE(diagram->CountsText().find("GDS: clk_top.gds"),
+            std::string::npos);
+  EXPECT_NE(diagram->CountsText().find("Top SREFs: 3"),
+            std::string::npos);
+  EXPECT_NE(diagram->CountsText().find("em1: boundaries 2 paths 0"),
+            std::string::npos);
+}
+
 // F6: the layer selector filters the canvas to one layer's
 // segments, and the counts panel names the run.
 TEST(CenterView, RouteLayerSelectorFiltersSegments) {
@@ -6194,6 +6646,51 @@ TEST(PanelsView, ClocksTabAppendsCtsSection) {
 // F7: the Timing tab appends the Extraction section from
 // the record when the Extract model is loaded, and shows
 // nothing extra when it is empty.
+// F8: the Signoff tab appends the Finish section after the
+// signoff verdicts: the heading is there before any run
+// (with both not-run-yet lines), and a recorded finish and
+// export render their values in place of the lines.
+TEST(PanelsView, SignoffTabAppendsFinishSection) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterFinishSummaryCommand(registry, kFinishSummaryPayload,
+                               true);
+  int gds_calls = 0;
+  RegisterGdsSummaryCommand(registry, kGdsSummaryPayload, true,
+                            &gds_calls);
+  CommandContext context;
+  SessionView view(registry, context);
+  PanelsView bare(view);
+  auto* bare_signoff =
+      qobject_cast<QPlainTextEdit*>(bare.widget(7));
+  ASSERT_NE(bare_signoff, nullptr);
+  const std::string bare_text =
+      bare_signoff->toPlainText().toStdString();
+  EXPECT_NE(bare_text.find("\nFinish:\n"), std::string::npos);
+  EXPECT_NE(bare_text.find("(no finish run yet: run "
+                           "eos::finish first)"),
+            std::string::npos);
+  EXPECT_NE(bare_text.find("(no GDS exported yet: run "
+                           "eos::write_gds first)"),
+            std::string::npos);
+  view.RefreshFinish();
+  context.gds.written = true;
+  context.gds.path = "clk_top.gds";
+  context.gds.size_bytes = 4321;
+  view.RefreshGds();
+  PanelsView panels(view);
+  auto* signoff = qobject_cast<QPlainTextEdit*>(panels.widget(7));
+  ASSERT_NE(signoff, nullptr);
+  const std::string text = signoff->toPlainText().toStdString();
+  EXPECT_NE(text.find("fillers 12, grid shapes 0, metal "
+                      "fills 0, pdn false"),
+            std::string::npos);
+  EXPECT_NE(text.find("GDS: clk_top.gds (4321 bytes), 2 "
+                      "structures, 3 instances, library EOSMOCK"),
+            std::string::npos);
+  EXPECT_EQ(text.find("(no finish run yet"), std::string::npos);
+}
+
 TEST(PanelsView, TimingTabAppendsExtractSection) {
   OutlineTestApp();
   CommandRegistry registry;
@@ -6782,6 +7279,96 @@ TEST(GuiSessionView, RefreshExtractStaysEmptyOnFailedQuery) {
   view.RefreshExtract();
   EXPECT_FALSE(view.Extract().Loaded());
   EXPECT_TRUE(view.Messages().empty());
+}
+
+// F8: RefreshFinish populates the Finish model from the
+// recorded finish run without echoing the query, and the
+// finish step stays pending until the session record says
+// a run happened.
+TEST(GuiSessionView, RefreshFinishPopulatesModelWithoutEcho) {
+  CommandRegistry registry;
+  RegisterFinishSummaryCommand(registry, kFinishSummaryPayload,
+                               true);
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_EQ(view.FinishStep(), StepStatus::kPending);
+  view.RefreshFinish();
+  EXPECT_TRUE(view.Finish().Loaded());
+  EXPECT_EQ(view.Finish().Fillers(), 12u);
+  EXPECT_TRUE(view.EchoLog().empty());
+  EXPECT_EQ(view.FinishStep(), StepStatus::kPending);
+  context.finish.finished = true;
+  EXPECT_EQ(view.FinishStep(), StepStatus::kDone);
+}
+
+// F8: in a fresh session the query fails fast, so the model
+// stays empty and no message is logged.
+TEST(GuiSessionView, RefreshFinishStaysEmptyOnFailedQuery) {
+  CommandRegistry registry;
+  RegisterFinishSummaryCommand(registry, kFinishSummaryPayload,
+                               false);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshFinish();
+  EXPECT_FALSE(view.Finish().Loaded());
+  EXPECT_TRUE(view.Messages().empty());
+}
+
+// F8: RefreshGds is keyed on the GDS record's (path, size):
+// with no record it never dispatches; the first refresh
+// over a record dispatches once and loads the model; a
+// second refresh over the same record dispatches nothing;
+// a record whose size changed dispatches again. The GDS
+// step stays pending until the record says an export
+// happened.
+TEST(GuiSessionView, RefreshGdsIsKeyedOnTheRecord) {
+  CommandRegistry registry;
+  int calls = 0;
+  RegisterGdsSummaryCommand(registry, kGdsSummaryPayload, true,
+                            &calls);
+  CommandContext context;
+  SessionView view(registry, context);
+  EXPECT_EQ(view.GdsStep(), StepStatus::kPending);
+  view.RefreshGds();
+  EXPECT_EQ(calls, 0);
+  EXPECT_FALSE(view.Gds().Loaded());
+  context.gds.written = true;
+  context.gds.path = "clk_top.gds";
+  context.gds.size_bytes = 4321;
+  EXPECT_EQ(view.GdsStep(), StepStatus::kDone);
+  view.RefreshGds();
+  EXPECT_EQ(calls, 1);
+  EXPECT_TRUE(view.Gds().Loaded());
+  EXPECT_EQ(view.Gds().Size(), 4321u);
+  EXPECT_TRUE(view.EchoLog().empty());
+  view.RefreshGds();
+  EXPECT_EQ(calls, 1);
+  context.gds.size_bytes = 5000;
+  view.RefreshGds();
+  EXPECT_EQ(calls, 2);
+}
+
+// F8: a failed gds_summary over a record leaves the model
+// empty, logs nothing (the unguarded posture while empty),
+// and does not take the key: the next refresh retries the
+// dispatch instead of treating the failure as loaded.
+TEST(GuiSessionView, RefreshGdsFailureDoesNotTakeTheKey) {
+  CommandRegistry registry;
+  int calls = 0;
+  RegisterGdsSummaryCommand(registry, kGdsSummaryPayload, false,
+                            &calls);
+  CommandContext context;
+  SessionView view(registry, context);
+  context.gds.written = true;
+  context.gds.path = "clk_top.gds";
+  context.gds.size_bytes = 4321;
+  view.RefreshGds();
+  EXPECT_EQ(calls, 1);
+  EXPECT_FALSE(view.Gds().Loaded());
+  EXPECT_TRUE(view.Messages().empty());
+  view.RefreshGds();
+  EXPECT_EQ(calls, 2);
+  EXPECT_FALSE(view.Gds().Loaded());
 }
 
 // A4: with clocks wired but no timing run, RefreshTiming

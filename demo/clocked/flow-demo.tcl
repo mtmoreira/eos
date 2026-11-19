@@ -1,5 +1,5 @@
 # Full-flow demo script for the clocked design (F6 route unit,
-# F7 extraction tail).
+# F7 extraction tail, F8 finish-and-export tail).
 # Run from demo/clocked: ../../build/apps/eos/eos flow-demo.tcl
 # The same commands can be typed in the GUI console entry line
 # instead, one per Return (the eos:: prefix is optional there).
@@ -13,7 +13,12 @@
 # rules file, the extract record query, an extracted
 # scenario over the written SPEF, a two-scene timing run,
 # and the extract record query again (now carrying the
-# estimated-versus-extracted comparison).
+# estimated-versus-extracted comparison), then the
+# finish-and-export step: a bare finish (the mock Liberty
+# has no pg pins and the design has no power or ground
+# nets, so no PDN is built), the finish record query, the
+# GDS export beside the demo's other products, and the GDS
+# record query, which reads the export back.
 # Measured outputs for this sequence are recorded in README.md.
 eos::create_scenario func_tt func tt estimate
 eos::read_liberty tt ../../src/pd/rsz/tests/mock/eos_mock.lib
@@ -43,3 +48,7 @@ eos::create_scenario func_tt_ext func tt extracted
 eos::set_spef clk_top.spef
 eos::run_timing
 eos::extract_summary
+eos::finish
+eos::finish_summary
+eos::write_gds clk_top.gds
+eos::gds_summary

@@ -18,6 +18,7 @@
 #include "eos/db/odb.h"
 #include "eos/db/waivers.h"
 #include "eos/eco/timing_eco.h"
+#include "eos/io/gds.h"
 #include "eos/io/sdc.h"
 #include "odb/db.h"
 #include "eos/session/flow.h"
@@ -403,6 +404,8 @@ void ResetProject(CommandContext& ctx) {
   ctx.cts = CommandContext::CtsSession();
   ctx.route = CommandContext::RouteSession();
   ctx.extract = CommandContext::ExtractSession();
+  ctx.finish = CommandContext::FinishSession();
+  ctx.gds = CommandContext::GdsSession();
   ctx.signoff = CommandContext::SignoffSession();
   ctx.drc = CommandContext::DrcSession();
   ctx.wire_rc_overrides.clear();
@@ -11795,6 +11798,316 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         return CommandResult::Ok(payload);
       });
 
+  // ---- finish_summary (full-flow GUI unit F8) ----------------
+  // The structured finish query the GUI's Signoff tab and
+  // GDS canvas read: the session finish record alone, the
+  // finish payload's four values under a finish lead word.
+  // It is a query, not a report: it runs no engine, writes
+  // no file, and changes no session state. Like
+  // extract_summary, the query reads only the record, so it
+  // does not require the database; with an empty record it
+  // fails fast, mirroring route_summary's posture.
+  add("finish_summary", "finish_summary",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "finish_summary")) {
+          return *bad;
+        }
+        if (!ctx.finish.finished) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no finish: eos::finish first");
+        }
+        const CommandContext::FinishSession& record = ctx.finish;
+        return CommandResult::Ok(
+            "finish fillers=" + std::to_string(record.filler_count) +
+            " grid_shapes=" +
+            std::to_string(record.grid_shape_count) +
+            " metal_fills=" +
+            std::to_string(record.metal_fill_count) +
+            " pdn=" +
+            std::string(record.with_pdn ? "true" : "false"));
+      });
+
+  // ---- gds_summary (full-flow GUI unit F8) -------------------
+  // The structured GDS query the GUI's GDS canvas reads:
+  // the session GDS record plus the recorded file, read
+  // through the GDS reader at query time and flattened one
+  // level (the only depth the writer's files have). The
+  // header reports the record's own values, never a
+  // recomputed claim about the live design; the structure
+  // lines then recount the file, and a file whose recount
+  // disagrees with the record (replaced outside the
+  // session) fails the query instead of rendering as the
+  // recorded export. A file that cannot be read at all
+  // fails naming the path: never a header-only success.
+  // The session technology is read only to name layers
+  // (the writer's GdsLayer rule inverted); geometry never
+  // depends on it.
+  add("gds_summary", "gds_summary",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "gds_summary")) {
+          return *bad;
+        }
+        if (!ctx.gds.written) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no gds: eos::write_gds first");
+        }
+        const CommandContext::GdsSession& record = ctx.gds;
+        const foundation::Result<io::GdsLibrary> read =
+            io::ReadGdsFile(record.path);
+        if (!read.ok()) {
+          return CommandResult::Fail(
+              Diag::kInvalidState,
+              "cannot read GDS file " + record.path + ": " +
+                  read.status().message());
+        }
+        const io::GdsLibrary& library = read.value();
+        if (static_cast<long long>(library.structures.size()) !=
+            record.structure_count) {
+          return CommandResult::Fail(
+              Diag::kInvalidState,
+              "GDS file " + record.path +
+                  " no longer matches the export record: it "
+                  "holds " +
+                  std::to_string(library.structures.size()) +
+                  " structures, the record says " +
+                  std::to_string(record.structure_count));
+        }
+        // Structure lookup by name, and the set of names any
+        // SREF references: an unreferenced structure is a
+        // top. The writer's files have exactly one; the
+        // first top in file order is the flattened one.
+        std::map<std::string, const io::GdsStructure*> by_name;
+        std::set<std::string> referenced;
+        for (const io::GdsStructure& structure :
+             library.structures) {
+          by_name[structure.name] = &structure;
+          for (const io::GdsSref& sref : structure.srefs) {
+            referenced.insert(sref.target);
+          }
+        }
+        const io::GdsStructure* top = nullptr;
+        for (const io::GdsStructure& structure :
+             library.structures) {
+          if (referenced.find(structure.name) ==
+              referenced.end()) {
+            top = &structure;
+            break;
+          }
+        }
+        if (top == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidState,
+              "GDS file " + record.path +
+                  " no longer matches the export record: it "
+                  "has no top structure");
+        }
+        if (static_cast<long long>(top->srefs.size()) !=
+            record.instance_count) {
+          return CommandResult::Fail(
+              Diag::kInvalidState,
+              "GDS file " + record.path +
+                  " no longer matches the export record: its "
+                  "top structure holds " +
+                  std::to_string(top->srefs.size()) +
+                  " SREFs, the record says " +
+                  std::to_string(record.instance_count) +
+                  " instances");
+        }
+        // Layer naming: the writer's GdsLayer rule inverted
+        // against the session technology (the layer whose
+        // number equals the GDS number, else the layer at
+        // that 1-based position), or "-" when the session
+        // holds no technology or no such layer.
+        std::map<int, std::string> name_by_number;
+        std::map<int, std::string> name_by_position;
+        if (ctx.timing.odb.has_value() &&
+            ctx.timing.odb->RawDatabase() != nullptr &&
+            ctx.timing.odb->RawDatabase()->getTech() != nullptr) {
+          odb::dbTech* tech =
+              ctx.timing.odb->RawDatabase()->getTech();
+          int position = 0;
+          for (odb::dbTechLayer* layer : tech->getLayers()) {
+            ++position;
+            name_by_position[position] = layer->getName();
+            const int number = layer->getNumber();
+            if (number > 0 &&
+                name_by_number.find(number) ==
+                    name_by_number.end()) {
+              name_by_number[number] = layer->getName();
+            }
+          }
+        }
+        const auto layer_name = [&name_by_number,
+                                 &name_by_position](int number) {
+          const auto by_number = name_by_number.find(number);
+          if (by_number != name_by_number.end()) {
+            return by_number->second;
+          }
+          const auto by_position = name_by_position.find(number);
+          if (by_position != name_by_position.end()) {
+            return by_position->second;
+          }
+          return std::string("-");
+        };
+        // The per-(layer, datatype) census over the whole
+        // file, in ascending order (std::map iteration).
+        std::map<std::pair<int, int>,
+                 std::pair<long long, long long>>
+            census;
+        for (const io::GdsStructure& structure :
+             library.structures) {
+          for (const io::GdsBoundary& boundary :
+               structure.boundaries) {
+            census[{boundary.layer, boundary.datatype}].first++;
+          }
+          for (const io::GdsPath& path : structure.paths) {
+            census[{path.layer, path.datatype}].second++;
+          }
+        }
+        const double dbu_per_micron =
+            library.dbu_in_user_units > 0.0
+                ? 1.0 / library.dbu_in_user_units
+                : 0.0;
+        std::string payload =
+            "gds path=" + record.path +
+            " size=" + std::to_string(record.size_bytes) +
+            " instances=" +
+            std::to_string(record.instance_count) +
+            " structures=" +
+            std::to_string(record.structure_count) +
+            " library=" + library.name +
+            " dbu_per_micron=" + FormatNumber(dbu_per_micron);
+        for (const io::GdsStructure& structure :
+             library.structures) {
+          payload += "\nstructure name=" + structure.name +
+                     " top=" +
+                     (referenced.find(structure.name) ==
+                              referenced.end()
+                          ? "1"
+                          : "0") +
+                     " boundaries=" +
+                     std::to_string(structure.boundaries.size()) +
+                     " paths=" +
+                     std::to_string(structure.paths.size()) +
+                     " srefs=" +
+                     std::to_string(structure.srefs.size());
+        }
+        for (const auto& entry : census) {
+          payload += "\nlayer gds=" +
+                     std::to_string(entry.first.first) +
+                     " name=" + layer_name(entry.first.first) +
+                     " datatype=" +
+                     std::to_string(entry.first.second) +
+                     " boundaries=" +
+                     std::to_string(entry.second.first) +
+                     " paths=" + std::to_string(entry.second.second);
+        }
+        // The flattened geometry: the top's own boundaries
+        // first, then one transformed copy of each target's
+        // boundaries per SREF, in SREF order; then the top's
+        // own paths. (The reader's model groups a structure's
+        // elements by kind, so the cross-kind element order
+        // of the file is not preserved; within each kind the
+        // order is the file's.) A point transforms as the
+        // stream format defines: reflect about the x-axis,
+        // then rotate, then translate. Rotation is exact
+        // integer math for multiples of 90 degrees; an SREF
+        // at another angle is not flattened (its boundaries
+        // are not emitted) but still appears as an sref line
+        // below, so the census stays complete.
+        const auto flattenable = [](const io::GdsSref& sref) {
+          if (!sref.has_angle) return true;
+          const double quarter = sref.angle_deg / 90.0;
+          return std::fabs(quarter - std::round(quarter)) < 1e-9;
+        };
+        const auto transform = [](const io::GdsSref& sref,
+                                  io::GdsPoint point) {
+          long long x = point.x;
+          long long y = point.y;
+          if (sref.reflect) y = -y;
+          if (sref.has_angle) {
+            long long turns = static_cast<long long>(
+                std::llround(sref.angle_deg / 90.0));
+            turns = ((turns % 4) + 4) % 4;
+            for (long long i = 0; i < turns; ++i) {
+              const long long next_x = -y;
+              y = x;
+              x = next_x;
+            }
+          }
+          return io::GdsPoint{static_cast<int>(x + sref.x),
+                              static_cast<int>(y + sref.y)};
+        };
+        const auto points_text =
+            [](const std::vector<io::GdsPoint>& points) {
+              std::string text;
+              for (std::size_t i = 0; i < points.size(); ++i) {
+                if (i > 0) text += ",";
+                text += std::to_string(points[i].x) + "," +
+                        std::to_string(points[i].y);
+              }
+              return text;
+            };
+        const auto boundary_line =
+            [&layer_name, &points_text](
+                const std::string& structure,
+                const io::GdsBoundary& boundary,
+                const std::vector<io::GdsPoint>& points) {
+              return "\nboundary structure=" + structure +
+                     " layer=" + layer_name(boundary.layer) +
+                     " gds_layer=" +
+                     std::to_string(boundary.layer) +
+                     " datatype=" +
+                     std::to_string(boundary.datatype) +
+                     " points=" + points_text(points);
+            };
+        for (const io::GdsBoundary& boundary : top->boundaries) {
+          payload += boundary_line(top->name, boundary,
+                                   boundary.points);
+        }
+        for (const io::GdsSref& sref : top->srefs) {
+          if (!flattenable(sref)) continue;
+          const auto target = by_name.find(sref.target);
+          if (target == by_name.end()) continue;
+          for (const io::GdsBoundary& boundary :
+               target->second->boundaries) {
+            std::vector<io::GdsPoint> points;
+            for (const io::GdsPoint& point : boundary.points) {
+              points.push_back(transform(sref, point));
+            }
+            payload += boundary_line(target->second->name,
+                                     boundary, points);
+          }
+        }
+        for (const io::GdsPath& path : top->paths) {
+          payload += "\npath structure=" + top->name +
+                     " layer=" + layer_name(path.layer) +
+                     " gds_layer=" + std::to_string(path.layer) +
+                     " datatype=" + std::to_string(path.datatype) +
+                     " width=" +
+                     (path.has_width ? std::to_string(path.width)
+                                     : std::string("none")) +
+                     " points=" + points_text(path.points);
+        }
+        for (const io::GdsSref& sref : top->srefs) {
+          payload += "\nsref structure=" + top->name +
+                     " target=" + sref.target +
+                     " x=" + std::to_string(sref.x) +
+                     " y=" + std::to_string(sref.y) +
+                     " reflect=" +
+                     std::string(sref.reflect ? "1" : "0") +
+                     " angle=" +
+                     (sref.has_angle
+                          ? FormatNumber(sref.angle_deg)
+                          : std::string("none"));
+        }
+        return CommandResult::Ok(payload);
+      });
+
   add("finish", "finish [-pdn] [-fill_config <path>]",
       [](CommandContext& ctx, const std::vector<std::string>& args)
           -> CommandResult {
@@ -11853,6 +12166,15 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const foundation::Status status = pd::RunFinish(
             ctx.timing.odb->RawDatabase(), options, &report);
         if (!status.ok()) return FromStatus(status);
+        // F8: the finish record takes the successful run's
+        // report, field for field, replacing any earlier
+        // record. A failed run above leaves the record
+        // untouched.
+        ctx.finish.finished = true;
+        ctx.finish.filler_count = report.filler_count;
+        ctx.finish.grid_shape_count = report.grid_shape_count;
+        ctx.finish.metal_fill_count = report.metal_fill_count;
+        ctx.finish.with_pdn = report.with_pdn;
         return CommandResult::Ok(
             "fillers=" + std::to_string(report.filler_count) +
             " grid_shapes=" + std::to_string(report.grid_shape_count) +
@@ -11898,6 +12220,15 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         const foundation::Status status = pd::WriteGds(
             ctx.timing.odb->RawDatabase(), options, &report);
         if (!status.ok()) return FromStatus(status);
+        // F8: the GDS record takes the successful export's
+        // report, field for field, replacing any earlier
+        // record (including one naming a different path).
+        // A failed export above leaves the record untouched.
+        ctx.gds.written = true;
+        ctx.gds.path = report.path;
+        ctx.gds.size_bytes = report.size_bytes;
+        ctx.gds.instance_count = report.instance_count;
+        ctx.gds.structure_count = report.structure_count;
         return CommandResult::Ok(
             "gds=" + report.path +
             " size=" + std::to_string(report.size_bytes) +

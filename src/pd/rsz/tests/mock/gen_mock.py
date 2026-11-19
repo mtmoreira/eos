@@ -215,8 +215,8 @@ CELLS += [
      "arcs": []},
     # Fill/tap: no signal pins. Only LEF SIZE matters (area for
     # utilization); kept for the pending placed/routed cases.
-    {"name": "EM_FILL", "footprint": "EM_FILL", "area": 2.0, "width": 1.0,
-     "pins": [], "arcs": []},
+    {"name": "EM_FILL", "footprint": "EM_FILL", "area": 0.4, "width": 0.2,
+     "pins": [], "arcs": [], "lef_class": "CORE SPACER"},
     {"name": "EM_TAP", "footprint": "EM_TAP", "area": 2.0, "width": 1.0,
      "pins": [], "arcs": []},
 ]
@@ -456,14 +456,14 @@ def emit_lef(path):
     out.append("  CLASS CORE ;")
     out.append("  SIZE %s BY %s ;" % (fmt(SITE_WIDTH), fmt(HEIGHT)))
     out.append("END %s" % SITE_NAME)
-    macros = [(c["name"], c["width"],
+    macros = [(c["name"], c["width"], c.get("lef_class", "CORE"),
                [(p[0], p[1], p[6]) for p in c["pins"]])
               for c in CELLS]
-    macros.append((LEF_ONLY["name"], LEF_ONLY["width"],
+    macros.append((LEF_ONLY["name"], LEF_ONLY["width"], "CORE",
                    [(p[0], p[1], False) for p in LEF_ONLY["pins"]]))
-    for name, width, pins in macros:
+    for name, width, lef_class, pins in macros:
         out.append("MACRO %s" % name)
-        out.append("  CLASS CORE ;")
+        out.append("  CLASS %s ;" % lef_class)
         out.append("  ORIGIN 0 0 ;")
         out.append("  SIZE %s BY %s ;" % (fmt(width), fmt(HEIGHT)))
         out.append("  SITE %s ;" % SITE_NAME)

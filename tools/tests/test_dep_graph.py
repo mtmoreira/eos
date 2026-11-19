@@ -319,7 +319,10 @@ def test_real_repo_check_passes_and_rules_hold():
     # F7 splits the five clocked extract tests out of
     # ui.registry into per-test entries, the 78th through 82nd
     # ctest entries.
-    assert len(all_tests) == 82
+    # F8 adds io.gds, the 83rd ctest entry, and splits the
+    # five clocked finish tests out of ui.registry into
+    # per-test entries, the 84th through 88th ctest entries.
+    assert len(all_tests) == 88
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),

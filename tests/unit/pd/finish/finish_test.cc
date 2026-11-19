@@ -24,14 +24,18 @@
 // rules file: the numbers are documented here as invented for the
 // fixture, and no result in this test is presented as a
 // process-accurate value.
+#include "eos/io/gds.h"
 #include "eos/pd/finish.h"
 #include "eos/pd/floorplan.h"
 #include "eos/pd/place.h"
 #include "eos/pd/route.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -882,6 +886,175 @@ TEST(WriteGds, SecondWriteOverwrites) {
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(second.size_bytes, first.size_bytes);
   EXPECT_GT(second.size_bytes, 0);
+}
+
+// Whether two read-back libraries are the same export on
+// every field the reader models: name, units, and every
+// structure's boundaries, paths, and SREFs in order. The
+// reader models no timestamps, so this is the whole of
+// A7's geometry equality for two exports of one design.
+bool LibrariesGeometricallyEqual(const io::GdsLibrary& a,
+                                 const io::GdsLibrary& b) {
+  if (a.name != b.name ||
+      a.dbu_in_user_units != b.dbu_in_user_units ||
+      a.dbu_in_meters != b.dbu_in_meters ||
+      a.structures.size() != b.structures.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < a.structures.size(); ++i) {
+    const io::GdsStructure& sa = a.structures[i];
+    const io::GdsStructure& sb = b.structures[i];
+    if (sa.name != sb.name ||
+        sa.boundaries.size() != sb.boundaries.size() ||
+        sa.paths.size() != sb.paths.size() ||
+        sa.srefs.size() != sb.srefs.size()) {
+      return false;
+    }
+    for (std::size_t j = 0; j < sa.boundaries.size(); ++j) {
+      const io::GdsBoundary& ba = sa.boundaries[j];
+      const io::GdsBoundary& bb = sb.boundaries[j];
+      if (ba.layer != bb.layer || ba.datatype != bb.datatype ||
+          ba.points.size() != bb.points.size()) {
+        return false;
+      }
+      for (std::size_t k = 0; k < ba.points.size(); ++k) {
+        if (ba.points[k].x != bb.points[k].x ||
+            ba.points[k].y != bb.points[k].y) {
+          return false;
+        }
+      }
+    }
+    for (std::size_t j = 0; j < sa.paths.size(); ++j) {
+      const io::GdsPath& pa = sa.paths[j];
+      const io::GdsPath& pb = sb.paths[j];
+      if (pa.layer != pb.layer || pa.datatype != pb.datatype ||
+          pa.has_width != pb.has_width || pa.width != pb.width ||
+          pa.points.size() != pb.points.size()) {
+        return false;
+      }
+      for (std::size_t k = 0; k < pa.points.size(); ++k) {
+        if (pa.points[k].x != pb.points[k].x ||
+            pa.points[k].y != pb.points[k].y) {
+          return false;
+        }
+      }
+    }
+    for (std::size_t j = 0; j < sa.srefs.size(); ++j) {
+      const io::GdsSref& ra = sa.srefs[j];
+      const io::GdsSref& rb = sb.srefs[j];
+      if (ra.target != rb.target || ra.x != rb.x || ra.y != rb.y ||
+          ra.reflect != rb.reflect ||
+          ra.has_angle != rb.has_angle ||
+          ra.angle_deg != rb.angle_deg) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// F8 A6, the via fix's verdict in miniature: every via box
+// the writer emits is one of the fixture VIA12's three
+// boxes (100x100 on the two metals, 60x60 on the cut, in
+// database units, and this fixture's writer scale is one
+// GDS unit per database unit), and the VIA12 boxes are
+// symmetric, so a correctly translated box is centered
+// exactly on its via's placed point. The test counts the
+// via-sized boundaries of the read-back top structure by
+// center: each via point must carry exactly three, and
+// the origin must carry exactly the boxes of any via
+// placed there (none, in this fixture's routed design).
+// On the unfixed writer every count lands at the origin
+// instead (probe 2's measurement).
+TEST(WriteGds, ViaBoxesAreTranslated) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, kLef, kDef);
+  FloorplanPlaceRoute(db, dir);
+  FinishOptions foptions;
+  FinishReport freport;
+  ASSERT_TRUE(RunFinish(db.RawDatabase(), foptions, &freport).ok());
+  const std::string path = dir.Write("out.gds", "");
+  WriteGdsOptions options;
+  options.path = path;
+  WriteGdsReport report;
+  ASSERT_TRUE(WriteGds(db.RawDatabase(), options, &report).ok());
+  RouteGeometry geometry;
+  ASSERT_TRUE(QueryRouteGeometry(db.RawDatabase(), &geometry).ok());
+  ASSERT_FALSE(geometry.vias.empty());
+  const foundation::Result<io::GdsLibrary> library =
+      io::ReadGdsFile(path);
+  ASSERT_TRUE(library.ok()) << library.status().message();
+  std::map<std::string, bool> referenced;
+  for (const io::GdsStructure& structure :
+       library.value().structures) {
+    for (const io::GdsSref& sref : structure.srefs) {
+      referenced[sref.target] = true;
+    }
+  }
+  const io::GdsStructure* top = nullptr;
+  for (const io::GdsStructure& structure :
+       library.value().structures) {
+    if (!referenced[structure.name]) {
+      top = &structure;
+      break;
+    }
+  }
+  ASSERT_TRUE(top != nullptr);
+  std::map<std::pair<int, int>, int> via_boxes_at;
+  for (const io::GdsBoundary& boundary : top->boundaries) {
+    int x1 = boundary.points[0].x, x2 = x1;
+    int y1 = boundary.points[0].y, y2 = y1;
+    for (const io::GdsPoint& point : boundary.points) {
+      x1 = std::min(x1, point.x);
+      x2 = std::max(x2, point.x);
+      y1 = std::min(y1, point.y);
+      y2 = std::max(y2, point.y);
+    }
+    const int w = x2 - x1;
+    const int h = y2 - y1;
+    if (!((w == 100 && h == 100) || (w == 60 && h == 60))) continue;
+    via_boxes_at[{(x1 + x2) / 2, (y1 + y2) / 2}]++;
+  }
+  int vias_at_origin = 0;
+  for (const RouteVia& via : geometry.vias) {
+    EXPECT_EQ((via_boxes_at[{via.x, via.y}]), 3)
+        << "via on net " << via.net << " at " << via.x << ","
+        << via.y;
+    if (via.x == 0 && via.y == 0) ++vias_at_origin;
+  }
+  EXPECT_EQ((via_boxes_at[{0, 0}]), 3 * vias_at_origin);
+}
+
+// F8 A7 at fixture scale: two exports of the same finished
+// design are geometrically identical through the reader
+// (census and full geometry) and equal in size. Byte
+// identity is not judged: the writer stamps wall-clock
+// timestamps the reader does not model.
+TEST(WriteGds, TwoExportsAreGeometricallyEqual) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, kLef, kDef);
+  FloorplanPlaceRoute(db, dir);
+  FinishOptions foptions;
+  ASSERT_TRUE(RunFinish(db.RawDatabase(), foptions, nullptr).ok());
+  const std::string first_path = dir.Write("first.gds", "");
+  const std::string second_path = dir.Write("second.gds", "");
+  WriteGdsOptions options;
+  options.path = first_path;
+  WriteGdsReport first;
+  ASSERT_TRUE(WriteGds(db.RawDatabase(), options, &first).ok());
+  options.path = second_path;
+  WriteGdsReport second;
+  ASSERT_TRUE(WriteGds(db.RawDatabase(), options, &second).ok());
+  EXPECT_EQ(second.size_bytes, first.size_bytes);
+  const foundation::Result<io::GdsLibrary> a =
+      io::ReadGdsFile(first_path);
+  const foundation::Result<io::GdsLibrary> b =
+      io::ReadGdsFile(second_path);
+  ASSERT_TRUE(a.ok()) << a.status().message();
+  ASSERT_TRUE(b.ok()) << b.status().message();
+  EXPECT_TRUE(LibrariesGeometricallyEqual(a.value(), b.value()));
 }
 
 }  // namespace

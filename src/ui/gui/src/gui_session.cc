@@ -262,6 +262,9 @@ static SessionView::ResultDestination NavigationForCommand(
   if (name == "cts") return Destination::kClocks;
   if (name == "route") return Destination::kCenter;
   if (name == "extract_parasitics") return Destination::kTiming;
+  if (name == "finish" || name == "write_gds") {
+    return Destination::kGds;
+  }
   if (name == "signoff_summary") return Destination::kSignoff;
   if (name == "report_clock" || name == "report_constraint" ||
       name == "report_analysis_coverage" || name == "report_qor" ||
@@ -308,17 +311,24 @@ CommandResult SessionView::Dispatch(const std::string& name,
         cts_.Clear();
         route_.Clear();
         extract_.Clear();
+        finish_.Clear();
+        gds_.Clear();
+        gds_key_.clear();
       }
     } else if (name == "close_design") {
       checkpoint_.clear();
       center_floorplan_ = false;
       center_placement_ = false;
       center_route_ = false;
+      center_gds_ = false;
       floorplan_.Clear();
       placement_.Clear();
       cts_.Clear();
       route_.Clear();
       extract_.Clear();
+      finish_.Clear();
+      gds_.Clear();
+      gds_key_.clear();
     } else if (name == "floorplan") {
       // A successful floorplan takes the user to the
       // floorplan canvas: the center shows it on the next
@@ -328,6 +338,7 @@ CommandResult SessionView::Dispatch(const std::string& name,
       center_floorplan_ = true;
       center_placement_ = false;
       center_route_ = false;
+      center_gds_ = false;
     } else if (name == "place") {
       // A successful place takes the user to the placement
       // canvas: the center shows it on the next refresh, once
@@ -338,6 +349,7 @@ CommandResult SessionView::Dispatch(const std::string& name,
       center_placement_ = true;
       center_floorplan_ = false;
       center_route_ = false;
+      center_gds_ = false;
     } else if (name == "route") {
       // A successful route takes the user to the routing
       // canvas: the center shows it on the next refresh, once
@@ -350,6 +362,20 @@ CommandResult SessionView::Dispatch(const std::string& name,
       center_route_ = true;
       center_floorplan_ = false;
       center_placement_ = false;
+      center_gds_ = false;
+    } else if (name == "finish" || name == "write_gds") {
+      // A successful finish or export takes the user to the
+      // GDS canvas: the center shows it on the next refresh,
+      // once the model loads. It wins over the routing
+      // canvas while the GDS model is loaded (see
+      // CenterView::Refresh); the kGds navigation the
+      // command asks for clears the other center flags on
+      // that refresh, and this clears them here too so the
+      // view is consistent even without a window.
+      center_gds_ = true;
+      center_floorplan_ = false;
+      center_placement_ = false;
+      center_route_ = false;
     }
   }
   if (result.ok && (name == "read_verilog" || name == "read_filelist" ||
@@ -593,6 +619,37 @@ void SessionView::RefreshExtract() {
     NoteUnguardedRefreshFailure(messages_, "extract_summary", result,
                                 extract_.Empty());
   }
+}
+
+void SessionView::RefreshFinish() {
+  const CommandResult result =
+      registry_.Dispatch(context_, "finish_summary", {});
+  if (!result.ok || !finish_.LoadPayload(result.payload)) {
+    NoteUnguardedRefreshFailure(messages_, "finish_summary", result,
+                                finish_.Empty());
+  }
+}
+
+void SessionView::RefreshGds() {
+  // Keyed refresh (see gui.h): the query re-reads and
+  // re-flattens the whole file, so it dispatches only when
+  // the GDS record's (path, size) pair differs from the
+  // pair the loaded model was built from. With no record
+  // there is nothing to load; Dispatch clears the model
+  // when the record goes away (close_design, restore).
+  if (!context_.gds.written) return;
+  const std::string key =
+      context_.gds.path + "|" +
+      std::to_string(context_.gds.size_bytes);
+  if (gds_.Loaded() && key == gds_key_) return;
+  const CommandResult result =
+      registry_.Dispatch(context_, "gds_summary", {});
+  if (!result.ok || !gds_.LoadPayload(result.payload)) {
+    NoteUnguardedRefreshFailure(messages_, "gds_summary", result,
+                                gds_.Empty());
+    return;
+  }
+  gds_key_ = key;
 }
 
 void SessionView::RefreshSignoff() {
