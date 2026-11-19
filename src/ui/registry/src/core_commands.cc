@@ -10313,6 +10313,23 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.user_attributes.clear();
         ctx.timing = CommandContext::TimingSession();
         ctx.synth = CommandContext::SynthSession();
+        // The physical-stage and verdict sessions go too
+        // (full-flow GUI unit F11): a restore replaces the
+        // design, so records of stages run on the previous
+        // design state must not survive it, the same posture
+        // ResetProject leaves create_design and close_design
+        // in. The summaries already behave as if they were
+        // gone (they fail fast until the stages re-run); the
+        // step contracts read the records directly, so the
+        // records themselves are reset here.
+        ctx.place = CommandContext::PlaceSession();
+        ctx.cts = CommandContext::CtsSession();
+        ctx.route = CommandContext::RouteSession();
+        ctx.extract = CommandContext::ExtractSession();
+        ctx.finish = CommandContext::FinishSession();
+        ctx.gds = CommandContext::GdsSession();
+        ctx.signoff = CommandContext::SignoffSession();
+        ctx.drc = CommandContext::DrcSession();
         return CommandResult::Ok(
             "restored=1 design=" + ctx.project.design->name() +
             " revision=" +

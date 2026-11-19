@@ -34,11 +34,36 @@ namespace eos::ui {
 
 namespace {
 
-const char* kStepNames[3] = {"Read", "Elaborate", "Generic synth"};
-// The tab each stepper step shows: Read shows Sources (1),
-// Elaborate shows Issues (0, the default landing view after
-// Elaborate), Generic synth shows Opt log (4).
-const int kStepTabs[3] = {1, 0, 4};
+// The right panels' tab indices, in PanelsView's construction
+// order (panels_view.cc), which the tabText test pins: 0 Issues,
+// 1 Sources, 2 Results, 3 Timing, 4 Clocks, 5 Opt log,
+// 6 Messages, 7 Signoff. Every ShowTab argument in this file
+// uses these constants, so inserting a tab updates one list
+// here instead of leaving stale literals behind (full-flow
+// GUI unit F11).
+const int kIssuesTab = 0;
+const int kSourcesTab = 1;
+const int kResultsTab = 2;
+const int kTimingTab = 3;
+const int kClocksTab = 4;
+const int kOptLogTab = 5;
+const int kMessagesTab = 6;
+const int kSignoffTab = 7;
+
+// The stepper's eleven steps in flow order (full-flow GUI
+// unit F11): the three original steps, then one per stage
+// with a step contract, spelled as the stage bar spells them,
+// with GDS export from its contract's comment.
+const char* kStepNames[11] = {"Read",    "Elaborate", "Generic synth",
+                              "Synthesis", "Floorplan", "Place",
+                              "CTS",     "Route",     "Extract",
+                              "Finish",  "GDS export"};
+// The tab each of the first three stepper steps shows: Read
+// shows Sources, Elaborate shows Issues (the default landing
+// view after Elaborate), Generic synth shows Opt log. The
+// later steps replicate their stage buttons' clicks instead
+// (see the stepper construction below).
+const int kStepTabs[3] = {kSourcesTab, kIssuesTab, kOptLogTab};
 const char* kLaterStages[10] = {"Synthesis", "Floorplan", "Place",
                                 "CTS",       "Route",    "Extract",
                                 "Finish",    "STA",      "ECO",
@@ -96,7 +121,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       connect(synthesis_button_, &QPushButton::clicked, [this]() {
         // PanelsView is created below; clicks only happen after
         // construction, so it is set by then.
-        panels_->ShowTab(2);
+        panels_->ShowTab(kResultsTab);
         Refresh();
       });
       continue;
@@ -139,7 +164,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
         // construction, so it is set by then.
         view_.ShowRoute(false);
         view_.ShowGds(false);
-        panels_->ShowTab(4);
+        panels_->ShowTab(kClocksTab);
         Refresh();
       });
       continue;
@@ -168,7 +193,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
         // construction, so it is set by then.
         view_.ShowRoute(false);
         view_.ShowGds(false);
-        panels_->ShowTab(3);
+        panels_->ShowTab(kTimingTab);
         Refresh();
       });
       continue;
@@ -195,7 +220,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       connect(signoff_button_, &QPushButton::clicked, [this]() {
         // PanelsView is created below; clicks only happen after
         // construction, so it is set by then.
-        panels_->ShowTab(6);
+        panels_->ShowTab(kSignoffTab);
         Refresh();
       });
       continue;
@@ -207,21 +232,67 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   stages_layout->addStretch();
   layout->addWidget(stages);
 
-  // Stepper: status from the session record. Clicking a step
-  // shows that step's outputs in the right panels (Read shows
-  // Sources, Elaborate shows Issues, Generic synth shows the
-  // Opt log) and refreshes the window; the center is always
-  // the block diagram for a non-leaf level and the schematic
-  // for a leaf level.
+  // Stepper: flow progress, state as text from the step
+  // contracts. The first three steps show their outputs in
+  // the right panels (Read shows Sources, Elaborate shows
+  // Issues, Generic synth shows the Opt log); every later
+  // step's click replicates its stage button's click exactly
+  // (same tab or canvas, same center-flag clearing), and
+  // refreshes the window. Step buttons are always enabled:
+  // state is carried by the text, not by gating.
   auto* stepper = new QWidget(root);
   auto* stepper_layout = new QHBoxLayout(stepper);
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < 11; ++i) {
     step_buttons_[i] = new QPushButton(kStepNames[i], stepper);
     stepper_layout->addWidget(step_buttons_[i]);
     connect(step_buttons_[i], &QPushButton::clicked, [this, i]() {
       // PanelsView is created below; clicks only happen after
       // construction, so it is set by then.
-      panels_->ShowTab(kStepTabs[i]);
+      switch (i) {
+        case 0:
+        case 1:
+        case 2:
+          panels_->ShowTab(kStepTabs[i]);
+          break;
+        case 3:  // Synthesis
+          panels_->ShowTab(kResultsTab);
+          break;
+        case 4:  // Floorplan
+          view_.ShowPlacement(false);
+          view_.ShowRoute(false);
+          view_.ShowGds(false);
+          view_.ShowFloorplan(true);
+          break;
+        case 5:  // Place
+          view_.ShowFloorplan(false);
+          view_.ShowRoute(false);
+          view_.ShowGds(false);
+          view_.ShowPlacement(true);
+          break;
+        case 6:  // CTS
+          view_.ShowRoute(false);
+          view_.ShowGds(false);
+          panels_->ShowTab(kClocksTab);
+          break;
+        case 7:  // Route
+          view_.ShowFloorplan(false);
+          view_.ShowPlacement(false);
+          view_.ShowGds(false);
+          view_.ShowRoute(true);
+          break;
+        case 8:  // Extract
+          view_.ShowRoute(false);
+          view_.ShowGds(false);
+          panels_->ShowTab(kTimingTab);
+          break;
+        case 9:   // Finish
+        case 10:  // GDS export
+          view_.ShowFloorplan(false);
+          view_.ShowPlacement(false);
+          view_.ShowRoute(false);
+          view_.ShowGds(true);
+          break;
+      }
       Refresh();
     });
   }
@@ -456,26 +527,26 @@ void MainWindow::Refresh() {
     case SessionView::ResultDestination::kNone:
       break;
     case SessionView::ResultDestination::kIssues:
-      panels_->ShowTab(0);
+      panels_->ShowTab(kIssuesTab);
       break;
     case SessionView::ResultDestination::kSources:
-      panels_->ShowTab(1);
+      panels_->ShowTab(kSourcesTab);
       break;
     case SessionView::ResultDestination::kResults:
     case SessionView::ResultDestination::kSynthesis:
-      panels_->ShowTab(2);
+      panels_->ShowTab(kResultsTab);
       break;
     case SessionView::ResultDestination::kTiming:
-      panels_->ShowTab(3);
+      panels_->ShowTab(kTimingTab);
       break;
     case SessionView::ResultDestination::kClocks:
-      panels_->ShowTab(4);
+      panels_->ShowTab(kClocksTab);
       break;
     case SessionView::ResultDestination::kOptLog:
-      panels_->ShowTab(4);
+      panels_->ShowTab(kOptLogTab);
       break;
     case SessionView::ResultDestination::kSignoff:
-      panels_->ShowTab(6);
+      panels_->ShowTab(kSignoffTab);
       break;
     case SessionView::ResultDestination::kCenter:
       view_.ShowFloorplan(false);
@@ -512,9 +583,12 @@ void MainWindow::Refresh() {
 }
 
 void MainWindow::RefreshSteps() {
-  const StepStatus states[3] = {view_.ReadStep(), view_.ElaborateStep(),
-                                view_.GenericStep()};
-  for (int i = 0; i < 3; ++i) {
+  const StepStatus states[11] = {
+      view_.ReadStep(),      view_.ElaborateStep(), view_.GenericStep(),
+      view_.SynthesisStep(), view_.FloorplanStep(), view_.PlacementStep(),
+      view_.CtsStep(),       view_.RouteStep(),     view_.ExtractStep(),
+      view_.FinishStep(),    view_.GdsStep()};
+  for (int i = 0; i < 11; ++i) {
     step_buttons_[i]->setText(
         QString::fromStdString(StepText(kStepNames[i], states[i])));
   }

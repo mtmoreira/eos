@@ -575,6 +575,18 @@ class SessionView {
     return context_.synth.mapped ? StepStatus::kDone
                                  : StepStatus::kPending;
   }
+  // Floorplan (full-flow GUI unit F11): floorplan keeps no
+  // session record (F3 made its state database-derived,
+  // answered by floorplan_summary from the live database),
+  // so this contract is the one model-based exception: Done
+  // once a floorplan model is loaded for the current design.
+  // It reads the same source as the Floorplan stage button's
+  // enablement, so the step reads Done exactly when that
+  // button is enabled. The stepper widget itself is F11's;
+  // this is the state contract it wires.
+  StepStatus FloorplanStep() const {
+    return floorplan_.Loaded() ? StepStatus::kDone : StepStatus::kPending;
+  }
   // Placement (full-flow GUI unit F4): Done once a place run
   // has succeeded in this session. The stepper widget itself
   // is F11's; this is the state contract it wires.

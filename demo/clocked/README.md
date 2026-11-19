@@ -167,6 +167,18 @@ done as each command runs; the hierarchy tree shows the top plus
 its five leaves with their ports. After `elaborate`, the Results
 panel shows the elaborated numbers (see "Expected outputs").
 
+The stepper covers the whole flow: eleven steps (Read,
+Elaborate, Generic synth, Synthesis, Floorplan, Place, CTS,
+Route, Extract, Finish, GDS export). Continuing in the console
+with the rest of the `flow-demo.tcl` sequence above
+(`synth_generic`, `synth_map`, the DEF bridge, `floorplan`,
+`place`, `cts`, `route`, `extract_parasitics`, `finish`,
+`write_gds`) flips each step to Done as its command runs, in
+order, and no step flips early: a step reads Done only after
+its stage's run succeeded in this session. Clicking a step
+takes you to that stage's home, the same tab or canvas its
+stage-bar button shows.
+
 ## Expected outputs
 
 All values below are measured from a real run of the built
