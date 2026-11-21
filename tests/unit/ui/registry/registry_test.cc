@@ -110,7 +110,8 @@ TEST(Registry, CoreSetIsComplete) {
   // The F5 CTS unit adds cts_summary (one command).
   // The F6 route unit adds route_summary (one command).
   // The F7 extract unit adds extract_summary (one command).
-  EXPECT_EQ(shell.registry.Names().size(), 129u);
+  // The F9 ECO unit adds eco_summary (one command).
+  EXPECT_EQ(shell.registry.Names().size(), 130u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -121,6 +122,7 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("cts_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("route_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_summary"), nullptr);
+  EXPECT_NE(shell.registry.Find("eco_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("set_waiver"), nullptr);
@@ -5398,6 +5400,234 @@ TEST(CoreCommands, CloseTimingDiagnostics) {
   const CommandResult no_design = shell.Run("close_timing", {"3"});
   ASSERT_FALSE(no_design.ok);
   EXPECT_EQ(no_design.diag, Diag::kUnclosedDesign);
+}
+
+// F9 A1: eco_summary fails fast before any closure run, and
+// after the closure fixture's run closes the design it
+// reports the recorded run: the verdict, the iteration bound,
+// the scene line's initial and final worst slacks (the
+// closure test's measured -0.1 and +0.5), and one step line
+// naming the accepted sizing edit.
+// Defined with the F6 route acceptance helpers below; the
+// end-to-end ECO test here builds on it.
+static void BuildRoutedClockedDemoSession(Shell& shell,
+                                          TimingTempDir& dir);
+
+TEST(CoreCommands, EcoSummaryReportsRecordedRun) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kClosureLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kClosureDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kClosureLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kClosureSdc)}).ok);
+  const CommandResult before = shell.Run("eco_summary");
+  ASSERT_FALSE(before.ok);
+  EXPECT_EQ(before.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(before.message.find("no timing closure: eos::close_timing first"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.eco.ran);
+
+  const CommandResult closed = shell.Run("close_timing", {"5"});
+  ASSERT_TRUE(closed.ok) << closed.message;
+  ASSERT_TRUE(shell.ctx.eco.ran);
+  EXPECT_TRUE(shell.ctx.eco.closed);
+  EXPECT_EQ(shell.ctx.eco.max_iterations, 5u);
+  ASSERT_EQ(shell.ctx.eco.steps.size(), 1u);
+  EXPECT_EQ(shell.ctx.eco.steps[0], "size u1 BUF_X1 -> BUF_X2");
+
+  const CommandResult summary = shell.Run("eco_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("eco closed=1 iterations=1 "),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("max_iterations=5"), std::string::npos);
+  EXPECT_NE(summary.payload.find("scene name=func_tt "), std::string::npos);
+  // The leading space anchors the key: the scene line's
+  // initial_worst_slack_ns contains worst_slack_ns as a
+  // substring, so an unanchored find would read the initial
+  // value for the final key.
+  const auto payload_number = [&summary](const std::string& key) {
+    const std::size_t at = summary.payload.find(" " + key + "=");
+    EXPECT_NE(at, std::string::npos) << "missing " << key;
+    if (at == std::string::npos) return 0.0;
+    return std::stod(summary.payload.substr(at + key.size() + 2));
+  };
+  EXPECT_NEAR(payload_number("initial_worst_slack_ns"), -0.1, 1e-6);
+  EXPECT_NEAR(payload_number("worst_slack_ns"), 0.5, 1e-6);
+  EXPECT_NE(summary.payload.find("\nstep size u1 BUF_X1 -> BUF_X2"),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("\nstop_reason "), std::string::npos);
+  EXPECT_NE(summary.payload.find("\nnote "), std::string::npos);
+}
+
+// F9 A3: a failed close_timing writes no record. The
+// extracted-scenario session gets the closure's
+// extracted-parasitics refusal verbatim and eco_summary
+// still fails fast afterward; the diagnostics legs (bad
+// bound, no design) likewise leave the record empty.
+TEST(CoreCommands, EcoFailedRunsLeaveNoRecord) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kClosureLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kClosureDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(
+      shell
+          .Run("create_scenario", {"func_tt_ext", "func", "tt", "extracted"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kClosureLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kClosureSdc)}).ok);
+  const CommandResult refused = shell.Run("close_timing", {"5"});
+  ASSERT_FALSE(refused.ok);
+  EXPECT_NE(refused.message.find("is at extracted parasitics; after an "
+                                 "edit its SPEF no longer describes the "
+                                 "design, so closure acceptance runs at "
+                                 "estimate fidelity only"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.eco.ran);
+  const CommandResult summary = shell.Run("eco_summary");
+  ASSERT_FALSE(summary.ok);
+  EXPECT_EQ(summary.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(summary.message.find("no timing closure: eos::close_timing first"),
+            std::string::npos);
+
+  Shell fresh;
+  ASSERT_FALSE(fresh.Run("close_timing", {"zero"}).ok);
+  EXPECT_FALSE(fresh.ctx.eco.ran);
+  ASSERT_FALSE(fresh.Run("close_timing", {"3"}).ok);
+  EXPECT_FALSE(fresh.ctx.eco.ran);
+  ASSERT_FALSE(fresh.Run("eco_summary").ok);
+}
+
+// F9 A4: a second close_timing on the closed fixture design
+// replaces the record (the already-closed run, no accepted
+// steps); a restore clears it, and close_design leaves the
+// context record at its default.
+TEST(CoreCommands, EcoRerunReplacesAndRestoreClears) {
+  TimingTempDir dir;
+  db::OdbDatabase database;
+  ASSERT_TRUE(database.ReadLef(dir.Write("cells.lef", kClosureLef)).ok());
+  ASSERT_TRUE(database.ReadDef(dir.Write("top.def", kClosureDef)).ok());
+  const std::string db_path = dir.Path("top.odb");
+  ASSERT_TRUE(database.WriteDb(db_path).ok());
+
+  Shell shell;
+  ASSERT_TRUE(
+      shell.Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+          .ok);
+  ASSERT_TRUE(shell.Run("read_liberty",
+                        {"tt", dir.Write("cells.lib", kClosureLiberty)})
+                    .ok);
+  ASSERT_TRUE(shell.Run("import_odb", {db_path}).ok);
+  ASSERT_TRUE(shell.Run("read_sdc", {dir.Write("top.sdc", kClosureSdc)}).ok);
+  ASSERT_TRUE(shell.Run("close_timing", {"5"}).ok);
+  ASSERT_EQ(shell.ctx.eco.steps.size(), 1u);
+
+  const CommandResult rerun = shell.Run("close_timing", {"5"});
+  ASSERT_TRUE(rerun.ok) << rerun.message;
+  ASSERT_TRUE(shell.ctx.eco.ran);
+  EXPECT_TRUE(shell.ctx.eco.closed);
+  EXPECT_TRUE(shell.ctx.eco.steps.empty());
+  EXPECT_NE(shell.ctx.eco.stop_reason.find("already met"),
+            std::string::npos);
+  const CommandResult summary = shell.Run("eco_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("eco closed=1 iterations=0 "),
+            std::string::npos);
+
+  // The checkpoint file: a small project saved by a helper
+  // shell (the construction of the restore tests).
+  const std::string checkpoint_path = dir.Path("eco.eosproj");
+  {
+    Shell helper;
+    ASSERT_TRUE(helper.Run("create_design", {"top"}).ok);
+    ASSERT_TRUE(helper.Run("create_port", {"clk", "in"}).ok);
+    ASSERT_TRUE(helper.Run("bind_clock", {"c1", "clk"}).ok);
+    ASSERT_TRUE(
+        helper
+            .Run("create_scenario", {"func_tt", "func", "tt", "estimate"})
+            .ok);
+    ASSERT_TRUE(helper.Run("checkpoint", {checkpoint_path}).ok);
+  }
+  const CommandResult restored = shell.Run("restore", {checkpoint_path});
+  ASSERT_TRUE(restored.ok) << restored.message;
+  EXPECT_FALSE(shell.ctx.eco.ran);
+  const CommandResult after_restore = shell.Run("eco_summary");
+  ASSERT_FALSE(after_restore.ok);
+  EXPECT_NE(after_restore.message.find(
+                "no timing closure: eos::close_timing first"),
+            std::string::npos);
+
+  // close_design resets the project (ResetProject), the ECO
+  // record with it: judged on a design-holding shell whose
+  // record is set, the same direct-field construction the
+  // step-contract tests use.
+  Shell closing;
+  ASSERT_TRUE(closing.Run("create_design", {"top"}).ok);
+  closing.ctx.eco.ran = true;
+  closing.ctx.eco.closed = true;
+  ASSERT_TRUE(closing.Run("close_design").ok);
+  EXPECT_FALSE(closing.ctx.eco.ran);
+  EXPECT_FALSE(closing.ctx.eco.closed);
+}
+
+// F9 A2: on the routed clocked demo, close_timing runs
+// through the session's recorded SDC pin map (the D4
+// plumbing) and closes with no edits: the demo's timing is
+// already closed at the post-route numbers the F6 and F7
+// units recorded. Without the plumbing this test fails at
+// the closure's first analysis, on the SDC read.
+TEST(CoreCommands, EcoRunsClockedDemoEndToEnd) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildRoutedClockedDemoSession(shell, dir);
+  const CommandResult closed = shell.Run("close_timing", {"5"});
+  ASSERT_TRUE(closed.ok) << closed.message;
+  EXPECT_NE(closed.payload.find("closed=1"), std::string::npos);
+  EXPECT_NE(closed.payload.find("iterations=0"), std::string::npos);
+  ASSERT_TRUE(shell.ctx.eco.ran);
+  EXPECT_TRUE(shell.ctx.eco.closed);
+  EXPECT_EQ(shell.ctx.eco.candidates_tried, 0u);
+
+  const CommandResult summary = shell.Run("eco_summary");
+  ASSERT_TRUE(summary.ok) << summary.message;
+  EXPECT_NE(summary.payload.find("eco closed=1 iterations=0 "),
+            std::string::npos);
+  EXPECT_NE(summary.payload.find("candidates_tried=0"), std::string::npos);
+  EXPECT_NE(summary.payload.find("scene name=func_tt "), std::string::npos);
+  // The leading space anchors the key: the scene line's
+  // initial_worst_slack_ns contains worst_slack_ns as a
+  // substring, so an unanchored find would read the initial
+  // value for the final key.
+  const auto payload_number = [&summary](const std::string& key) {
+    const std::size_t at = summary.payload.find(" " + key + "=");
+    EXPECT_NE(at, std::string::npos) << "missing " << key;
+    if (at == std::string::npos) return 0.0;
+    return std::stod(summary.payload.substr(at + key.size() + 2));
+  };
+  EXPECT_NEAR(payload_number("worst_slack_ns"), 3.292352835, 1e-9);
+  EXPECT_NEAR(payload_number("worst_hold_slack_ns"), 0.1642400105, 1e-9);
+  EXPECT_NEAR(payload_number("initial_worst_slack_ns"), 3.292352835, 1e-9);
+  EXPECT_NEAR(payload_number("initial_worst_hold_slack_ns"), 0.1642400105,
+              1e-9);
 }
 
 // P1: eos::floorplan runs on the imported design, reports rows,

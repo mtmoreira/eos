@@ -153,6 +153,15 @@ struct ResynthesisConfig {
 struct CloseTimingRequest {
   // The SDC every scene is analyzed under.
   std::string sdc_path;
+  // The session's recorded SDC pin map (from write_def), handed
+  // to every analysis the run performs, in PR 146's shape: the
+  // SDC may name pins hierarchically that the flat database
+  // carries under bridged names, and the mapped analysis
+  // translates them. Empty by default, which the mapped overload
+  // treats byte-identically to the unmapped one, so a caller
+  // that sets nothing behaves exactly as before this field
+  // existed.
+  analysis::SdcPinMap sdc_pin_map;
   // The required scenes, all at estimate parasitics (see the
   // banner on fidelity). At least one.
   std::vector<analysis::SceneAnalysis> scenes;

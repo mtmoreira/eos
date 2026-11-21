@@ -50,14 +50,18 @@ const int kOptLogTab = 5;
 const int kMessagesTab = 6;
 const int kSignoffTab = 7;
 
-// The stepper's eleven steps in flow order (full-flow GUI
-// unit F11): the three original steps, then one per stage
-// with a step contract, spelled as the stage bar spells them,
-// with GDS export from its contract's comment.
-const char* kStepNames[11] = {"Read",    "Elaborate", "Generic synth",
+// The stepper's twelve steps in flow order (full-flow GUI
+// unit F11; ECO appended by unit F9, the one addition F11
+// section 12 item 1 left to it): the three original steps,
+// then one per stage with a step contract, spelled as the
+// stage bar spells them, with GDS export from its contract's
+// comment. ECO sits last: the list is state order, not
+// script order (the demo runs its ECO commands mid-flow; see
+// the F9 design, section 6.1).
+const char* kStepNames[12] = {"Read",    "Elaborate", "Generic synth",
                               "Synthesis", "Floorplan", "Place",
                               "CTS",     "Route",     "Extract",
-                              "Finish",  "GDS export"};
+                              "Finish",  "GDS export", "ECO"};
 // The tab each of the first three stepper steps shows: Read
 // shows Sources, Elaborate shows Issues (the default landing
 // view after Elaborate), Generic synth shows Opt log. The
@@ -198,6 +202,21 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
       });
       continue;
     }
+    if (std::string(stage) == "ECO") {
+      eco_button_ = new QPushButton(stage, stages);
+      eco_button_->setFlat(true);
+      eco_button_->setEnabled(false);
+      stages_layout->addWidget(eco_button_);
+      connect(eco_button_, &QPushButton::clicked, [this]() {
+        // PanelsView is created below; clicks only happen after
+        // construction, so it is set by then.
+        view_.ShowRoute(false);
+        view_.ShowGds(false);
+        panels_->ShowTab(kTimingTab);
+        Refresh();
+      });
+      continue;
+    }
     if (std::string(stage) == "Finish") {
       finish_button_ = new QPushButton(stage, stages);
       finish_button_->setFlat(true);
@@ -242,7 +261,7 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
   // state is carried by the text, not by gating.
   auto* stepper = new QWidget(root);
   auto* stepper_layout = new QHBoxLayout(stepper);
-  for (int i = 0; i < 11; ++i) {
+  for (int i = 0; i < 12; ++i) {
     step_buttons_[i] = new QPushButton(kStepNames[i], stepper);
     stepper_layout->addWidget(step_buttons_[i]);
     connect(step_buttons_[i], &QPushButton::clicked, [this, i]() {
@@ -291,6 +310,11 @@ MainWindow::MainWindow(SessionView& view, QWidget* parent)
           view_.ShowPlacement(false);
           view_.ShowRoute(false);
           view_.ShowGds(true);
+          break;
+        case 11:  // ECO
+          view_.ShowRoute(false);
+          view_.ShowGds(false);
+          panels_->ShowTab(kTimingTab);
           break;
       }
       Refresh();
@@ -441,6 +465,10 @@ bool MainWindow::ExtractEnabled() const {
   return extract_button_ != nullptr && extract_button_->isEnabled();
 }
 
+bool MainWindow::EcoEnabled() const {
+  return eco_button_ != nullptr && eco_button_->isEnabled();
+}
+
 bool MainWindow::FinishEnabled() const {
   return finish_button_ != nullptr && finish_button_->isEnabled();
 }
@@ -570,6 +598,7 @@ void MainWindow::Refresh() {
   view_.RefreshCts();
   view_.RefreshRoute();
   view_.RefreshExtract();
+  view_.RefreshEco();
   view_.RefreshFinish();
   view_.RefreshGds();
   view_.RefreshSignoff();
@@ -583,12 +612,12 @@ void MainWindow::Refresh() {
 }
 
 void MainWindow::RefreshSteps() {
-  const StepStatus states[11] = {
+  const StepStatus states[12] = {
       view_.ReadStep(),      view_.ElaborateStep(), view_.GenericStep(),
       view_.SynthesisStep(), view_.FloorplanStep(), view_.PlacementStep(),
       view_.CtsStep(),       view_.RouteStep(),     view_.ExtractStep(),
-      view_.FinishStep(),    view_.GdsStep()};
-  for (int i = 0; i < 11; ++i) {
+      view_.FinishStep(),    view_.GdsStep(),       view_.EcoStep()};
+  for (int i = 0; i < 12; ++i) {
     step_buttons_[i]->setText(
         QString::fromStdString(StepText(kStepNames[i], states[i])));
   }
@@ -653,6 +682,13 @@ void MainWindow::RefreshSteps() {
   // the record is still loaded.
   if (extract_button_ != nullptr) {
     extract_button_->setEnabled(view_.Extract().Loaded());
+  }
+  // ECO stays disabled until an ECO run is recorded, and
+  // stays enabled once it is: the flag comes from the live
+  // model, so a later refresh never disables it while the
+  // record is still loaded.
+  if (eco_button_ != nullptr) {
+    eco_button_->setEnabled(view_.Eco().Loaded());
   }
   // Finish stays disabled until a finish run is recorded,
   // and stays enabled once it is: the flag comes from the

@@ -65,6 +65,7 @@ using eos::ui::ConeNetSpokes;
 using eos::ui::CtsModel;
 using eos::ui::CtsNet;
 using eos::ui::ExtractCompare;
+using eos::ui::EcoModel;
 using eos::ui::ExtractModel;
 using eos::ui::ExtractSlack;
 using eos::ui::DiagramBlock;
@@ -329,6 +330,7 @@ TEST(GuiSessionView, StepStatesFollowSessionFlags) {
   EXPECT_EQ(view.ExtractStep(), StepStatus::kPending);
   EXPECT_EQ(view.FinishStep(), StepStatus::kPending);
   EXPECT_EQ(view.GdsStep(), StepStatus::kPending);
+  EXPECT_EQ(view.EcoStep(), StepStatus::kPending);
   context.synth.parsed = true;
   EXPECT_EQ(view.ReadStep(), StepStatus::kDone);
   context.synth.elaborated = true;
@@ -349,6 +351,8 @@ TEST(GuiSessionView, StepStatesFollowSessionFlags) {
   EXPECT_EQ(view.FinishStep(), StepStatus::kDone);
   context.gds.written = true;
   EXPECT_EQ(view.GdsStep(), StepStatus::kDone);
+  context.eco.ran = true;
+  EXPECT_EQ(view.EcoStep(), StepStatus::kDone);
   // F11: FloorplanStep is the one model-based contract (F3
   // gave floorplan no session record): it reads the floorplan
   // model, so it flips when a floorplan_summary payload loads,
@@ -2322,6 +2326,28 @@ void RegisterRouteSummaryCommand(CommandRegistry& registry,
 const char kFinishSummaryPayload[] =
     "finish fillers=12 grid_shapes=0 metal_fills=0 pdn=false";
 
+// F9: the recorded closure run as eco_summary reports it:
+// closed in one accepted sizing iteration, two scene lines
+// (the second carrying an absent initial metric as "none"),
+// one step line, and the stop_reason and note lines verbatim.
+const char kEcoSummaryPayload[] =
+    "eco closed=1 iterations=1 candidates_tried=3 "
+    "candidates_rejected=2 candidates_skipped_stale=1 "
+    "candidates_skipped_memory=0 max_iterations=5\n"
+    "scene name=func_tt initial_worst_slack_ns=-0.1 "
+    "initial_worst_hold_slack_ns=0.02 worst_slack_ns=0.5 "
+    "total_negative_slack_ns=0 worst_hold_slack_ns=0.03 "
+    "total_negative_hold_slack_ns=0\n"
+    "scene name=func_ss initial_worst_slack_ns=none "
+    "initial_worst_hold_slack_ns=none worst_slack_ns=1.5 "
+    "total_negative_slack_ns=0 worst_hold_slack_ns=0.25 "
+    "total_negative_hold_slack_ns=0\n"
+    "step size u1 BUF_X1 -> BUF_X2\n"
+    "stop_reason the timing gate was met in every required "
+    "scene\n"
+    "note all closure metrics are a full re-analysis of every "
+    "required scene at estimate parasitics fidelity\n";
+
 // F8: the recorded export as gds_summary reports it: a
 // two-structure file (one master with a single pin
 // boundary, a top with two boundaries and one path) whose
@@ -4116,6 +4142,115 @@ TEST(FinishModel, RejectsMalformedPayloads) {
   ASSERT_TRUE(model.LoadPayload(kFinishSummaryPayload));
   EXPECT_FALSE(model.LoadPayload("garbage\n"));
   EXPECT_EQ(model.Fillers(), 12u);
+}
+
+TEST(EcoModel, ParsesRecordedRun) {
+  EcoModel model;
+  ASSERT_TRUE(model.LoadPayload(kEcoSummaryPayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_TRUE(model.Closed());
+  EXPECT_EQ(model.Iterations(), 1u);
+  EXPECT_EQ(model.CandidatesTried(), 3u);
+  EXPECT_EQ(model.CandidatesRejected(), 2u);
+  EXPECT_EQ(model.CandidatesSkippedStale(), 1u);
+  EXPECT_EQ(model.CandidatesSkippedMemory(), 0u);
+  EXPECT_EQ(model.MaxIterations(), 5u);
+  ASSERT_EQ(model.Scenes().size(), 2u);
+  EXPECT_EQ(model.Scenes()[0].name, "func_tt");
+  ASSERT_TRUE(model.Scenes()[0].initial_worst_slack_ns.has_value());
+  EXPECT_DOUBLE_EQ(*model.Scenes()[0].initial_worst_slack_ns, -0.1);
+  EXPECT_DOUBLE_EQ(*model.Scenes()[0].worst_slack_ns, 0.5);
+  EXPECT_DOUBLE_EQ(*model.Scenes()[0].worst_hold_slack_ns, 0.03);
+  // An absent metric stays absent: the payload's "none" is
+  // not a fabricated zero.
+  EXPECT_FALSE(model.Scenes()[1].initial_worst_slack_ns.has_value());
+  EXPECT_FALSE(
+      model.Scenes()[1].initial_worst_hold_slack_ns.has_value());
+  ASSERT_TRUE(model.Scenes()[1].worst_slack_ns.has_value());
+  EXPECT_DOUBLE_EQ(*model.Scenes()[1].worst_slack_ns, 1.5);
+  ASSERT_EQ(model.Steps().size(), 1u);
+  EXPECT_EQ(model.Steps()[0], "size u1 BUF_X1 -> BUF_X2");
+  EXPECT_EQ(model.StopReason(),
+            "the timing gate was met in every required scene");
+  EXPECT_EQ(model.Note(),
+            "all closure metrics are a full re-analysis of every "
+            "required scene at estimate parasitics fidelity");
+}
+
+TEST(EcoModel, RejectsMalformedPayloads) {
+  const std::string header =
+      "eco closed=1 iterations=1 candidates_tried=3 "
+      "candidates_rejected=2 candidates_skipped_stale=1 "
+      "candidates_skipped_memory=0 max_iterations=5\n";
+  const std::string scene =
+      "scene name=func_tt initial_worst_slack_ns=-0.1 "
+      "initial_worst_hold_slack_ns=0.02 worst_slack_ns=0.5 "
+      "total_negative_slack_ns=0 worst_hold_slack_ns=0.03 "
+      "total_negative_hold_slack_ns=0\n";
+  const std::string close =
+      "stop_reason done\nnote noted\n";
+  const char* bad_headers[] = {
+      // No header lead word.
+      "closed=1 iterations=1 candidates_tried=3 "
+      "candidates_rejected=2 candidates_skipped_stale=1 "
+      "candidates_skipped_memory=0 max_iterations=5\n",
+      // An unknown key in the header.
+      "eco closed=1 iterations=1 candidates_tried=3 "
+      "candidates_rejected=2 candidates_skipped_stale=1 "
+      "candidates_skipped_memory=0 max_iterations=5 bogus=1\n",
+      // A closed value that is not 0 or 1.
+      "eco closed=yes iterations=1 candidates_tried=3 "
+      "candidates_rejected=2 candidates_skipped_stale=1 "
+      "candidates_skipped_memory=0 max_iterations=5\n",
+      // A bad number in the header.
+      "eco closed=1 iterations=x candidates_tried=3 "
+      "candidates_rejected=2 candidates_skipped_stale=1 "
+      "candidates_skipped_memory=0 max_iterations=5\n",
+  };
+  for (const char* payload : bad_headers) {
+    EcoModel model;
+    EXPECT_FALSE(model.LoadPayload(std::string(payload) + scene + close))
+        << "payload: " << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+  const std::string bad_bodies[] = {
+      // An unknown key on a scene line.
+      header +
+          "scene name=func_tt initial_worst_slack_ns=-0.1 "
+          "initial_worst_hold_slack_ns=0.02 worst_slack_ns=0.5 "
+          "total_negative_slack_ns=0 worst_hold_slack_ns=0.03 "
+          "total_negative_hold_slack_ns=0 bogus=1\n" +
+          close,
+      // A duplicate scene name.
+      header + scene + scene + close,
+      // A bad number on a scene line.
+      header +
+          "scene name=func_tt initial_worst_slack_ns=-0.1 "
+          "initial_worst_hold_slack_ns=0.02 worst_slack_ns=x "
+          "total_negative_slack_ns=0 worst_hold_slack_ns=0.03 "
+          "total_negative_hold_slack_ns=0\n" +
+          close,
+      // A scene line after a step line.
+      header + "step size u1 BUF_X1 -> BUF_X2\n" + scene + close,
+      // An unknown line kind.
+      header + "bogus x=1\n" + close,
+      // No stop_reason or note close.
+      header + scene,
+      // A step line after the stop reason.
+      header + scene + "stop_reason done\n" +
+          "step size u1 BUF_X1 -> BUF_X2\nnote noted\n",
+  };
+  for (const std::string& payload : bad_bodies) {
+    EcoModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << "payload: " << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+  // A malformed load keeps the previous model.
+  EcoModel model;
+  ASSERT_TRUE(model.LoadPayload(kEcoSummaryPayload));
+  EXPECT_FALSE(model.LoadPayload("garbage\n"));
+  EXPECT_EQ(model.Scenes().size(), 2u);
+  EXPECT_TRUE(model.Closed());
 }
 
 TEST(GdsModel, ParsesRecordedExport) {
@@ -5968,6 +6103,58 @@ struct AutoNavView {
           return CommandResult::Ok(kGdsSummaryPayload);
         });
     EXPECT_TRUE(gds_summary.ok());
+    // F9: the stub close_timing records a run (it sets the
+    // ECO record's fields directly, like the real handler);
+    // the stub eco_summary fails until the record is set,
+    // like the real query.
+    auto close_timing = registry.Register(
+        "close_timing", "close_timing",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          ctx.eco.ran = true;
+          ctx.eco.closed = true;
+          ctx.eco.max_iterations = 5;
+          ctx.eco.candidates_tried = 3;
+          ctx.eco.candidates_rejected = 2;
+          ctx.eco.candidates_skipped_stale = 1;
+          CommandContext::EcoSession::SceneLine scene;
+          scene.name = "func_tt";
+          scene.initial_worst_slack_ns = -0.1;
+          scene.initial_worst_hold_slack_ns = 0.02;
+          scene.worst_slack_ns = 0.5;
+          scene.total_negative_slack_ns = 0.0;
+          scene.worst_hold_slack_ns = 0.03;
+          scene.total_negative_hold_slack_ns = 0.0;
+          ctx.eco.scenes.push_back(scene);
+          CommandContext::EcoSession::SceneLine second;
+          second.name = "func_ss";
+          second.worst_slack_ns = 1.5;
+          second.total_negative_slack_ns = 0.0;
+          second.worst_hold_slack_ns = 0.25;
+          second.total_negative_hold_slack_ns = 0.0;
+          ctx.eco.scenes.push_back(second);
+          ctx.eco.steps.push_back("size u1 BUF_X1 -> BUF_X2");
+          ctx.eco.stop_reason =
+              "the timing gate was met in every required scene";
+          ctx.eco.parasitics_note =
+              "all closure metrics are a full re-analysis of every "
+              "required scene at estimate parasitics fidelity";
+          return CommandResult::Ok(
+              "closed=1 iterations=1 candidates_tried=3 "
+              "candidates_rejected=2 revision=1 "
+              "report=timing_closure");
+        });
+    EXPECT_TRUE(close_timing.ok());
+    auto eco_summary = registry.Register(
+        "eco_summary", "eco_summary",
+        [](CommandContext& ctx, const std::vector<std::string>&) {
+          if (!ctx.eco.ran) {
+            return CommandResult::Fail(
+                eos::ui::Diag::kInvalidConfiguration,
+                "no timing closure: eos::close_timing first");
+          }
+          return CommandResult::Ok(kEcoSummaryPayload);
+        });
+    EXPECT_TRUE(eco_summary.ok());
     // F11: the stub synth_map records a mapped design, like
     // the real command; the stub place records a run and the
     // stub place_summary fails until the record is set, like
@@ -6319,13 +6506,51 @@ TEST(MainWindowAutoNav, FinishButtonShowsGdsCanvas) {
 // buttons, all Pending on a fresh window, each flipping to
 // Done as its stage's record lands, and all back to Pending
 // when the session clears.
+// F9: the ECO stage button starts disabled, enables once a
+// close_timing run is recorded, and a console close_timing
+// lands on the Timing tab where the ECO section lives; the
+// ECO stage button's click and the ECO step's click land on
+// the same tab.
+TEST(MainWindowAutoNav, EcoRunShowsTimingTab) {
+  AutoNavView fixture;
+  MainWindow window(fixture.view);
+  EXPECT_FALSE(window.EcoEnabled());
+  EXPECT_EQ(window.CurrentTab(), 0);
+  ASSERT_TRUE(fixture.view.Dispatch("close_timing", {"5"}).ok);
+  window.Refresh();
+  EXPECT_TRUE(window.EcoEnabled());
+  EXPECT_EQ(fixture.view.EcoStep(), StepStatus::kDone);
+  EXPECT_TRUE(fixture.view.Eco().Loaded());
+  EXPECT_EQ(window.CurrentTab(), 3);
+  // Move away through the stepper's Read step (Sources tab),
+  // then take the ECO stage button back to Timing.
+  QPushButton* read = AutoNavButtonWithPrefix(window, "Read");
+  ASSERT_NE(read, nullptr);
+  read->click();
+  EXPECT_EQ(window.CurrentTab(), 1);
+  QPushButton* eco_button = AutoNavButtonWithPrefix(window, "ECO");
+  ASSERT_NE(eco_button, nullptr);
+  EXPECT_TRUE(eco_button->isEnabled());
+  eco_button->click();
+  EXPECT_EQ(window.CurrentTab(), 3);
+  // The ECO step lands on the same tab from the same move.
+  read = AutoNavButtonWithPrefix(window, "Read");
+  ASSERT_NE(read, nullptr);
+  read->click();
+  EXPECT_EQ(window.CurrentTab(), 1);
+  QPushButton* eco_step = AutoNavStepButton(window, "ECO");
+  ASSERT_NE(eco_step, nullptr);
+  eco_step->click();
+  EXPECT_EQ(window.CurrentTab(), 3);
+}
+
 TEST(MainWindowAutoNav, StepperCoversTheFlow) {
   AutoNavView fixture;
   MainWindow window(fixture.view);
-  const char* steps[11] = {"Read",    "Elaborate", "Generic synth",
+  const char* steps[12] = {"Read",    "Elaborate", "Generic synth",
                            "Synthesis", "Floorplan", "Place",
                            "CTS",     "Route",     "Extract",
-                           "Finish",  "GDS export"};
+                           "Finish",  "GDS export", "ECO"};
   window.Refresh();
   for (const char* step : steps) {
     EXPECT_EQ(AutoNavStepText(window, step),
@@ -6378,7 +6603,10 @@ TEST(MainWindowAutoNav, StepperCoversTheFlow) {
   ASSERT_TRUE(fixture.view.Dispatch("write_gds", {"clk_top.gds"}).ok);
   window.Refresh();
   EXPECT_EQ(AutoNavStepText(window, "GDS export"), "GDS export: Done");
-  // Clearing the session returns all eleven to Pending. The
+  ASSERT_TRUE(fixture.view.Dispatch("close_timing", {"5"}).ok);
+  window.Refresh();
+  EXPECT_EQ(AutoNavStepText(window, "ECO"), "ECO: Done");
+  // Clearing the session returns all twelve to Pending. The
   // stub close_design resets the record fields the way the
   // real command's ResetProject does; Dispatch's own
   // close_design branch clears the models and center flags.
@@ -6392,6 +6620,7 @@ TEST(MainWindowAutoNav, StepperCoversTheFlow) {
         ctx.extract = CommandContext::ExtractSession();
         ctx.finish = CommandContext::FinishSession();
         ctx.gds = CommandContext::GdsSession();
+        ctx.eco = CommandContext::EcoSession();
         return CommandResult::Ok("");
       });
   ASSERT_TRUE(close_design.ok());

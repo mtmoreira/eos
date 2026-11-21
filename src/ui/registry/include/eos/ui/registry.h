@@ -454,6 +454,49 @@ struct CommandContext {
   };
   GdsSession gds;
 
+  // ECO session state (full-flow GUI unit F9): the most
+  // recent completed close_timing run's outcome, field for
+  // field with the session::ClosureOutcome's reportable
+  // facts (plus the iteration bound the run was given, which
+  // the outcome does not carry). The same session posture as
+  // the finish and gds sessions beside it: interface state,
+  // cleared by ResetProject and by a restore, never
+  // persisted. A record is written on every completed run,
+  // whether the run closed or not; a failed close_timing
+  // returns before an outcome exists and leaves the record
+  // untouched, exactly like a failed route leaves the route
+  // record. It is a single run, not a history: a later
+  // completed run replaces the record wholesale. The
+  // iteration count is not stored: it is steps.size(), which
+  // is what the close_timing payload's iterations= prints.
+  // Per-scene metrics are optionals because the handler
+  // extracts them from the outcome's metric maps by name,
+  // and a metric the analysis did not produce records as
+  // absent, never as a fabricated zero.
+  struct EcoSession {
+    bool ran = false;
+    bool closed = false;
+    std::size_t max_iterations = 0;
+    std::size_t candidates_tried = 0;
+    std::size_t candidates_rejected = 0;
+    std::size_t candidates_skipped_stale = 0;
+    std::size_t candidates_skipped_memory = 0;
+    struct SceneLine {
+      std::string name;
+      std::optional<double> initial_worst_slack_ns;
+      std::optional<double> initial_worst_hold_slack_ns;
+      std::optional<double> worst_slack_ns;
+      std::optional<double> total_negative_slack_ns;
+      std::optional<double> worst_hold_slack_ns;
+      std::optional<double> total_negative_hold_slack_ns;
+    };
+    std::vector<SceneLine> scenes;
+    std::vector<std::string> steps;
+    std::string stop_reason;
+    std::string parasitics_note;
+  };
+  EcoSession eco;
+
   // Synthesis session state (unit S1): the design the synthesis
   // commands have parsed, elaborated and generically optimized,
   // as one advancing state machine. Like the timing session,

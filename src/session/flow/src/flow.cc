@@ -687,8 +687,8 @@ Result<ClosureOutcome> RunTimingClosure(Project& project,
       "qualified";
 
   analysis::TimingService timing;
-  const auto initial =
-      timing.Analyze(database, request.sdc_path, request.scenes);
+  const auto initial = timing.Analyze(database, request.sdc_path,
+                                      request.scenes, request.sdc_pin_map);
   if (!initial.ok()) {
     return initial.status();
   }
@@ -825,6 +825,7 @@ Result<ClosureOutcome> RunTimingClosure(Project& project,
       eco_request.label = candidate.label;
       eco_request.sdc_path = request.sdc_path;
       eco_request.scenes = request.scenes;
+      eco_request.sdc_pin_map = request.sdc_pin_map;
       // The loop already holds a full analysis of the design as
       // it stands (the initial analysis, or the accepted step's
       // after state); hand it to the transaction so the screening

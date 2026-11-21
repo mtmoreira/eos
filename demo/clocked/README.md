@@ -167,16 +167,23 @@ done as each command runs; the hierarchy tree shows the top plus
 its five leaves with their ports. After `elaborate`, the Results
 panel shows the elaborated numbers (see "Expected outputs").
 
-The stepper covers the whole flow: eleven steps (Read,
+The stepper covers the whole flow: twelve steps (Read,
 Elaborate, Generic synth, Synthesis, Floorplan, Place, CTS,
-Route, Extract, Finish, GDS export). Continuing in the console
-with the rest of the `flow-demo.tcl` sequence above
+Route, Extract, Finish, GDS export, ECO). Continuing in the
+console with the rest of the `flow-demo.tcl` sequence above
 (`synth_generic`, `synth_map`, the DEF bridge, `floorplan`,
-`place`, `cts`, `route`, `extract_parasitics`, `finish`,
-`write_gds`) flips each step to Done as its command runs, in
-order, and no step flips early: a step reads Done only after
-its stage's run succeeded in this session. Clicking a step
-takes you to that stage's home, the same tab or canvas its
+`place`, `cts`, `route`, `close_timing`,
+`extract_parasitics`, `finish`, `write_gds`) flips each step
+to Done as its stage's run completes in this session, and no
+step flips early. The step order is state order, not script
+order: ECO is the last step, but the script runs
+`close_timing` right after the post-route `run_timing`,
+before `extract_parasitics`, because closure acceptance is
+estimate-fidelity only; once the extracted scenario exists,
+`close_timing` refuses by design (see "ECO on this design"
+below). On this design the run reports the timing gate
+already met, with no edits accepted. Clicking a step takes
+you to that stage's home, the same tab or canvas its
 stage-bar button shows.
 
 ## Expected outputs
@@ -219,6 +226,20 @@ and the ABC run inside `synth_generic`).
   on this sequential design through the F12 `abc -dff` path
   (PR 131). This is the first sequential design the generic
   flow completes on.
+- `close_timing 5` (after the post-route `run_timing`):
+  `closed=1 iterations=0 candidates_tried=0
+  candidates_rejected=0`, with the func_tt scene line at
+  worst slack 3.292352835 ns and worst hold slack
+  0.1642400105 ns, initial equal to final, and the stop
+  reason "the timing gate was already met in every required
+  scene; no edit was needed". See "ECO on this design"
+  below.
+- `eco_summary`: the same facts from the ECO record: the
+  `eco` header (`closed=1 iterations=0 candidates_tried=0
+  candidates_rejected=0 candidates_skipped_stale=0
+  candidates_skipped_memory=0 max_iterations=5`), the one
+  scene line with the values above, no step lines, then
+  the stop_reason and note lines.
 
 ## Known limitations
 
@@ -491,6 +512,54 @@ GDS path and size in the canvas counts column matching
 the payloads, the geometry (wires, vias on their nets,
 filler and instance pin shapes) drawn in the center,
 and `clk_top.gds` on disk at the recorded size.
+
+### ECO on this design (F9, measured)
+
+The F9 step sits mid-script, between the post-route
+`run_timing` and `extract_parasitics`: `close_timing 5`,
+then `eco_summary`. That is the first point where the
+closure's preconditions all hold (the routed database is
+in the session, the bridge has recorded the SDC pin map,
+and the only active scenario is the estimate one), and
+the last point before the extracted scenario exists:
+closure acceptance runs at estimate fidelity only,
+because after an edit an extracted scene's SPEF no longer
+describes the design, so once `func_tt_ext` is created
+`close_timing` refuses for the rest of the session, by
+design, and no command can lift the refusal. Placing ECO
+before extraction also keeps every downstream artifact
+(the SPEF, the extracted comparison, the finish, the
+export) describing the design the ECO left.
+
+Measured outcome: this design's timing is already
+closed. `close_timing 5` returns `closed=1 iterations=0
+candidates_tried=0 candidates_rejected=0`; the func_tt
+scene reports worst slack 3.292352835 ns and worst hold
+slack 0.1642400105 ns, initial equal to final (the F6/F7
+post-route numbers exactly), and the stop reason is "the
+timing gate was already met in every required scene; no
+edit was needed". The run accepts no edit, so no later
+stage's measured output changes. `eco_summary` then
+reports the same facts from the ECO record the run wrote,
+with no step lines.
+
+One piece of plumbing makes the run possible at all: the
+closure now receives the session's recorded SDC pin map,
+as `run_timing` has since PR 146. The demo's SDC names
+the generated clock's pin hierarchically (`u_div/q`); the
+bridged database is flat, and before this unit the
+closure's analyses read the untranslated SDC and failed.
+The edit-accepting case is not staged on this design (its
+setup margin is 3.29 ns of a 5 ns clock, and the closure
+has no margin option); it is proven in the registry suite
+on the closure fixture, where a -0.1 ns slack is closed to
++0.5 ns by one accepted sizing edit the record names.
+
+In the GUI, a console `close_timing` lands on the Timing
+tab, whose ECO section renders the record (the verdict,
+the per-scene slacks before and after, the accepted
+edits, the stop reason); the ECO stage button enables and
+the stepper's ECO step reads Done.
 
 ### The clock table in a read_sdc-only session (F2 caveat, fixed)
 

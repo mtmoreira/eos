@@ -1,5 +1,5 @@
 # Full-flow demo script for the clocked design (F6 route unit,
-# F7 extraction tail, F8 finish-and-export tail).
+# F7 extraction tail, F8 finish-and-export tail, F9 ECO step).
 # Run from demo/clocked: ../../build/apps/eos/eos flow-demo.tcl
 # The same commands can be typed in the GUI console entry line
 # instead, one per Return (the eos:: prefix is optional there).
@@ -9,7 +9,12 @@
 # place, then one cts run per clock net (master first), the
 # CTS record query, the clock view, a post-CTS timing run,
 # then route, the route record query, the clock view again,
-# a post-route timing run, then extraction with the mock
+# a post-route timing run, then the ECO step: a timing
+# closure run over the routed design and the ECO record
+# query (the closure accepts estimate-fidelity runs only,
+# so it sits before the extracted scenario exists; on this
+# design its gate is already met and it accepts no edit),
+# then extraction with the mock
 # rules file, the extract record query, an extracted
 # scenario over the written SPEF, a two-scene timing run,
 # and the extract record query again (now carrying the
@@ -42,6 +47,8 @@ eos::route
 eos::route_summary
 eos::clock_network_summary
 eos::run_timing
+eos::close_timing 5
+eos::eco_summary
 eos::extract_parasitics clk_top.spef -model ../../src/pd/rsz/tests/mock/eos_mock.rules
 eos::extract_summary
 eos::create_scenario func_tt_ext func tt extracted

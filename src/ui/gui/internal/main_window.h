@@ -60,6 +60,7 @@ class MainWindow : public QMainWindow {
   bool CtsEnabled() const;
   bool RouteEnabled() const;
   bool ExtractEnabled() const;
+  bool EcoEnabled() const;
   bool FinishEnabled() const;
   bool SignoffEnabled() const;
 
@@ -105,7 +106,7 @@ class MainWindow : public QMainWindow {
   void SubmitEntry();
 
   SessionView& view_;
-  QPushButton* step_buttons_[11];
+  QPushButton* step_buttons_[12];
   QLabel* checkpoint_label_ = nullptr;
   // Stage buttons: Elaboration shows the hierarchy views,
   // Floorplan shows the floorplan canvas when a floorplan is
@@ -124,6 +125,7 @@ class MainWindow : public QMainWindow {
   QPushButton* cts_button_ = nullptr;
   QPushButton* route_button_ = nullptr;
   QPushButton* extract_button_ = nullptr;
+  QPushButton* eco_button_ = nullptr;
   QPushButton* finish_button_ = nullptr;
   QPushButton* signoff_button_ = nullptr;
   HierarchyBrowser* browser_ = nullptr;

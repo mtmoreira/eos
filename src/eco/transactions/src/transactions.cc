@@ -273,7 +273,7 @@ Result<EcoOutcome> RunEcoTransaction(
     before_results = request.known_before;
   } else {
     const auto analyzed = timing.Analyze(database, request.sdc_path,
-                                         request.scenes);
+                                         request.scenes, request.sdc_pin_map);
     if (!analyzed.ok()) {
       return analyzed.status();
     }
@@ -301,7 +301,7 @@ Result<EcoOutcome> RunEcoTransaction(
   }
 
   const auto after = timing.Analyze(database, request.sdc_path,
-                                    request.scenes);
+                                    request.scenes, request.sdc_pin_map);
   if (!after.ok()) {
     const Status restored = RestoreFrom(database, checkpoint_path.string());
     if (!restored.ok()) {

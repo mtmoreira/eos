@@ -324,7 +324,8 @@ def test_real_repo_check_passes_and_rules_hold():
     # per-test entries, the 84th through 88th ctest entries.
     # F11 adds ui.registry.restore.records, the 89th ctest
     # entry.
-    assert len(all_tests) == 89
+    # F9 adds ui.registry.eco.end_to_end, the 90th ctest entry.
+    assert len(all_tests) == 90
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),
