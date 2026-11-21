@@ -262,6 +262,7 @@ static SessionView::ResultDestination NavigationForCommand(
   if (name == "cts") return Destination::kClocks;
   if (name == "route") return Destination::kCenter;
   if (name == "extract_parasitics") return Destination::kTiming;
+  if (name == "close_timing") return Destination::kTiming;
   if (name == "finish" || name == "write_gds") {
     return Destination::kGds;
   }
@@ -313,6 +314,7 @@ CommandResult SessionView::Dispatch(const std::string& name,
         extract_.Clear();
         finish_.Clear();
         gds_.Clear();
+        eco_.Clear();
         gds_key_.clear();
       }
     } else if (name == "close_design") {
@@ -328,6 +330,7 @@ CommandResult SessionView::Dispatch(const std::string& name,
       extract_.Clear();
       finish_.Clear();
       gds_.Clear();
+      eco_.Clear();
       gds_key_.clear();
     } else if (name == "floorplan") {
       // A successful floorplan takes the user to the
@@ -618,6 +621,15 @@ void SessionView::RefreshExtract() {
   if (!result.ok || !extract_.LoadPayload(result.payload)) {
     NoteUnguardedRefreshFailure(messages_, "extract_summary", result,
                                 extract_.Empty());
+  }
+}
+
+void SessionView::RefreshEco() {
+  const CommandResult result =
+      registry_.Dispatch(context_, "eco_summary", {});
+  if (!result.ok || !eco_.LoadPayload(result.payload)) {
+    NoteUnguardedRefreshFailure(messages_, "eco_summary", result,
+                                eco_.Empty());
   }
 }
 

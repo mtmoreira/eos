@@ -16,6 +16,7 @@
 
 #include "eos/ui/clock_network.h"
 #include "eos/ui/cts.h"
+#include "eos/ui/eco.h"
 #include "eos/ui/extract.h"
 #include "eos/ui/diagram.h"
 #include "eos/ui/console_entry.h"
@@ -432,6 +433,25 @@ class SessionView {
   // the model is empty.
   void RefreshGds();
 
+  // ECO model, refreshed from the live session (see
+  // RefreshEco). The Timing panel's ECO section reads this:
+  // the recorded close_timing run's outcome, its per-scene
+  // slacks before and after, its accepted edits, and its
+  // stop reason.
+  const EcoModel& Eco() const { return eco_; }
+
+  // Re-reads the ECO model from the live session: dispatches
+  // eco_summary WITHOUT an echo line (a model refresh is not
+  // a user action) and rebuilds the model when a close_timing
+  // run has been recorded. A failed query or a malformed
+  // payload keeps the last good model and reports through
+  // the unguarded-refresh path, which stays silent while the
+  // model is empty. The query fails fast with no recorded
+  // run, so the refresh needs no gate of its own; and the
+  // query itself reads only the stored ECO record, so it
+  // runs on every refresh, like the extract refresh.
+  void RefreshEco();
+
   // Signoff model, refreshed from the live session (see
   // RefreshSignoff). The Signoff panel reads this: the DRC,
   // LVS, and antenna verdicts parsed from the external PV
@@ -634,6 +654,15 @@ class SessionView {
     return context_.gds.written ? StepStatus::kDone
                                 : StepStatus::kPending;
   }
+  // ECO (full-flow GUI unit F9): Done once a close_timing
+  // run has completed in this session (the ECO record is
+  // set). The stepper extension that wires this contract is
+  // this unit's, per F11 section 12 item 1; this is the
+  // state contract it wires.
+  StepStatus EcoStep() const {
+    return context_.eco.ran ? StepStatus::kDone
+                            : StepStatus::kPending;
+  }
 
  private:
   static std::string EchoLine(const std::string& name,
@@ -669,6 +698,7 @@ class SessionView {
   ExtractModel extract_;
   FinishModel finish_;
   GdsModel gds_;
+  EcoModel eco_;
   // The GDS record's (path, size) pair the loaded GDS model
   // was built from (see RefreshGds). Empty when no GDS
   // model is loaded.

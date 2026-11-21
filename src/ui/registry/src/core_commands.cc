@@ -406,6 +406,7 @@ void ResetProject(CommandContext& ctx) {
   ctx.extract = CommandContext::ExtractSession();
   ctx.finish = CommandContext::FinishSession();
   ctx.gds = CommandContext::GdsSession();
+  ctx.eco = CommandContext::EcoSession();
   ctx.signoff = CommandContext::SignoffSession();
   ctx.drc = CommandContext::DrcSession();
   ctx.wire_rc_overrides.clear();
@@ -10328,6 +10329,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.extract = CommandContext::ExtractSession();
         ctx.finish = CommandContext::FinishSession();
         ctx.gds = CommandContext::GdsSession();
+        ctx.eco = CommandContext::EcoSession();
         ctx.signoff = CommandContext::SignoffSession();
         ctx.drc = CommandContext::DrcSession();
         return CommandResult::Ok(
@@ -11844,6 +11846,67 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             std::to_string(record.metal_fill_count) +
             " pdn=" +
             std::string(record.with_pdn ? "true" : "false"));
+      });
+
+  // ---- eco_summary (full-flow GUI unit F9) -------------------
+  // The structured ECO query the GUI's Timing tab reads: the
+  // session ECO record alone, the completed close_timing run's
+  // outcome in the grammar of section 3.2 of the F9 design. It
+  // is a query, not a report: it runs no engine, writes no
+  // file, and changes no session state. Like finish_summary,
+  // the query reads only the record, so it does not require
+  // the database; with an empty record it fails fast,
+  // mirroring the family's fail-fast wording.
+  add("eco_summary", "eco_summary",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (auto bad = ExpectCount(args, 0, "eco_summary")) {
+          return *bad;
+        }
+        if (!ctx.eco.ran) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no timing closure: eos::close_timing first");
+        }
+        const CommandContext::EcoSession& record = ctx.eco;
+        const auto value = [](const std::optional<double>& metric) {
+          return metric.has_value() ? FormatNumber(*metric)
+                                    : std::string("none");
+        };
+        std::string payload =
+            "eco closed=" + std::string(record.closed ? "1" : "0") +
+            " iterations=" + std::to_string(record.steps.size()) +
+            " candidates_tried=" +
+            std::to_string(record.candidates_tried) +
+            " candidates_rejected=" +
+            std::to_string(record.candidates_rejected) +
+            " candidates_skipped_stale=" +
+            std::to_string(record.candidates_skipped_stale) +
+            " candidates_skipped_memory=" +
+            std::to_string(record.candidates_skipped_memory) +
+            " max_iterations=" +
+            std::to_string(record.max_iterations);
+        for (const CommandContext::EcoSession::SceneLine& scene :
+             record.scenes) {
+          payload += "\nscene name=" + scene.name +
+                     " initial_worst_slack_ns=" +
+                     value(scene.initial_worst_slack_ns) +
+                     " initial_worst_hold_slack_ns=" +
+                     value(scene.initial_worst_hold_slack_ns) +
+                     " worst_slack_ns=" + value(scene.worst_slack_ns) +
+                     " total_negative_slack_ns=" +
+                     value(scene.total_negative_slack_ns) +
+                     " worst_hold_slack_ns=" +
+                     value(scene.worst_hold_slack_ns) +
+                     " total_negative_hold_slack_ns=" +
+                     value(scene.total_negative_hold_slack_ns);
+        }
+        for (const std::string& step : record.steps) {
+          payload += "\nstep " + step;
+        }
+        payload += "\nstop_reason " + record.stop_reason;
+        payload += "\nnote " + record.parasitics_note;
+        return CommandResult::Ok(payload);
       });
 
   // ---- gds_summary (full-flow GUI unit F8) -------------------
@@ -17775,6 +17838,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         }
         session::CloseTimingRequest request;
         request.sdc_path = ctx.timing.sdc_path;
+        request.sdc_pin_map = ctx.timing.sdc_pin_map;
         request.scenes = std::move(scenes);
         request.max_iterations =
             static_cast<std::size_t>(max_iterations);
@@ -17811,6 +17875,62 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                      MetricText(initial.metrics, "worst_slack_ns");
         }
         payload += "\nstop_reason=" + outcome.value().stop_reason;
+        // The ECO record (full-flow GUI unit F9): the completed
+        // run's outcome, written beside the last_results
+        // assignment whether the run closed or not, replacing
+        // any previous run's record wholesale. A failed run
+        // returned above, before an outcome existed, and left
+        // the record untouched.
+        {
+          CommandContext::EcoSession record;
+          record.ran = true;
+          record.closed = outcome.value().closed;
+          record.max_iterations =
+              static_cast<std::size_t>(max_iterations);
+          record.candidates_tried = outcome.value().candidates_tried;
+          record.candidates_rejected =
+              outcome.value().candidates_rejected;
+          record.candidates_skipped_stale =
+              outcome.value().candidates_skipped_stale;
+          record.candidates_skipped_memory =
+              outcome.value().candidates_skipped_memory;
+          const auto metric =
+              [](const analysis::TimingMetricMap& metrics,
+                 const std::string& name) -> std::optional<double> {
+            const auto it = metrics.find(name);
+            if (it == metrics.end()) return std::nullopt;
+            return it->second.value;
+          };
+          for (std::size_t i = 0; i < outcome.value().final.size();
+               ++i) {
+            const analysis::SceneResult& scene =
+                outcome.value().final[i];
+            const analysis::SceneResult& initial =
+                outcome.value().initial[i];
+            CommandContext::EcoSession::SceneLine line;
+            line.name = scene.scenario.name;
+            line.initial_worst_slack_ns =
+                metric(initial.metrics, "worst_slack_ns");
+            line.initial_worst_hold_slack_ns =
+                metric(initial.metrics, "worst_hold_slack_ns");
+            line.worst_slack_ns =
+                metric(scene.metrics, "worst_slack_ns");
+            line.total_negative_slack_ns =
+                metric(scene.metrics, "total_negative_slack_ns");
+            line.worst_hold_slack_ns =
+                metric(scene.metrics, "worst_hold_slack_ns");
+            line.total_negative_hold_slack_ns =
+                metric(scene.metrics, "total_negative_hold_slack_ns");
+            record.scenes.push_back(std::move(line));
+          }
+          for (const session::ClosureStep& step :
+               outcome.value().steps) {
+            record.steps.push_back(step.label);
+          }
+          record.stop_reason = outcome.value().stop_reason;
+          record.parasitics_note = outcome.value().parasitics_note;
+          ctx.eco = std::move(record);
+        }
         ctx.timing.last_results = outcome.value().final;
         CommandResult result = CommandResult::Ok(payload);
         if (outcome.value().closed) {

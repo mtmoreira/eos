@@ -504,6 +504,44 @@ std::string RenderExtract(const ExtractModel& model) {
 // more. Each half renders its not-run-yet line while its
 // record is empty, so the section never implies a run that
 // has not happened.
+// Formats one ECO scene metric the way the tab's other slack
+// lines format theirs, with the payload's own word for a
+// metric the analysis did not produce.
+std::string FormatEcoMetric(const std::optional<double>& value) {
+  if (!value.has_value()) return "none";
+  return FormatSlack(*value);
+}
+
+std::string RenderEco(const EcoModel& model) {
+  if (!model.Loaded()) return "";
+  std::string out = "\nECO (timing closure):\n";
+  out += std::string("  ") + (model.Closed() ? "closed" : "not closed") +
+         ", iterations " + std::to_string(model.Iterations()) + " of " +
+         std::to_string(model.MaxIterations()) + ", candidates tried " +
+         std::to_string(model.CandidatesTried()) + ", rejected " +
+         std::to_string(model.CandidatesRejected()) + ", skipped stale " +
+         std::to_string(model.CandidatesSkippedStale()) +
+         ", skipped memory " +
+         std::to_string(model.CandidatesSkippedMemory()) + "\n";
+  for (const EcoSceneLine& scene : model.Scenes()) {
+    out += "  " + scene.name + ": worst slack " +
+           FormatEcoMetric(scene.initial_worst_slack_ns) + " ns -> " +
+           FormatEcoMetric(scene.worst_slack_ns) + " ns; worst hold slack " +
+           FormatEcoMetric(scene.initial_worst_hold_slack_ns) + " ns -> " +
+           FormatEcoMetric(scene.worst_hold_slack_ns) + " ns\n";
+  }
+  if (model.Steps().empty()) {
+    out += "  no edits were accepted\n";
+  } else {
+    out += "  accepted edits:\n";
+    for (const std::string& step : model.Steps()) {
+      out += "    " + step + "\n";
+    }
+  }
+  out += "  stop reason: " + model.StopReason() + "\n";
+  return out;
+}
+
 std::string RenderFinish(const FinishModel& finish,
                          const GdsModel& gds) {
   std::string out = "\nFinish:\n";
@@ -772,7 +810,8 @@ void PanelsView::Refresh() {
   results_->setPlainText(QString::fromStdString(RenderResults(panels)));
   timing_->setPlainText(QString::fromStdString(
       RenderTiming(view_.Timing()) +
-      RenderExtract(view_.Extract())));
+      RenderExtract(view_.Extract()) +
+      RenderEco(view_.Eco())));
   clocks_->setPlainText(QString::fromStdString(
       RenderClockNetwork(view_.ClockNetwork()) +
       RenderCts(view_.Cts())));

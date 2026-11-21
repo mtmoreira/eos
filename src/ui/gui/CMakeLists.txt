@@ -11,6 +11,7 @@ add_library(eda_ui_gui STATIC
   src/clock_network.cc
   src/cts.cc
   src/extract.cc
+  src/eco.cc
   src/finish.cc
   src/gds.cc
   src/route.cc

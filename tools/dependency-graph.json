@@ -1790,6 +1790,16 @@
         "tests/unit/ui/registry/registry_test.cc"
       ]
     },
+    "ui.registry.eco.end_to_end": {
+      "modules": [
+        "checkpoint",
+        "gds",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
     "ui.registry.extract.comparison": {
       "modules": [
         "checkpoint",

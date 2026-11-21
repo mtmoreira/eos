@@ -139,6 +139,13 @@ struct EcoRequest {
   std::string label;
   std::string sdc_path;
   std::vector<analysis::SceneAnalysis> scenes;
+  // The session's recorded SDC pin map, handed to the
+  // transaction's own analyses (the before-analysis when no
+  // known_before is supplied, and the after-analysis of every
+  // screened candidate), in PR 146's shape. Empty by default,
+  // which the mapped analysis overload treats byte-identically
+  // to the unmapped one.
+  analysis::SdcPinMap sdc_pin_map;
   std::vector<analysis::SceneResult> known_before;
 };
 
