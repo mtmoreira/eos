@@ -34,13 +34,17 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "eos/db/odb.h"
 #include "eos/db/scenarios.h"
 #include "odb/db.h"
+#include "odb/dbWireCodec.h"
 
 namespace eos::pv {
 namespace {
@@ -336,6 +340,41 @@ std::string RulesText()
   return rules;
 }
 
+// A model file that covers no routed layer: the text is not
+// an extraction rules file at all, so the engine reads no RC
+// model from it and fails the run (RCX-0487, "No RC model
+// read from the extraction model"). Used by the extract-fix
+// A4 test.
+//
+// Measured deviation from the design's A4 wording, recorded
+// here and in the unit's build notes: the design names the
+// runner's zero-coverage failure ("extraction left no RC
+// segments") as the trigger, but that branch is unreachable
+// with a model file in this vendored engine. readRules
+// returns true unconditionally (its only false returns are
+// in solver code), setCorners' remaining failure branches
+// require no model path, addRSeg creates a segment per wire
+// shape unconditionally, and cap nodes are created per path
+// terminal before any table lookup, so a completed extract
+// always leaves both counts nonzero. Every no-coverage
+// model measured behaves one of three ways: it throws
+// RCX-0487 (this text), it segfaults the engine (a
+// shifted-layer file, metals 3 and 4 over LayerCount 4, and
+// a header-only file both crash inside the engine's table
+// setup), or it extracts anyway (DensityRate 0). The throw
+// fires inside makeBlockRCsegs, after the orderWires
+// pre-pass has re-encoded every wire (the pre-pass runs
+// before the model is read), so this input judges exactly
+// the failure-path restoration A4 exists to judge: a failed
+// extract, after the reorder, leaves every stream and flag
+// untouched.
+std::string ZeroCoverageRulesText()
+{
+  return "This is not an extraction rules file.\n"
+         "It defines no layers and no RC tables, so no routed\n"
+         "layer is covered and no RC model is read.\n";
+}
+
 class TempDir {
  public:
   TempDir()
@@ -508,6 +547,248 @@ TEST(Extract, RepeatExtractionRewritesCleanly) {
                          std::istreambuf_iterator<char>());
   EXPECT_GT(text.size(), 0u);
   EXPECT_NE(text.find("n_mid"), std::string::npos);
+}
+
+// ----------------------------------------------------------------
+// Extract-fix unit: wire preservation (design sections 6 and 7).
+// The judged invariant is the raw opcode/data stream of each
+// net's dbWire, compared entry by entry over [0, length()).
+// dbWire::equal is checked alongside (P1), but it masks opcodes
+// and skips terminal data, so the stream comparison is the
+// stronger statement and the one asserted everywhere.
+// ----------------------------------------------------------------
+
+struct NetWireState {
+  bool has_wire = false;
+  std::vector<std::pair<unsigned char, int>> stream;
+  bool disconnected = false;
+  bool wire_ordered = false;
+};
+
+NetWireState SnapshotNetWire(odb::dbNet* net) {
+  NetWireState state;
+  state.disconnected = net->isDisconnected();
+  state.wire_ordered = net->isWireOrdered();
+  odb::dbWire* wire = net->getWire();
+  state.has_wire = wire != nullptr;
+  if (wire != nullptr) {
+    const unsigned int n = wire->length();
+    state.stream.reserve(n);
+    for (unsigned int i = 0; i < n; ++i) {
+      state.stream.emplace_back(wire->getOpcode(static_cast<int>(i)),
+                                wire->getData(static_cast<int>(i)));
+    }
+  }
+  return state;
+}
+
+std::map<std::string, NetWireState> SnapshotBlockWires(
+    odb::dbBlock* block) {
+  std::map<std::string, NetWireState> states;
+  for (odb::dbNet* net : block->getNets()) {
+    states[net->getName()] = SnapshotNetWire(net);
+  }
+  return states;
+}
+
+void ExpectBlockWiresPreserved(
+    odb::dbBlock* block,
+    const std::map<std::string, NetWireState>& before) {
+  std::size_t seen = 0;
+  for (odb::dbNet* net : block->getNets()) {
+    const auto it = before.find(net->getName());
+    ASSERT_NE(it, before.end()) << "net appeared: " << net->getName();
+    ++seen;
+    const NetWireState& want = it->second;
+    EXPECT_EQ(net->isDisconnected(), want.disconnected)
+        << "net " << net->getName();
+    EXPECT_EQ(net->isWireOrdered(), want.wire_ordered)
+        << "net " << net->getName();
+    odb::dbWire* wire = net->getWire();
+    ASSERT_EQ(wire != nullptr, want.has_wire)
+        << "net " << net->getName() << " gained or lost a wire";
+    if (wire != nullptr) {
+      const NetWireState now = SnapshotNetWire(net);
+      EXPECT_EQ(now.stream, want.stream)
+          << "net " << net->getName() << " wire stream changed";
+    }
+  }
+  EXPECT_EQ(seen, before.size());
+}
+
+// Decoded census of one wire (P1): paths, points, and vias as
+// the geometry consumers decode them.
+struct WireCensus {
+  int paths = 0;
+  int points = 0;
+  int vias = 0;
+  bool operator==(const WireCensus& other) const {
+    return paths == other.paths && points == other.points &&
+           vias == other.vias;
+  }
+};
+
+WireCensus CensusWire(odb::dbWire* wire) {
+  WireCensus census;
+  odb::dbWireDecoder decoder;
+  decoder.begin(wire);
+  for (;;) {
+    const odb::dbWireDecoder::OpCode op = decoder.next();
+    if (op == odb::dbWireDecoder::END_DECODE) break;
+    if (op == odb::dbWireDecoder::PATH ||
+        op == odb::dbWireDecoder::JUNCTION ||
+        op == odb::dbWireDecoder::SHORT ||
+        op == odb::dbWireDecoder::VWIRE) {
+      ++census.paths;
+    } else if (op == odb::dbWireDecoder::POINT ||
+               op == odb::dbWireDecoder::POINT_EXT) {
+      ++census.points;
+    } else if (op == odb::dbWireDecoder::VIA ||
+               op == odb::dbWireDecoder::TECH_VIA) {
+      ++census.vias;
+    }
+  }
+  return census;
+}
+
+// P1 + A1: the snapshot mechanism round-trips one routed net's
+// wire exactly (holding-wire snapshot, destroy/create/append
+// restore, dbWire::equal == 0 and an identical decoded census),
+// and a full ExtractParasitics run then leaves every net's
+// stream and flags byte-identical to the pre-run snapshot,
+// gaining and losing no wires. The fixture also gains one
+// terminal-carrying net with no wire, so the absence record is
+// exercised: the reorder may create an empty wire for it, and
+// the restore must remove it again.
+TEST(Extract, ExtractPreservesRoutedWireStreams) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanPlaceRoute(db, dir);
+  odb::dbBlock* block = db.RawDatabase()->getChip()->getBlock();
+
+  // P2 census: no routed net is wire-ordered before any extract
+  // (TritonRoute does not order), printed on every run.
+  int ordered_count = 0;
+  for (odb::dbNet* net : block->getNets()) {
+    if (net->isWireOrdered()) ++ordered_count;
+  }
+  std::cout << "wire_ordered nets before extract: " << ordered_count
+            << " of " << block->getNets().size() << "\n";
+  EXPECT_EQ(ordered_count, 0);
+
+  // An unwired net with a terminal (a top-level pin on its own
+  // net), built directly in the database.
+  odb::dbNet* unwired = odb::dbNet::create(block, "n_extra");
+  ASSERT_NE(unwired, nullptr);
+  ASSERT_NE(odb::dbBTerm::create(unwired, "n_extra"), nullptr);
+  ASSERT_EQ(unwired->getWire(), nullptr);
+
+  // P1: mechanism round-trip on the first routed net.
+  odb::dbNet* probe_net = nullptr;
+  for (odb::dbNet* net : block->getNets()) {
+    if (net->getWire() != nullptr) {
+      probe_net = net;
+      break;
+    }
+  }
+  ASSERT_NE(probe_net, nullptr);
+  const NetWireState probe_before = SnapshotNetWire(probe_net);
+  const WireCensus census_before = CensusWire(probe_net->getWire());
+  odb::dbWire* holding =
+      odb::dbWire::create(block, /*global_wire=*/true);
+  ASSERT_NE(holding, nullptr);
+  holding->append(probe_net->getWire());
+  EXPECT_EQ(holding->equal(probe_net->getWire()), 0u);
+  odb::dbWire::destroy(probe_net->getWire());
+  ASSERT_EQ(probe_net->getWire(), nullptr);
+  odb::dbWire* restored = odb::dbWire::create(probe_net);
+  ASSERT_NE(restored, nullptr);
+  restored->append(holding);
+  EXPECT_EQ(restored->equal(holding), 0u);
+  EXPECT_TRUE(CensusWire(restored) == census_before);
+  EXPECT_EQ(SnapshotNetWire(probe_net).stream, probe_before.stream);
+  odb::dbWire::destroy(holding);
+
+  // A1: snapshot every net, extract, compare everything.
+  const std::map<std::string, NetWireState> before =
+      SnapshotBlockWires(block);
+  std::size_t total_entries = 0;
+  for (const auto& entry : before) total_entries += entry.second.stream.size();
+  std::cout << "snapshotted stream entries: " << total_entries << "\n";
+  const std::string model = dir.Write("fixture.rules", RulesText());
+  ExtractOptions options;
+  options.spef_path = dir.Write("out.spef", "");
+  options.model_path = model;
+  ExtractReport report;
+  const foundation::Status status =
+      ExtractParasitics(db.RawDatabase(), options, &report);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(report.nets_extracted, 3);
+  ExpectBlockWiresPreserved(block, before);
+}
+
+// A4: a model that covers no routed layer fails the run
+// inside the engine, after the reorder has already
+// re-encoded every wire; the failure must leave every
+// stream and flag exactly as snapshotted. (The failure
+// branch is the engine's RCX-0487 throw, not the runner's
+// zero-coverage check: see ZeroCoverageRulesText for the
+// measured deviation from the design's A4 wording.)
+TEST(Extract, FailedExtractionLeavesWireStreamsUntouched) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanPlaceRoute(db, dir);
+  odb::dbBlock* block = db.RawDatabase()->getChip()->getBlock();
+  const std::map<std::string, NetWireState> before =
+      SnapshotBlockWires(block);
+  ExtractOptions options;
+  options.spef_path = dir.Write("out.spef", "");
+  options.model_path = dir.Write("nocoverage.rules",
+                                 ZeroCoverageRulesText());
+  ExtractReport report;
+  const foundation::Status status =
+      ExtractParasitics(db.RawDatabase(), options, &report);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), ErrorCode::kInvalidState);
+  // The failure came from inside the engine run (after the
+  // reorder), not from the runner's fail-fast ladder.
+  EXPECT_NE(status.message().find("engine failure"),
+            std::string::npos)
+      << status.message();
+  ExpectBlockWiresPreserved(block, before);
+}
+
+// A5: a second extraction reproduces the first run's counts
+// (the RepeatExtractionRewritesCleanly assertions) and leaves
+// every stream equal to the pre-first-run snapshot: the second
+// run re-orders the restored originals and restores them again.
+TEST(Extract, RerunLeavesWireStreamsEqualToFirstSnapshot) {
+  TempDir dir;
+  db::OdbDatabase db;
+  LoadDesign(db, dir, true);
+  FloorplanPlaceRoute(db, dir);
+  odb::dbBlock* block = db.RawDatabase()->getChip()->getBlock();
+  const std::map<std::string, NetWireState> before =
+      SnapshotBlockWires(block);
+  const std::string model = dir.Write("fixture.rules", RulesText());
+  ExtractOptions options;
+  options.model_path = model;
+  ExtractReport first;
+  options.spef_path = dir.Write("first.spef", "");
+  ASSERT_TRUE(ExtractParasitics(db.RawDatabase(), options, &first).ok());
+  ExpectBlockWiresPreserved(block, before);
+  ExtractReport second;
+  options.spef_path = dir.Write("second.spef", "");
+  const foundation::Status status =
+      ExtractParasitics(db.RawDatabase(), options, &second);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(second.nets_extracted, 3);
+  EXPECT_EQ(second.rseg_count, first.rseg_count);
+  EXPECT_EQ(second.cap_node_count, first.cap_node_count);
+  EXPECT_GT(second.rseg_count, 0);
+  ExpectBlockWiresPreserved(block, before);
 }
 
 TEST(Extract, NoDatabaseFailsFast) {

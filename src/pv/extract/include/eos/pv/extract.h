@@ -38,6 +38,24 @@
 // counts, and the tests compare estimated STA against extracted
 // STA on the written SPEF.
 //
+// Wire preservation contract (extract-fix unit): the extractor's
+// pre-pass (odb::orderWires) re-encodes every routed net's wire
+// stream in place as a connectivity traversal tree before the RC
+// builder reads it. That reordered encoding is the extractor's
+// input, not a product of the run: the runner snapshots each
+// affected net's wire stream before the extractor runs and
+// restores it after the SPEF is written, so on success the only
+// change the command leaves in the database is the RC annotation
+// (segments and capacitance nodes on the nets), and on failure
+// the wire geometry and the nets' wire-ordered/disconnected
+// flags are left exactly as they were found. Downstream geometry
+// consumers (finish, the GDS writer, the DRC and LVS walks) read
+// the routed wires the router wrote, never the traversal trees.
+// One named exception: a processed net's special wires are not
+// preserved (odb offers no verbatim SWire copy; their
+// destruction inside the ordering pass is pre-existing engine
+// behavior, unchanged by the runner).
+//
 // This header is a stable surface.
 #ifndef EOS_PV_EXTRACT_H_
 #define EOS_PV_EXTRACT_H_
@@ -85,8 +103,11 @@ struct ExtractReport {
 // design), when the SPEF or model path is empty or the model file
 // cannot be read, and when the run leaves no RC segments or writes
 // no SPEF file. Engine logger errors surface as kInvalidState with
-// the engine's message; the database is left as the engine left it
-// on such a failure, which the caller reports rather than hides.
+// the engine's message; on any failure after the engine runs, the
+// database's wire geometry and net flags are restored to their
+// pre-run state (see the wire preservation contract above), while
+// any RC annotation the engine left is reported rather than
+// hidden.
 // A second run on the same database re-extracts and rewrites the
 // SPEF; it never fails on the first run's data.
 Status ExtractParasitics(odb::dbDatabase* db, const ExtractOptions& options,

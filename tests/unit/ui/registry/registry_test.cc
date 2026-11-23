@@ -12518,6 +12518,113 @@ TEST(CoreCommands, ExtractRerunReplacesRecord) {
             std::string::npos);
 }
 
+// Extract-fix A2 (design section 6): the routed clocked demo's
+// wire streams survive extract_parasitics byte for byte, in
+// process. The test snapshots every net's raw opcode/data
+// stream and flags through the session's own database handle
+// after route, runs the bare extract_parasitics call with the
+// mock rules file, and asserts: every stream byte-identical,
+// isWireOrdered and isDisconnected as recorded, no net gained
+// or lost a wire, the SWire census on processed (non-supply)
+// nets zero before and zero after, and the extract payload
+// exactly F7's measured counts. All comparisons are within
+// this one process (route outcomes vary slightly between
+// processes; the F6 phenomenon).
+TEST(CoreCommands, ExtractPreservesRoutedWiresEndToEnd) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildRoutedClockedDemoSession(shell, dir);
+  ASSERT_TRUE(shell.ctx.timing.odb.has_value());
+  odb::dbBlock* block = shell.ctx.timing.odb->RawDatabase()
+                            ->getChip()
+                            ->getBlock();
+  ASSERT_NE(block, nullptr);
+  struct WireState {
+    bool has_wire = false;
+    std::vector<std::pair<unsigned char, int>> stream;
+    bool disconnected = false;
+    bool wire_ordered = false;
+  };
+  std::map<std::string, WireState> before;
+  std::size_t total_entries = 0;
+  int swires_before = 0;
+  for (odb::dbNet* net : block->getNets()) {
+    WireState state;
+    state.disconnected = net->isDisconnected();
+    state.wire_ordered = net->isWireOrdered();
+    odb::dbWire* wire = net->getWire();
+    state.has_wire = wire != nullptr;
+    if (wire != nullptr) {
+      const unsigned int n = wire->length();
+      state.stream.reserve(n);
+      for (unsigned int i = 0; i < n; ++i) {
+        state.stream.emplace_back(
+            wire->getOpcode(static_cast<int>(i)),
+            wire->getData(static_cast<int>(i)));
+      }
+    }
+    total_entries += state.stream.size();
+    if (!net->getSigType().isSupply()) {
+      swires_before += static_cast<int>(net->getSWires().size());
+    }
+    before[net->getName()] = std::move(state);
+  }
+  EXPECT_EQ(before.size(), 185u);
+  std::cout << "snapshotted nets=" << before.size()
+            << " stream entries=" << total_entries
+            << " swires before=" << swires_before << "\n";
+  EXPECT_EQ(swires_before, 0);
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const std::string spef_path = dir.Path("clk_top.spef");
+  const CommandResult result = shell.Run(
+      "extract_parasitics",
+      {spef_path, "-model", mock_dir + "/eos_mock.rules"});
+  ASSERT_TRUE(result.ok) << result.message;
+  // The extract payload is exactly F7's (A3's counts, judged
+  // here in the same run that judges preservation).
+  EXPECT_EQ(RouteHeaderInt(result.payload, "nets"), 185);
+  EXPECT_EQ(RouteHeaderInt(result.payload, "rsegs"), 2486);
+  EXPECT_EQ(RouteHeaderInt(result.payload, "cap_nodes"), 2486);
+  EXPECT_EQ(RouteHeaderInt(result.payload, "cc_segs"), 1786);
+  int swires_after = 0;
+  std::size_t seen = 0;
+  for (odb::dbNet* net : block->getNets()) {
+    const auto it = before.find(net->getName());
+    ASSERT_NE(it, before.end()) << "net appeared: " << net->getName();
+    ++seen;
+    const WireState& want = it->second;
+    EXPECT_EQ(net->isDisconnected(), want.disconnected)
+        << "net " << net->getName();
+    EXPECT_EQ(net->isWireOrdered(), want.wire_ordered)
+        << "net " << net->getName();
+    odb::dbWire* wire = net->getWire();
+    ASSERT_EQ(wire != nullptr, want.has_wire)
+        << "net " << net->getName() << " gained or lost a wire";
+    if (wire != nullptr) {
+      ASSERT_EQ(wire->length(), want.stream.size())
+          << "net " << net->getName();
+      bool identical = true;
+      for (unsigned int i = 0; i < wire->length(); ++i) {
+        if (wire->getOpcode(static_cast<int>(i)) !=
+                want.stream[i].first ||
+            wire->getData(static_cast<int>(i)) !=
+                want.stream[i].second) {
+          identical = false;
+          break;
+        }
+      }
+      EXPECT_TRUE(identical)
+          << "net " << net->getName() << " wire stream changed";
+    }
+    if (!net->getSigType().isSupply()) {
+      swires_after += static_cast<int>(net->getSWires().size());
+    }
+  }
+  EXPECT_EQ(seen, before.size());
+  std::cout << "swires after=" << swires_after << "\n";
+  EXPECT_EQ(swires_after, 0);
+}
+
 // F7 A4: the extract record's func_tt slack equals the route
 // record's func_tt slack exactly as printed (both are the
 // same estimated analysis of the same routed database in
