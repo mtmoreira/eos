@@ -206,6 +206,30 @@ const char kSignoffIntreePayload[] =
     "lvs_residual cell=sky130_fd_sc_hd__a21oi_2 transistors=4 "
     "instances=2 cause=proven path=magic\n";
 
+// F13 LVS engine: the same signoff shape with the LVS
+// verdict from an in-tree lvs_run (lvs_source=intree): the
+// comparison counts in the header, the three per-kind lines,
+// and two located mismatches. The DRC verdicts stay on the
+// external report in this payload.
+const char kSignoffLvsIntreePayload[] =
+    "signoff drc=pass lvs=fail antenna=pass stale=0 "
+    "drc_categories=145 drc_violations=0 "
+    "lvs_source=intree lvs_nets_compared=185 "
+    "lvs_pins_compared=612 lvs_mismatches=2 "
+    "antenna_net_violations=0 antenna_pin_violations=0 "
+    "pv_report=docs/gcd-pv-results.md lvs_report=docs/gcd-lvs-magic.md "
+    "fingerprint=0123456789abcdef\n"
+    "drc family=m1 categories=8 violations=0\n"
+    "drc family=m2 categories=8 violations=0\n"
+    "drc family=via categories=6 violations=0\n"
+    "lvs_check kind=open mismatches=1\n"
+    "lvs_check kind=short mismatches=1\n"
+    "lvs_check kind=floating mismatches=0\n"
+    "lvs_mismatch kind=open net=n_mid pin=u_cnt/_800_:CK "
+    "bbox=100,200,300,400\n"
+    "lvs_mismatch kind=short net=n_a other_net=n_b layer=em2 "
+    "bbox=500,600,500,700\n";
+
 void RegisterSignoffCommand(CommandRegistry& registry,
                             const std::string& payload, bool ok,
                             int* calls = nullptr) {
@@ -4685,6 +4709,9 @@ TEST(SignoffModel, ParsesFullPayload) {
   // No drc_source key: an older payload reads as "report".
   EXPECT_EQ(model.DrcSource(), "report");
   EXPECT_TRUE(model.DrcViolationList().empty());
+  // No lvs_source key either: "report", no in-tree data.
+  EXPECT_EQ(model.LvsSource(), "report");
+  EXPECT_TRUE(model.LvsMismatchList().empty());
   ASSERT_EQ(model.DrcFamilies().size(), 3u);
   EXPECT_EQ(model.DrcFamilies()[0].family, "m1");
   EXPECT_EQ(model.DrcFamilies()[0].categories, 8u);
@@ -4847,7 +4874,103 @@ TEST(SignoffModel, ParsesIntreePayload) {
   EXPECT_EQ(model.DrcViolationList()[0].y2, 7100);
   // LVS still comes from the external report.
   EXPECT_FALSE(model.LvsPass());
+  EXPECT_EQ(model.LvsSource(), "report");
   ASSERT_EQ(model.LvsPaths().size(), 2u);
+}
+
+// F13 LVS engine: an in-tree LVS payload parses its counts
+// and located mismatches.
+TEST(SignoffModel, ParsesIntreeLvsPayload) {
+  SignoffModel model;
+  ASSERT_TRUE(model.LoadPayload(kSignoffLvsIntreePayload));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.LvsSource(), "intree");
+  EXPECT_FALSE(model.LvsPass());
+  EXPECT_EQ(model.LvsNetsCompared(), 185u);
+  EXPECT_EQ(model.LvsPinsCompared(), 612u);
+  EXPECT_EQ(model.LvsMismatches(), 2u);
+  EXPECT_EQ(model.LvsKindCount("open"), 1u);
+  EXPECT_EQ(model.LvsKindCount("short"), 1u);
+  EXPECT_EQ(model.LvsKindCount("floating"), 0u);
+  // The report LVS rows are gone in the in-tree shape.
+  EXPECT_TRUE(model.LvsPaths().empty());
+  EXPECT_TRUE(model.LvsIssues().empty());
+  EXPECT_FALSE(model.HasResidual());
+  ASSERT_EQ(model.LvsMismatchList().size(), 2u);
+  EXPECT_EQ(model.LvsMismatchList()[0].kind, "open");
+  EXPECT_EQ(model.LvsMismatchList()[0].net, "n_mid");
+  EXPECT_EQ(model.LvsMismatchList()[0].pin, "u_cnt/_800_:CK");
+  EXPECT_EQ(model.LvsMismatchList()[0].x1, 100);
+  EXPECT_EQ(model.LvsMismatchList()[0].y1, 200);
+  EXPECT_EQ(model.LvsMismatchList()[0].x2, 300);
+  EXPECT_EQ(model.LvsMismatchList()[0].y2, 400);
+  EXPECT_EQ(model.LvsMismatchList()[1].kind, "short");
+  EXPECT_EQ(model.LvsMismatchList()[1].net, "n_a");
+  EXPECT_EQ(model.LvsMismatchList()[1].other_net, "n_b");
+  EXPECT_EQ(model.LvsMismatchList()[1].layer, "em2");
+  EXPECT_EQ(model.LvsMismatchList()[1].x1, 500);
+  EXPECT_EQ(model.LvsMismatchList()[1].y2, 700);
+  // DRC still comes from the external report.
+  EXPECT_EQ(model.DrcSource(), "report");
+  EXPECT_TRUE(model.DrcPass());
+}
+
+// F13 LVS engine: malformed in-tree LVS payloads are
+// rejected and leave the model unchanged.
+TEST(SignoffModel, RejectsMalformedIntreeLvsPayloads) {
+  const auto replaced = [](std::string text, const std::string& from,
+                           const std::string& to) {
+    const std::size_t at = text.find(from);
+    EXPECT_NE(at, std::string::npos) << "missing " << from;
+    text.replace(at, from.size(), to);
+    return text;
+  };
+  const std::string good = kSignoffLvsIntreePayload;
+  const std::string bad[] = {
+      // The verdict says pass but the total is two.
+      replaced(good, "lvs=fail", "lvs=pass"),
+      // The kind counts do not sum to the total.
+      replaced(good, "lvs_check kind=open mismatches=1",
+               "lvs_check kind=open mismatches=2"),
+      // A mismatch line is missing for the short count.
+      replaced(good,
+               "lvs_mismatch kind=short net=n_a other_net=n_b "
+               "layer=em2 bbox=500,600,500,700\n",
+               ""),
+      // A kind line is missing.
+      replaced(good, "lvs_check kind=floating mismatches=0\n", ""),
+      // A duplicate kind line.
+      good + "lvs_check kind=open mismatches=1\n",
+      // A duplicate mismatch line.
+      good +
+          "lvs_mismatch kind=open net=n_mid pin=u_cnt/_800_:CK "
+          "bbox=100,200,300,400\n",
+      // Check and mismatch lines with a report source.
+      replaced(good, "lvs_source=intree lvs_nets_compared=185 "
+                     "lvs_pins_compared=612 lvs_mismatches=2",
+               "lvs_source=report"),
+      // Report path rows with an in-tree source.
+      good +
+          "lvs path=klayout classes_compared=68 "
+          "classes_equivalent=67 verdict=fail\n",
+      // An unknown mismatch kind.
+      replaced(good, "lvs_mismatch kind=open", "lvs_mismatch kind=via"),
+      // An open without its pin.
+      replaced(good, " pin=u_cnt/_800_:CK", ""),
+      // In-tree counts with no lvs_source key at all.
+      replaced(good, "lvs_source=intree ", ""),
+  };
+  for (const std::string& payload : bad) {
+    SignoffModel model;
+    EXPECT_FALSE(model.LoadPayload(payload)) << payload;
+    EXPECT_FALSE(model.Loaded());
+  }
+  // A malformed reload leaves the previous signoff untouched.
+  SignoffModel model;
+  ASSERT_TRUE(model.LoadPayload(kSignoffPayload));
+  EXPECT_FALSE(model.LoadPayload(bad[0]));
+  EXPECT_TRUE(model.Loaded());
+  EXPECT_EQ(model.LvsSource(), "report");
 }
 
 // F13 DRC engine: malformed in-tree payloads are rejected
@@ -7214,6 +7337,39 @@ TEST(PanelsView, SignoffTabAppendsFinishSection) {
                       "structures, 3 instances, library EOSMOCK"),
             std::string::npos);
   EXPECT_EQ(text.find("(no finish run yet"), std::string::npos);
+}
+
+// F13 LVS engine: the Signoff tab renders the in-tree
+// connectivity section (heading, verdict, counts, per-kind
+// counts, mismatch rows) when the signoff record carries an
+// lvs_run record.
+TEST(PanelsView, SignoffTabShowsIntreeLvsSection) {
+  OutlineTestApp();
+  CommandRegistry registry;
+  RegisterSignoffCommand(registry, kSignoffLvsIntreePayload, true);
+  CommandContext context;
+  SessionView view(registry, context);
+  view.RefreshSignoff();
+  PanelsView panels(view);
+  auto* signoff = qobject_cast<QPlainTextEdit*>(panels.widget(7));
+  ASSERT_NE(signoff, nullptr);
+  const std::string text = signoff->toPlainText().toStdString();
+  EXPECT_NE(text.find("LVS (connectivity, in-tree): FAIL, 2 "
+                      "mismatches, 185 nets compared, 612 pins "
+                      "compared (live-database)"),
+            std::string::npos);
+  EXPECT_NE(text.find("  open: 1 mismatches"), std::string::npos);
+  EXPECT_NE(text.find("  short: 1 mismatches"), std::string::npos);
+  EXPECT_NE(text.find("  floating: 0 mismatches"),
+            std::string::npos);
+  EXPECT_NE(text.find("  open net=n_mid pin=u_cnt/_800_:CK "
+                      "bbox 100,200,300,400"),
+            std::string::npos);
+  EXPECT_NE(text.find("  short net=n_a other_net=n_b layer=em2 "
+                      "bbox 500,600,500,700"),
+            std::string::npos);
+  // The report shape's LVS rows are not rendered.
+  EXPECT_EQ(text.find("classes equivalent"), std::string::npos);
 }
 
 TEST(PanelsView, TimingTabAppendsExtractSection) {

@@ -159,22 +159,60 @@ bool SignoffModel::LoadPayload(const std::string& payload) {
                 "fingerprint"})) {
     return false;
   }
-  // drc_source is optional (older payloads omit it): when
-  // present it must be the only extra key, "intree" or
-  // "report". An omitted key reads as "report".
-  if (header.size() != 11 && header.size() != 12) {
+  // drc_source and lvs_source are optional (older payloads
+  // omit them): each, when present, must be "intree" or
+  // "report", and an omitted key reads as "report". An
+  // in-tree LVS source adds exactly three count keys
+  // (lvs_nets_compared, lvs_pins_compared, lvs_mismatches);
+  // a report LVS source carries none of them.
+  if (header.size() < 11 || header.size() > 15) {
     return false;
   }
   std::string drc_source = "report";
-  if (header.size() == 12) {
-    if (header.find("drc_source") == header.end()) return false;
+  if (header.find("drc_source") != header.end()) {
     drc_source = header["drc_source"];
     if (drc_source != "intree" && drc_source != "report") {
       return false;
     }
   }
+  std::string lvs_source = "report";
+  if (header.find("lvs_source") != header.end()) {
+    lvs_source = header["lvs_source"];
+    if (lvs_source != "intree" && lvs_source != "report") {
+      return false;
+    }
+  }
+  const bool has_lvs_counts =
+      header.find("lvs_nets_compared") != header.end() ||
+      header.find("lvs_pins_compared") != header.end() ||
+      header.find("lvs_mismatches") != header.end();
+  if (lvs_source == "intree") {
+    if (!HasKeys(header, {"lvs_nets_compared", "lvs_pins_compared",
+                          "lvs_mismatches"})) {
+      return false;
+    }
+  } else if (has_lvs_counts) {
+    return false;
+  }
+  const std::size_t expected_header_size =
+      11 + (header.count("drc_source") != 0 ? 1 : 0) +
+      (header.count("lvs_source") != 0 ? 1 : 0) +
+      (lvs_source == "intree" ? 3 : 0);
+  if (header.size() != expected_header_size) {
+    return false;
+  }
   SignoffModel next;
   next.drc_source_ = drc_source;
+  next.lvs_source_ = lvs_source;
+  if (lvs_source == "intree" &&
+      (!ParseCount(header["lvs_nets_compared"],
+                   &next.lvs_nets_compared_) ||
+       !ParseCount(header["lvs_pins_compared"],
+                   &next.lvs_pins_compared_) ||
+       !ParseCount(header["lvs_mismatches"],
+                   &next.lvs_mismatches_))) {
+    return false;
+  }
   if (!ParseVerdict(header["drc"], &next.drc_pass_) ||
       !ParseVerdict(header["lvs"], &next.lvs_pass_) ||
       !ParseVerdict(header["antenna"], &next.antenna_pass_) ||
@@ -205,6 +243,7 @@ bool SignoffModel::LoadPayload(const std::string& payload) {
   bool saw_klayout = false;
   bool saw_magic = false;
   bool saw_residual = false;
+  std::set<std::string> lvs_check_kinds;
   while (std::getline(in, line)) {
     if (line.empty()) return false;
     const std::size_t tag_end = line.find(' ');
@@ -265,7 +304,80 @@ bool SignoffModel::LoadPayload(const std::string& payload) {
         }
       }
       next.drc_violation_list_.push_back(std::move(violation));
+    } else if (kind == "lvs_check") {
+      // An in-tree per-kind count line: exactly one per kind,
+      // in-tree LVS only.
+      if (next.lvs_source_ != "intree") return false;
+      if (!OnlyKeys(fields, {"kind", "mismatches"})) return false;
+      if (!lvs_check_kinds.insert(fields["kind"]).second) {
+        return false;
+      }
+      std::size_t* slot = nullptr;
+      if (fields["kind"] == "open") {
+        slot = &next.lvs_open_;
+      } else if (fields["kind"] == "short") {
+        slot = &next.lvs_short_;
+      } else if (fields["kind"] == "floating") {
+        slot = &next.lvs_floating_;
+      } else {
+        return false;
+      }
+      if (!ParseCount(fields["mismatches"], slot)) return false;
+    } else if (kind == "lvs_mismatch") {
+      // A located mismatch, in-tree LVS only: the keys depend
+      // on the kind (pin for an open, other_net and layer for
+      // a short, layer for a floating). Duplicate mismatch
+      // lines are malformed.
+      if (next.lvs_source_ != "intree") return false;
+      SignoffLvsMismatch mismatch;
+      if (fields.count("kind") == 0 || fields.count("net") == 0 ||
+          fields.count("bbox") == 0) {
+        return false;
+      }
+      mismatch.kind = fields["kind"];
+      mismatch.net = fields["net"];
+      if (mismatch.kind == "open") {
+        if (!OnlyKeys(fields, {"kind", "net", "pin", "bbox"})) {
+          return false;
+        }
+        mismatch.pin = fields["pin"];
+        if (mismatch.pin.empty()) return false;
+      } else if (mismatch.kind == "short") {
+        if (!OnlyKeys(fields,
+                      {"kind", "net", "other_net", "layer", "bbox"})) {
+          return false;
+        }
+        mismatch.other_net = fields["other_net"];
+        mismatch.layer = fields["layer"];
+        if (mismatch.other_net.empty() || mismatch.layer.empty()) {
+          return false;
+        }
+      } else if (mismatch.kind == "floating") {
+        if (!OnlyKeys(fields, {"kind", "net", "layer", "bbox"})) {
+          return false;
+        }
+        mismatch.layer = fields["layer"];
+        if (mismatch.layer.empty()) return false;
+      } else {
+        return false;
+      }
+      if (mismatch.net.empty() ||
+          !ParseBbox(fields["bbox"], &mismatch.x1, &mismatch.y1,
+                     &mismatch.x2, &mismatch.y2)) {
+        return false;
+      }
+      for (const SignoffLvsMismatch& seen : next.lvs_mismatch_list_) {
+        if (seen.kind == mismatch.kind && seen.net == mismatch.net &&
+            seen.other_net == mismatch.other_net &&
+            seen.pin == mismatch.pin && seen.layer == mismatch.layer &&
+            seen.x1 == mismatch.x1 && seen.y1 == mismatch.y1 &&
+            seen.x2 == mismatch.x2 && seen.y2 == mismatch.y2) {
+          return false;
+        }
+      }
+      next.lvs_mismatch_list_.push_back(std::move(mismatch));
     } else if (kind == "lvs" && fields.count("classes_compared") != 0) {
+      if (next.lvs_source_ != "report") return false;
       // A path row: klayout first, then magic, exactly one each.
       // The klayout row carries no finger totals; the magic row
       // carries both.
@@ -310,6 +422,7 @@ bool SignoffModel::LoadPayload(const std::string& payload) {
       }
       next.lvs_paths_.push_back(std::move(lvs_path));
     } else if (kind == "lvs" && fields.count("issue") != 0) {
+      if (next.lvs_source_ != "report") return false;
       if (!OnlyKeys(fields, {"issue", "cell", "kind", "path"})) {
         return false;
       }
@@ -331,6 +444,7 @@ bool SignoffModel::LoadPayload(const std::string& payload) {
       issue.path = fields["path"];
       next.lvs_issues_.push_back(std::move(issue));
     } else if (kind == "lvs_residual") {
+      if (next.lvs_source_ != "report") return false;
       if (saw_residual) return false;
       if (!OnlyKeys(fields, {"cell", "transistors", "instances",
                              "cause", "path"})) {
@@ -355,7 +469,7 @@ bool SignoffModel::LoadPayload(const std::string& payload) {
       return false;
     }
   }
-  if (next.drc_families_.empty() || !saw_klayout || !saw_magic ||
+  if (next.drc_families_.empty() ||
       family_categories > next.drc_categories_ ||
       family_violations != next.drc_violations_) {
     return false;
@@ -376,11 +490,36 @@ bool SignoffModel::LoadPayload(const std::string& payload) {
       if (count != family.violations) return false;
     }
   }
-  bool paths_pass = true;
-  for (const SignoffLvsPath& lvs_path : next.lvs_paths_) {
-    if (!lvs_path.pass) paths_pass = false;
+  if (next.lvs_source_ == "intree") {
+    // All three kind lines must be present, the kind counts
+    // must sum to the header mismatch total, the mismatch
+    // lines per kind must match the kind counts, and the
+    // header verdict must agree with the total.
+    if (lvs_check_kinds.size() != 3 ||
+        next.lvs_open_ + next.lvs_short_ + next.lvs_floating_ !=
+            next.lvs_mismatches_ ||
+        next.lvs_mismatch_list_.size() != next.lvs_mismatches_ ||
+        next.lvs_pass_ != (next.lvs_mismatches_ == 0)) {
+      return false;
+    }
+    std::map<std::string, std::size_t> per_kind;
+    for (const SignoffLvsMismatch& mismatch :
+         next.lvs_mismatch_list_) {
+      ++per_kind[mismatch.kind];
+    }
+    if (per_kind["open"] != next.lvs_open_ ||
+        per_kind["short"] != next.lvs_short_ ||
+        per_kind["floating"] != next.lvs_floating_) {
+      return false;
+    }
+  } else {
+    if (!saw_klayout || !saw_magic) return false;
+    bool paths_pass = true;
+    for (const SignoffLvsPath& lvs_path : next.lvs_paths_) {
+      if (!lvs_path.pass) paths_pass = false;
+    }
+    if (next.lvs_pass_ != paths_pass) return false;
   }
-  if (next.lvs_pass_ != paths_pass) return false;
   next.loaded_ = true;
   *this = std::move(next);
   return true;
@@ -402,6 +541,14 @@ void SignoffModel::Clear() {
   drc_source_ = "report";
   drc_families_.clear();
   drc_violation_list_.clear();
+  lvs_source_ = "report";
+  lvs_nets_compared_ = 0;
+  lvs_pins_compared_ = 0;
+  lvs_mismatches_ = 0;
+  lvs_open_ = 0;
+  lvs_short_ = 0;
+  lvs_floating_ = 0;
+  lvs_mismatch_list_.clear();
   lvs_paths_.clear();
   lvs_issues_.clear();
   residual_.reset();

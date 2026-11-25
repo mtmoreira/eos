@@ -45,6 +45,7 @@
 #include "eos/foundation/errors.h"
 #include "eos/foundation/ids.h"
 #include "eos/pv/drc.h"
+#include "eos/pv/lvs.h"
 #include "eos/session/ledger.h"
 #include "eos/session/project.h"
 #include "eos/session/reports.h"
@@ -653,6 +654,23 @@ struct CommandContext {
     std::string fingerprint;
   };
   DrcSession drc;
+
+  // LVS session state (full-flow GUI unit F13, connectivity
+  // LVS engine): the record of the most recent successful
+  // eos::lvs_run, plus the design fingerprint it was run
+  // against, so signoff_summary can report the in-tree
+  // verdict and flag it stale when the design changes. The
+  // DrcSession semantics word for word: interface session
+  // state, not project state; only a successful lvs_run
+  // updates it; a failed run leaves the previous record
+  // untouched; cleared when the design closes, and a
+  // checkpoint restore does not bring it back.
+  struct LvsSession {
+    bool has_record = false;
+    pv::LvsRecord record;
+    std::string fingerprint;
+  };
+  LvsSession lvs;
 
   // Wire-RC overrides (R1 step 2, Q6): per-layer (r_ohm_per_m,
   // c_f_per_m) values recorded by eos::set_wire_rc, consulted by

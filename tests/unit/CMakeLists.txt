@@ -201,6 +201,11 @@ target_link_libraries(eda_pv_drc_unit_test
   PRIVATE eda_pv_drc eda_db_odb GTest::gtest GTest::gtest_main)
 add_test(NAME pv.drc COMMAND eda_pv_drc_unit_test)
 
+add_executable(eda_pv_lvs_unit_test pv/lvs/lvs_test.cc)
+target_link_libraries(eda_pv_lvs_unit_test
+  PRIVATE eda_pv_lvs eda_db_odb GTest::gtest GTest::gtest_main)
+add_test(NAME pv.lvs COMMAND eda_pv_lvs_unit_test)
+
 add_executable(eda_pv_signoff_unit_test pv/signoff/signoff_test.cc)
 target_link_libraries(eda_pv_signoff_unit_test
   PRIVATE eda_pv_signoff GTest::gtest GTest::gtest_main)
@@ -334,7 +339,7 @@ target_compile_definitions(eda_ui_registry_unit_test
     EOS_DEMO_SYNTH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/synth"
     EOS_CLOCKED_DEMO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/clocked")
 add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test
-  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone:CoreCommands.ExtractRunsClockedDemoEndToEnd:CoreCommands.ExtractSummaryReportsRecordedRun:CoreCommands.ExtractRerunReplacesRecord:CoreCommands.ExtractRunTimingAgreesWithExtractSlack:CoreCommands.ExtractedStaComparesAgainstEstimated:CoreCommands.ExtractPreservesRoutedWiresEndToEnd:CoreCommands.FinishRunsClockedDemoEndToEnd:CoreCommands.FinishSummaryReportsRecordedRuns:CoreCommands.FinishRerunReplacesRecords:CoreCommands.FinishLeavesEarlierRecordsAlone:CoreCommands.GdsRoundTripMatchesExportRecord:CoreCommands.RestoreClearsStageRecords:CoreCommands.EcoRunsClockedDemoEndToEnd)
+  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone:CoreCommands.ExtractRunsClockedDemoEndToEnd:CoreCommands.ExtractSummaryReportsRecordedRun:CoreCommands.ExtractRerunReplacesRecord:CoreCommands.ExtractRunTimingAgreesWithExtractSlack:CoreCommands.ExtractedStaComparesAgainstEstimated:CoreCommands.ExtractPreservesRoutedWiresEndToEnd:CoreCommands.FinishRunsClockedDemoEndToEnd:CoreCommands.FinishSummaryReportsRecordedRuns:CoreCommands.FinishRerunReplacesRecords:CoreCommands.FinishLeavesEarlierRecordsAlone:CoreCommands.GdsRoundTripMatchesExportRecord:CoreCommands.RestoreClearsStageRecords:CoreCommands.EcoRunsClockedDemoEndToEnd:CoreCommands.LvsRunsClockedDemoEndToEnd)
 # F6 (design section 14): the six clocked route tests each run in
 # their own process. The vendored Yosys kernel orders cells by
 # IdString pool index, a process-global assigned in first-internment
@@ -431,6 +436,14 @@ add_test(NAME ui.registry.restore.records
 add_test(NAME ui.registry.eco.end_to_end
   COMMAND eda_ui_registry_unit_test
     --gtest_filter=CoreCommands.EcoRunsClockedDemoEndToEnd)
+# F13 (design section 10): the clocked LVS test runs in its
+# own process, for the same reason as the F6/F7/F8 entries
+# above: it runs the full synth-to-finish chain and asserts
+# fresh-process-exact counts. The test stays in this binary;
+# only its ctest entry is separate.
+add_test(NAME ui.registry.lvs.end_to_end
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.LvsRunsClockedDemoEndToEnd)
 
 if(TCL_FOUND)
   add_executable(eda_ui_tcl_unit_test ui/tcl/tcl_shell_test.cc)

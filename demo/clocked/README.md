@@ -589,6 +589,53 @@ the per-scene slacks before and after, the accepted
 edits, the stop reason); the ECO stage button enables and
 the stepper's ECO step reads Done.
 
+### LVS on this design (F13, measured)
+
+The LVS step sits last in the script, after `gds_summary`:
+`lvs_run`, with no arguments. It runs on the finished
+database, comparing the logical topology (each net's pins)
+against geometric connectivity over the routed shapes, and
+reports per-kind counts with each mismatch located.
+
+Measured outcome: the finished design compares clean.
+`lvs_run` returns `lvs source=live-database
+nets_compared=185 pins_compared=572 mismatches=0
+single_pin_nets=0 special_nets_skipped=0`, with
+`lvs_check kind=open mismatches=0`, `kind=short
+mismatches=0`, `kind=floating mismatches=0`.
+`nets_compared` cross-checks against the route record's
+185 routed nets. A clean design reports zero per kind,
+never a bare PASS.
+
+Two things make this verdict possible, both measured
+before this unit landed. First, the extract-fix unit:
+before it, `extract_parasitics` re-encoded the routed
+wires as traversal trees in place, and the same command
+on the finished database reported 556 mismatches (open
+334, short 95, floating 127) that measured the extract
+encoding, not routed connectivity. The extract runner
+now restores the routed wires after the SPEF is written
+(see the wire-preservation note in the extraction section
+above), so LVS reads TritonRoute's geometry. Second,
+the pin-contact amendment: LEF pin rectangles are access
+geometry, not poured metal, so pin shapes union on area
+overlap only; an edge abutment counts only between wire
+shapes, and between pin and wire shapes. Without it the
+routed design reported 2 shorts from adjacent instances'
+pin rects abutting edge to edge. This run routed with
+520 guides and 987 vias, the local canonical outcome;
+the route outcome varies slightly between processes, but
+the LVS verdict is judged within the session it runs in,
+so the clean verdict does not depend on which valid
+routing the process produced.
+
+In the GUI, a console `lvs_run` updates the Signoff
+tab's LVS section, and `signoff_summary` then consumes
+the in-tree record (`lvs_source=intree`) instead of the
+report file. LVS has no stage button and no stepper
+step: it is a signoff check on the finished database,
+like DRC.
+
 ### The clock table in a read_sdc-only session (F2 caveat, fixed)
 
 Before the clock-network unit, this was the F2 caveat:

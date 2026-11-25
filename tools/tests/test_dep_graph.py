@@ -328,7 +328,9 @@ def test_real_repo_check_passes_and_rules_hold():
     # The extract-fix unit adds
     # ui.registry.extract.wire_preservation, the 91st ctest
     # entry.
-    assert len(all_tests) == 91
+    # F13 adds pv.lvs and ui.registry.lvs.end_to_end, the 92nd
+    # and 93rd ctest entries.
+    assert len(all_tests) == 93
     # Foundation rule on the real repo: a change to an L0 module
     # selects the whole suite.
     result = run_script(REPO, "select", "--graph", str(graph_path),
