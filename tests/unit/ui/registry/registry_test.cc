@@ -12518,6 +12518,163 @@ TEST(CoreCommands, ExtractRerunReplacesRecord) {
             std::string::npos);
 }
 
+// Extract-fix A2 (design section 6): the routed clocked demo's
+// wire streams survive extract_parasitics byte for byte, in
+// process. The test snapshots every net's raw opcode/data
+// stream and flags through the session's own database handle
+// after route, runs the bare extract_parasitics call with the
+// mock rules file, and asserts: every stream byte-identical,
+// isWireOrdered and isDisconnected as recorded, no net gained
+// or lost a wire, and the SWire census on processed
+// (non-supply) nets zero before and zero after. The extract
+// payload's counts are judged within this session: nets is
+// the routed net count (185, the route record's), cap_nodes
+// equals rsegs (the extractor creates one cap node per
+// segment), both segment counts are above zero, and a second
+// extract_parasitics run in the same session reproduces the
+// first run's counts exactly, with the streams still
+// byte-identical after it. The segment counts are NOT pinned
+// to F7's absolute values: they follow the routed geometry,
+// and route outcomes vary between processes (the F6
+// phenomenon). PR 151's first CI run routed differently
+// (rsegs=2632, cap_nodes=2632, cc_segs=1946 there against
+// 2486/2486/1786 in every local run) and refuted the
+// absolute pin; design section 15 records the correction.
+// F7's absolute numbers stand where they were measured:
+// the standalone demo runs behind A3 and the demo README.
+TEST(CoreCommands, ExtractPreservesRoutedWiresEndToEnd) {
+  TimingTempDir dir;
+  Shell shell;
+  BuildRoutedClockedDemoSession(shell, dir);
+  ASSERT_TRUE(shell.ctx.timing.odb.has_value());
+  odb::dbBlock* block = shell.ctx.timing.odb->RawDatabase()
+                            ->getChip()
+                            ->getBlock();
+  ASSERT_NE(block, nullptr);
+  struct WireState {
+    bool has_wire = false;
+    std::vector<std::pair<unsigned char, int>> stream;
+    bool disconnected = false;
+    bool wire_ordered = false;
+  };
+  std::map<std::string, WireState> before;
+  std::size_t total_entries = 0;
+  int swires_before = 0;
+  for (odb::dbNet* net : block->getNets()) {
+    WireState state;
+    state.disconnected = net->isDisconnected();
+    state.wire_ordered = net->isWireOrdered();
+    odb::dbWire* wire = net->getWire();
+    state.has_wire = wire != nullptr;
+    if (wire != nullptr) {
+      const unsigned int n = wire->length();
+      state.stream.reserve(n);
+      for (unsigned int i = 0; i < n; ++i) {
+        state.stream.emplace_back(
+            wire->getOpcode(static_cast<int>(i)),
+            wire->getData(static_cast<int>(i)));
+      }
+    }
+    total_entries += state.stream.size();
+    if (!net->getSigType().isSupply()) {
+      swires_before += static_cast<int>(net->getSWires().size());
+    }
+    before[net->getName()] = std::move(state);
+  }
+  EXPECT_EQ(before.size(), 185u);
+  std::cout << "snapshotted nets=" << before.size()
+            << " stream entries=" << total_entries
+            << " swires before=" << swires_before << "\n";
+  EXPECT_EQ(swires_before, 0);
+  // The post-run state check, applied after each extraction
+  // run below: every stream byte-identical to the snapshot,
+  // flags as recorded, no net gained or lost a wire. It
+  // refreshes swires_after with the SWire census on
+  // processed nets after the run.
+  int swires_after = 0;
+  auto check_preserved = [&]() {
+    swires_after = 0;
+    std::size_t seen = 0;
+    for (odb::dbNet* net : block->getNets()) {
+      const auto it = before.find(net->getName());
+      ASSERT_NE(it, before.end()) << "net appeared: " << net->getName();
+      ++seen;
+      const WireState& want = it->second;
+      EXPECT_EQ(net->isDisconnected(), want.disconnected)
+          << "net " << net->getName();
+      EXPECT_EQ(net->isWireOrdered(), want.wire_ordered)
+          << "net " << net->getName();
+      odb::dbWire* wire = net->getWire();
+      ASSERT_EQ(wire != nullptr, want.has_wire)
+          << "net " << net->getName() << " gained or lost a wire";
+      if (wire != nullptr) {
+        ASSERT_EQ(wire->length(), want.stream.size())
+            << "net " << net->getName();
+        bool identical = true;
+        for (unsigned int i = 0; i < wire->length(); ++i) {
+          if (wire->getOpcode(static_cast<int>(i)) !=
+                  want.stream[i].first ||
+              wire->getData(static_cast<int>(i)) !=
+                  want.stream[i].second) {
+            identical = false;
+            break;
+          }
+        }
+        EXPECT_TRUE(identical)
+            << "net " << net->getName() << " wire stream changed";
+      }
+      if (!net->getSigType().isSupply()) {
+        swires_after += static_cast<int>(net->getSWires().size());
+      }
+    }
+    EXPECT_EQ(seen, before.size());
+  };
+  const std::string mock_dir = EOS_MOCK_PDK_DIR;
+  const std::string spef_path = dir.Path("clk_top.spef");
+  const CommandResult result = shell.Run(
+      "extract_parasitics",
+      {spef_path, "-model", mock_dir + "/eos_mock.rules"});
+  ASSERT_TRUE(result.ok) << result.message;
+  // The payload counts, judged within this session (see the
+  // header comment): nets is the routed net count, cap_nodes
+  // equals rsegs (one cap node per segment), and both
+  // segment counts are above zero, so the extraction plainly
+  // ran on this session's routed geometry. The absolute
+  // counts follow that geometry; they are pinned only
+  // against this session's own rerun, below.
+  const long long nets = RouteHeaderInt(result.payload, "nets");
+  const long long rsegs = RouteHeaderInt(result.payload, "rsegs");
+  const long long cap_nodes =
+      RouteHeaderInt(result.payload, "cap_nodes");
+  const long long cc_segs = RouteHeaderInt(result.payload, "cc_segs");
+  std::cout << "extract counts nets=" << nets << " rsegs=" << rsegs
+            << " cap_nodes=" << cap_nodes << " cc_segs=" << cc_segs
+            << "\n";
+  EXPECT_EQ(nets, 185);
+  EXPECT_EQ(cap_nodes, rsegs);
+  EXPECT_GT(rsegs, 0);
+  EXPECT_GT(cc_segs, 0);
+  check_preserved();
+  std::cout << "swires after=" << swires_after << "\n";
+  EXPECT_EQ(swires_after, 0);
+  // A second extraction in the same session reproduces the
+  // first run's counts exactly (the rerun posture, judged
+  // here on the demo session), and the routed streams
+  // survive it byte for byte as well.
+  const std::string second_path = dir.Path("clk_top_second.spef");
+  const CommandResult second = shell.Run(
+      "extract_parasitics",
+      {second_path, "-model", mock_dir + "/eos_mock.rules"});
+  ASSERT_TRUE(second.ok) << second.message;
+  EXPECT_EQ(RouteHeaderInt(second.payload, "nets"), nets);
+  EXPECT_EQ(RouteHeaderInt(second.payload, "rsegs"), rsegs);
+  EXPECT_EQ(RouteHeaderInt(second.payload, "cap_nodes"), cap_nodes);
+  EXPECT_EQ(RouteHeaderInt(second.payload, "cc_segs"), cc_segs);
+  check_preserved();
+  std::cout << "swires after rerun=" << swires_after << "\n";
+  EXPECT_EQ(swires_after, 0);
+}
+
 // F7 A4: the extract record's func_tt slack equals the route
 // record's func_tt slack exactly as printed (both are the
 // same estimated analysis of the same routed database in

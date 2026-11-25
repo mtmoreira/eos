@@ -334,7 +334,7 @@ target_compile_definitions(eda_ui_registry_unit_test
     EOS_DEMO_SYNTH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/synth"
     EOS_CLOCKED_DEMO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../demo/clocked")
 add_test(NAME ui.registry COMMAND eda_ui_registry_unit_test
-  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone:CoreCommands.ExtractRunsClockedDemoEndToEnd:CoreCommands.ExtractSummaryReportsRecordedRun:CoreCommands.ExtractRerunReplacesRecord:CoreCommands.ExtractRunTimingAgreesWithExtractSlack:CoreCommands.ExtractedStaComparesAgainstEstimated:CoreCommands.FinishRunsClockedDemoEndToEnd:CoreCommands.FinishSummaryReportsRecordedRuns:CoreCommands.FinishRerunReplacesRecords:CoreCommands.FinishLeavesEarlierRecordsAlone:CoreCommands.GdsRoundTripMatchesExportRecord:CoreCommands.RestoreClearsStageRecords:CoreCommands.EcoRunsClockedDemoEndToEnd)
+  --gtest_filter=-CoreCommands.RouteRunsClockedDemoEndToEnd:CoreCommands.RouteSummaryReportsRecordedRun:CoreCommands.RouteRerunReplacesRecord:CoreCommands.RouteLeavesClockViewUnchanged:CoreCommands.RouteRunTimingAgreesWithRouteSlack:CoreCommands.RouteLeavesPlaceAndCtsRecordsAlone:CoreCommands.ExtractRunsClockedDemoEndToEnd:CoreCommands.ExtractSummaryReportsRecordedRun:CoreCommands.ExtractRerunReplacesRecord:CoreCommands.ExtractRunTimingAgreesWithExtractSlack:CoreCommands.ExtractedStaComparesAgainstEstimated:CoreCommands.ExtractPreservesRoutedWiresEndToEnd:CoreCommands.FinishRunsClockedDemoEndToEnd:CoreCommands.FinishSummaryReportsRecordedRuns:CoreCommands.FinishRerunReplacesRecords:CoreCommands.FinishLeavesEarlierRecordsAlone:CoreCommands.GdsRoundTripMatchesExportRecord:CoreCommands.RestoreClearsStageRecords:CoreCommands.EcoRunsClockedDemoEndToEnd)
 # F6 (design section 14): the six clocked route tests each run in
 # their own process. The vendored Yosys kernel orders cells by
 # IdString pool index, a process-global assigned in first-internment
@@ -384,6 +384,16 @@ add_test(NAME ui.registry.extract.timing_agreement
 add_test(NAME ui.registry.extract.comparison
   COMMAND eda_ui_registry_unit_test
     --gtest_filter=CoreCommands.ExtractedStaComparesAgainstEstimated)
+# Extract-fix (design section 7): the wire-preservation test
+# runs the full synth-to-route chain and asserts in-process
+# byte-identical wire streams plus the extract payload's
+# within-session count consistencies (design section 15:
+# the segment counts follow the routed geometry and are
+# not pinned to absolute values), so it gets its own
+# process like the other clocked entries.
+add_test(NAME ui.registry.extract.wire_preservation
+  COMMAND eda_ui_registry_unit_test
+    --gtest_filter=CoreCommands.ExtractPreservesRoutedWiresEndToEnd)
 # F8 (design section 7): the five clocked finish tests each
 # run in their own process, for the same reason as the F6
 # route and F7 extract entries above: they run the full

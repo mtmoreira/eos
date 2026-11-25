@@ -459,6 +459,20 @@ Measured payloads:
   instance, and pin name the writer emitted; the run
   log carries zero SPEF not-found warnings.
 
+Wire preservation (extract-fix unit): the extractor's
+pre-pass re-encodes every routed net's wire stream in
+place as a connectivity traversal tree before building
+the RC model. The extract runner now snapshots each
+affected net's wire stream before the extractor runs
+and restores it after the SPEF is written, so the
+session database keeps the routed wires the router
+wrote and the stages after extraction (finish, GDS
+export, any later DRC or LVS run) read routed geometry.
+Every number in this section is unchanged by the
+preservation: the extract payload and the extracted
+slacks above are F7's values exactly, and the written
+SPEF is byte-identical to the pre-fix file.
+
 In the GUI, the Extract stage button runs the same
 command and lands on the Timing tab, whose Extraction
 section renders the record and, once the extracted run
@@ -480,25 +494,39 @@ tiles any row gap the placed design leaves.
   total at one filler per site.
 - `finish_summary`: the same four values under the
   `finish` lead word, read from the finish record.
-- `write_gds clk_top.gds`: `size=233416 instances=1259
+- `write_gds clk_top.gds`: `size=280972 instances=1259
   structures=21`. The instance count is the 174 design
   instances (168 placed plus 6 CTS buffers) plus the
   1085 fillers; the structure count is the top plus the
   20 masters those instances use.
 - `gds_summary`: the header agrees with the export
-  payload (`gds path=clk_top.gds size=233416
+  payload (`gds path=clk_top.gds size=280972
   instances=1259 structures=21 library=eos
   dbu_per_micron=2000`, the last from the file's own
   UNITS and the mock tech's 2000 DBU per micron). The
   top structure line reads `structure name=clk_top
-  top=1 boundaries=2961 paths=220 srefs=1259`, and the
-  layer census is `via1 boundaries=2024 paths=102`,
-  `em2 boundaries=987 paths=118`, `via2 boundaries=8
-  paths=0`, `em3 boundaries=8 paths=0`. The 987 em2
+  top=1 boundaries=2976 paths=1326 srefs=1259`, and the
+  layer census is `via1 boundaries=2039 paths=455`,
+  `em2 boundaries=987 paths=865`, `via2 boundaries=8
+  paths=0`, `em3 boundaries=8 paths=6`. The 987 em2
   boundaries are the routed vias' boxes on that layer;
   with this unit's writer fix, every via boundary in
   the file is centered at its via point (before the
   fix, all of them were emitted at the layout origin).
+
+The size and census above were re-measured in the
+extract-fix unit and supersede the F8 values (233416
+bytes, 220 paths): before that unit, the export carried
+the extraction pre-pass's re-encoded traversal trees,
+not the routed wires, because extraction replaced every
+routed net's wire stream in place before finish and
+export ran; with wire preservation in the extract
+runner, the exported paths are TritonRoute's wires, and
+the top structure's 1326 paths are the route record's
+own wire count. No other number in this section moved:
+the filler count, the instance and structure counts,
+and every earlier stage's payload are as F8 measured
+them.
 
 In the GUI, the Finish stage button runs `finish` and
 lands on the GDS canvas, the sixth center page, which

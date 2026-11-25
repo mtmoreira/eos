@@ -54,6 +54,29 @@ with invented fixture values documented as invented in
 the mock README: a mock extraction validates mechanics,
 never a signoff claim.
 
+## Wire preservation
+
+The extractor's pre-pass (`odb::orderWires`) re-encodes
+every routed net's wire stream in place as a connectivity
+traversal tree before the RC builder reads it: segments
+off the chosen tree are dropped, layers change, and via
+stubs can be left geometrically disconnected. That
+reordered encoding is the extractor's input, not a
+product of the run. The runner therefore snapshots each
+affected net's wire stream before the extractor runs and
+restores it after the SPEF is written, so the session
+database keeps the routed wires the router wrote and
+downstream geometry consumers (finish, the GDS writer,
+the DRC and LVS walks) never see the traversal trees. On
+success the only change the command leaves in the
+database is the RC annotation; on failure the wire
+geometry and the nets' wire-ordered/disconnected flags
+are restored to their pre-run state as well. One named
+exception: a processed net's special wires are not
+preserved (odb offers no verbatim SWire copy; their
+destruction inside the ordering pass is pre-existing
+engine behavior, unchanged by the runner).
+
 ## The extract session record
 
 On success only, the run is stored in a session record
