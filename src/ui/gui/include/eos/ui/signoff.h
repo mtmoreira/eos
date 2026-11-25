@@ -74,30 +74,56 @@ struct SignoffLvsResidual {
   std::string cause;
 };
 
+// One located connectivity mismatch from the signoff payload
+// (in-tree LVS only): the kind ("open", "short", or
+// "floating"), the net it is charged to, the second net for a
+// short, the pin for an open, the layer for a short or
+// floating, and the bounding box in DBU.
+struct SignoffLvsMismatch {
+  std::string kind;
+  std::string net;
+  std::string other_net;
+  std::string pin;
+  std::string layer;
+  int x1 = 0;
+  int y1 = 0;
+  int x2 = 0;
+  int y2 = 0;
+};
+
 class SignoffModel {
  public:
   // Parses a signoff_summary payload: a "signoff" header line
   // with the DRC, LVS, and antenna verdicts, the stale flag,
   // the DRC source ("intree" when the DRC verdicts come from a
   // drc_run record, "report" otherwise; older payloads omit
-  // it and read as "report"), the DRC and antenna counts, the
-  // two report paths, and the design fingerprint; then one
-  // "drc" line per rule family, one "drc_violation" line per
-  // located violation (in-tree DRC only, after the family
-  // lines), one "lvs" line per comparison path (klayout, then
-  // magic), one "lvs" line per named discrepancy, and at most
-  // one "lvs_residual" line. The header's DRC verdict must agree
-  // with its violation count, the antenna verdict with its net
-  // and pin counts, and the LVS verdict with the two path
-  // verdicts; the family categories must sum to no more than
-  // the header total and the family violations must sum to the
-  // header total; in-tree, the violation lines per check must
-  // match the family violation counts. Returns false (signoff
+  // it and read as "report"), the LVS source in the same shape
+  // ("intree" when the LVS verdict comes from an lvs_run
+  // record, with the in-tree comparison counts in the header),
+  // the DRC and antenna counts, the two report paths, and the
+  // design fingerprint; then one "drc" line per rule family,
+  // one "drc_violation" line per located violation (in-tree
+  // DRC only, after the family lines), and the LVS block: for
+  // a report source, one "lvs" line per comparison path
+  // (klayout, then magic), one "lvs" line per named
+  // discrepancy, and at most one "lvs_residual" line; for an
+  // in-tree source, three "lvs_check" lines (open, short,
+  // floating) and one "lvs_mismatch" line per located
+  // mismatch. The header's DRC verdict must agree with its
+  // violation count, the antenna verdict with its net and pin
+  // counts, and the LVS verdict with the two path verdicts
+  // (report) or with the mismatch total (in-tree); the family
+  // categories must sum to no more than the header total and
+  // the family violations must sum to the header total;
+  // in-tree DRC, the violation lines per check must match the
+  // family violation counts; in-tree LVS, the kind counts must
+  // sum to the mismatch total and the mismatch lines per kind
+  // must match the kind counts. Returns false (signoff
   // unchanged) on any malformed line, unknown key, unknown
   // verdict, kind, or cause, duplicate family or discrepancy
-  // or violation, missing path row, unknown violation check,
-  // or count or verdict mismatch. A successful load replaces
-  // the previous signoff.
+  // or violation or mismatch, missing path row or check line,
+  // unknown violation check, or count or verdict mismatch. A
+  // successful load replaces the previous signoff.
   bool LoadPayload(const std::string& payload);
   void Clear();
 
@@ -130,6 +156,25 @@ class SignoffModel {
   const std::vector<SignoffDrcViolation>& DrcViolationList() const {
     return drc_violation_list_;
   }
+  // The LVS source: "intree" when the verdict comes from an
+  // lvs_run record, "report" when it comes from the external
+  // report. Older payloads omit the key and read as "report".
+  const std::string& LvsSource() const { return lvs_source_; }
+  // The in-tree comparison counts; zero for a report source.
+  std::size_t LvsNetsCompared() const { return lvs_nets_compared_; }
+  std::size_t LvsPinsCompared() const { return lvs_pins_compared_; }
+  std::size_t LvsMismatches() const { return lvs_mismatches_; }
+  std::size_t LvsKindCount(const std::string& kind) const {
+    if (kind == "open") return lvs_open_;
+    if (kind == "short") return lvs_short_;
+    if (kind == "floating") return lvs_floating_;
+    return 0;
+  }
+  // The located mismatches, in-tree LVS only; empty for a
+  // report source or a clean in-tree run.
+  const std::vector<SignoffLvsMismatch>& LvsMismatchList() const {
+    return lvs_mismatch_list_;
+  }
   const std::vector<SignoffLvsPath>& LvsPaths() const {
     return lvs_paths_;
   }
@@ -155,6 +200,14 @@ class SignoffModel {
   std::string drc_source_ = "report";
   std::vector<SignoffDrcFamily> drc_families_;
   std::vector<SignoffDrcViolation> drc_violation_list_;
+  std::string lvs_source_ = "report";
+  std::size_t lvs_nets_compared_ = 0;
+  std::size_t lvs_pins_compared_ = 0;
+  std::size_t lvs_mismatches_ = 0;
+  std::size_t lvs_open_ = 0;
+  std::size_t lvs_short_ = 0;
+  std::size_t lvs_floating_ = 0;
+  std::vector<SignoffLvsMismatch> lvs_mismatch_list_;
   std::vector<SignoffLvsPath> lvs_paths_;
   std::vector<SignoffLvsIssue> lvs_issues_;
   std::optional<SignoffLvsResidual> residual_;

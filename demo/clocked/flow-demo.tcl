@@ -1,5 +1,6 @@
 # Full-flow demo script for the clocked design (F6 route unit,
-# F7 extraction tail, F8 finish-and-export tail, F9 ECO step).
+# F7 extraction tail, F8 finish-and-export tail, F9 ECO step,
+# F13 connectivity LVS tail).
 # Run from demo/clocked: ../../build/apps/eos/eos flow-demo.tcl
 # The same commands can be typed in the GUI console entry line
 # instead, one per Return (the eos:: prefix is optional there).
@@ -23,7 +24,12 @@
 # has no pg pins and the design has no power or ground
 # nets, so no PDN is built), the finish record query, the
 # GDS export beside the demo's other products, and the GDS
-# record query, which reads the export back.
+# record query, which reads the export back. Last, the
+# connectivity LVS run over the finished design: it judges
+# the final artifact (finish adds fillers only, and fillers
+# carry no pins), so the demo ends with the comparison of
+# the exported design's routed geometry against its logical
+# topology.
 # Measured outputs for this sequence are recorded in README.md.
 eos::create_scenario func_tt func tt estimate
 eos::read_liberty tt ../../src/pd/rsz/tests/mock/eos_mock.lib
@@ -59,3 +65,4 @@ eos::finish
 eos::finish_summary
 eos::write_gds clk_top.gds
 eos::gds_summary
+eos::lvs_run

@@ -115,10 +115,10 @@ std::optional<CommandResult> NeedTopBlock(const CommandContext& ctx) {
 // any design input at all. Empty when the session holds no
 // design at all. A floorplan-only or routing-only change moves
 // no instance, so it does not flip the fingerprint in v1; a
-// place or a new mapping does. Shared by signoff_summary and
-// drc_run: both store the fingerprint they ran against, and
-// signoff_summary flags the stored verdicts stale when the
-// current fingerprint differs.
+// place or a new mapping does. Shared by signoff_summary,
+// drc_run, and lvs_run: each stores the fingerprint it ran
+// against, and signoff_summary flags the stored verdicts
+// stale when the current fingerprint differs.
 std::string DesignFingerprint(const CommandContext& ctx,
                               bool* had_design) {
   std::string input;
@@ -409,6 +409,7 @@ void ResetProject(CommandContext& ctx) {
   ctx.eco = CommandContext::EcoSession();
   ctx.signoff = CommandContext::SignoffSession();
   ctx.drc = CommandContext::DrcSession();
+  ctx.lvs = CommandContext::LvsSession();
   ctx.wire_rc_overrides.clear();
   ctx.engine_log_lines.clear();
 }
@@ -10332,6 +10333,7 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         ctx.eco = CommandContext::EcoSession();
         ctx.signoff = CommandContext::SignoffSession();
         ctx.drc = CommandContext::DrcSession();
+        ctx.lvs = CommandContext::LvsSession();
         return CommandResult::Ok(
             "restored=1 design=" + ctx.project.design->name() +
             " revision=" +
@@ -10594,12 +10596,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
   // the DRC, LVS, and antenna verdicts, one DRC row per rule
   // family, one LVS row per comparison path, one row per named
   // discrepancy, and the successor residual, plus the design
-  // fingerprint and the stale flag. The LVS and antenna verdicts
-  // come from the external PV evidence reports
+  // fingerprint and the stale flag. The antenna verdict comes
+  // from the external PV evidence reports
   // (docs/gcd-pv-results.md and docs/gcd-lvs-magic.md by
   // default); the DRC verdicts come from the in-tree record a
   // drc_run stored, when one exists, else from the external
-  // report. It is a query, not a report: it writes no file,
+  // report, and the LVS verdict likewise from the in-tree
+  // record an lvs_run stored, else from the external report.
+  // It is a query, not a report: it writes no file,
   // runs no engine, and needs no design in the session: the
   // panel renders the recorded gcd verdicts until a design is
   // loaded. It fails fast with the path named when a report
@@ -10679,6 +10683,14 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         if (drc_intree && fingerprint != ctx.drc.fingerprint) {
           stale = true;
         }
+        // The same rule for the LVS record, independent of
+        // the DRC record and of the report re-baseline below:
+        // re-reading the reports does not refresh the in-tree
+        // LVS verdict.
+        const bool lvs_intree = ctx.lvs.has_record;
+        if (lvs_intree && fingerprint != ctx.lvs.fingerprint) {
+          stale = true;
+        }
         CommandContext::SignoffSession& stored = ctx.signoff;
         if (!stored.has_record || stored.pv_path != pv_path ||
             stored.lvs_path != lvs_path ||
@@ -10702,7 +10714,9 @@ void RegisterCoreCommands(CommandRegistry& registry) {
         };
         // The DRC source: the in-tree record when a drc_run
         // has stored one, else the external report. The LVS
-        // and antenna verdicts always come from the reports.
+        // source is the same shape: the in-tree record when an
+        // lvs_run has stored one, else the external report.
+        // The antenna verdict always comes from the reports.
         // The in-tree DRC families are the checks themselves
         // (one category each), and the violations carry their
         // locations.
@@ -10716,9 +10730,15 @@ void RegisterCoreCommands(CommandRegistry& registry) {
           drc_categories = ctx.drc.record.checks.size();
           drc_violations = ctx.drc.record.TotalViolations();
         }
+        pv::SignoffVerdict lvs_verdict = record.lvs;
+        if (lvs_intree) {
+          lvs_verdict = ctx.lvs.record.TotalMismatches() == 0
+                            ? pv::SignoffVerdict::kPass
+                            : pv::SignoffVerdict::kFail;
+        }
         std::string payload =
             "signoff drc=" + std::string(verdict(drc_verdict)) +
-            " lvs=" + verdict(record.lvs) +
+            " lvs=" + verdict(lvs_verdict) +
             " antenna=" + verdict(record.antenna) +
             " stale=" + std::string(stale ? "1" : "0") +
             " drc_source=" +
@@ -10727,6 +10747,16 @@ void RegisterCoreCommands(CommandRegistry& registry) {
             std::to_string(drc_categories) +
             " drc_violations=" +
             std::to_string(drc_violations) +
+            " lvs_source=" +
+            std::string(lvs_intree ? "intree" : "report") +
+            (lvs_intree
+                 ? " lvs_nets_compared=" +
+                       std::to_string(ctx.lvs.record.nets_compared) +
+                       " lvs_pins_compared=" +
+                       std::to_string(ctx.lvs.record.pins_compared) +
+                       " lvs_mismatches=" +
+                       std::to_string(ctx.lvs.record.TotalMismatches())
+                 : "") +
             " antenna_net_violations=" +
             std::to_string(record.antenna_net_violations) +
             " antenna_pin_violations=" +
@@ -10764,36 +10794,68 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                        std::to_string(family.violations);
           }
         }
-        for (const pv::SignoffLvsPath& lvs_path_record :
-             record.lvs_paths) {
-          payload += "\nlvs path=" + lvs_path_record.path +
-                     " classes_compared=" +
-                     std::to_string(lvs_path_record.classes_compared) +
-                     " classes_equivalent=" +
-                     std::to_string(lvs_path_record.classes_equivalent);
-          if (lvs_path_record.has_fingers) {
-            payload += " fingers_extracted=" +
-                       std::to_string(
-                           lvs_path_record.fingers_extracted) +
-                       " fingers_reference=" +
-                       std::to_string(
-                           lvs_path_record.fingers_reference);
+        if (lvs_intree) {
+          // The in-tree record replaces the report's LVS
+          // block: the three per-kind counts and one located
+          // line per mismatch, in record order.
+          for (const char* kind : {"open", "short", "floating"}) {
+            payload += "\nlvs_check kind=" + std::string(kind) +
+                       " mismatches=" +
+                       std::to_string(ctx.lvs.record.CountKind(kind));
           }
-          payload += " verdict=" + std::string(verdict(lvs_path_record.verdict));
-        }
-        for (const pv::SignoffLvsIssue& issue : record.lvs_issues) {
-          payload += "\nlvs issue=" + issue.issue +
-                     " cell=" + issue.cell + " kind=" + issue.kind +
-                     " path=" + issue.path;
-        }
-        if (record.lvs_residual.has_value()) {
-          const pv::SignoffLvsResidual& residual = *record.lvs_residual;
-          payload += "\nlvs_residual cell=" + residual.cell +
-                     " transistors=" +
-                     std::to_string(residual.transistors) +
-                     " instances=" +
-                     std::to_string(residual.instances) +
-                     " cause=" + residual.cause + " path=magic";
+          for (const pv::LvsMismatch& mismatch :
+               ctx.lvs.record.mismatches) {
+            payload += "\nlvs_mismatch kind=" + mismatch.kind +
+                       " net=" + mismatch.net;
+            if (mismatch.kind == "open") {
+              payload += " pin=" + mismatch.pin;
+            } else if (mismatch.kind == "short") {
+              payload += " other_net=" + mismatch.other_net +
+                         " layer=" + mismatch.layer;
+            } else {
+              payload += " layer=" + mismatch.layer;
+            }
+            payload += " bbox=" + std::to_string(mismatch.x1) +
+                       "," + std::to_string(mismatch.y1) + "," +
+                       std::to_string(mismatch.x2) + "," +
+                       std::to_string(mismatch.y2);
+          }
+        } else {
+          for (const pv::SignoffLvsPath& lvs_path_record :
+               record.lvs_paths) {
+            payload += "\nlvs path=" + lvs_path_record.path +
+                       " classes_compared=" +
+                       std::to_string(
+                           lvs_path_record.classes_compared) +
+                       " classes_equivalent=" +
+                       std::to_string(
+                           lvs_path_record.classes_equivalent);
+            if (lvs_path_record.has_fingers) {
+              payload += " fingers_extracted=" +
+                         std::to_string(
+                             lvs_path_record.fingers_extracted) +
+                         " fingers_reference=" +
+                         std::to_string(
+                             lvs_path_record.fingers_reference);
+            }
+            payload +=
+                " verdict=" + std::string(verdict(lvs_path_record.verdict));
+          }
+          for (const pv::SignoffLvsIssue& issue : record.lvs_issues) {
+            payload += "\nlvs issue=" + issue.issue +
+                       " cell=" + issue.cell + " kind=" + issue.kind +
+                       " path=" + issue.path;
+          }
+          if (record.lvs_residual.has_value()) {
+            const pv::SignoffLvsResidual& residual =
+                *record.lvs_residual;
+            payload += "\nlvs_residual cell=" + residual.cell +
+                       " transistors=" +
+                       std::to_string(residual.transistors) +
+                       " instances=" +
+                       std::to_string(residual.instances) +
+                       " cause=" + residual.cause + " path=magic";
+          }
         }
         return CommandResult::Ok(payload);
       });
@@ -10857,6 +10919,79 @@ void RegisterCoreCommands(CommandRegistry& registry) {
                        std::to_string(violation.x2) + "," +
                        std::to_string(violation.y2);
           }
+        }
+        return CommandResult::Ok(payload);
+      });
+
+  // lvs_run (F13 connectivity LVS engine): runs the in-tree
+  // connectivity LVS on the live ODB and stores the verdict
+  // in the session, so signoff_summary and the Signoff panel
+  // can report it. No options in v1. Fails fast with the
+  // offending state named when there is no technology, no top
+  // block, no routed design, or no logical netlist. Only a
+  // successful run updates the stored record; a failed run
+  // leaves the previous record untouched, exactly like
+  // drc_run. The payload is the structured query form: one
+  // header line, the three lvs_check lines (always printed,
+  // clean or not: zero per kind on a clean design, never a
+  // bare PASS), and one lvs_mismatch line per located
+  // mismatch.
+  add("lvs_run", "lvs_run",
+      [](CommandContext& ctx, const std::vector<std::string>& args)
+          -> CommandResult {
+        if (!args.empty()) {
+          return CommandResult::Fail(
+              Diag::kInvalidArgument,
+              "lvs_run: unexpected argument: " + args.front());
+        }
+        if (!ctx.timing.odb.has_value() ||
+            ctx.timing.odb->RawDatabase() == nullptr ||
+            ctx.timing.odb->RawDatabase()->getTech() == nullptr) {
+          return CommandResult::Fail(
+              Diag::kInvalidConfiguration,
+              "no technology data loaded: eos::import_odb first");
+        }
+        if (auto bad = NeedTopBlock(ctx)) return *bad;
+        pv::LvsRecord record;
+        std::string error;
+        if (!pv::RunConnectivityLvs(ctx.timing.odb->RawDatabase(),
+                                    &record, &error)) {
+          return CommandResult::Fail(Diag::kInvalidConfiguration,
+                                     error);
+        }
+        ctx.lvs.has_record = true;
+        ctx.lvs.record = record;
+        ctx.lvs.fingerprint = DesignFingerprint(ctx, nullptr);
+        std::string payload =
+            "lvs source=live-database nets_compared=" +
+            std::to_string(record.nets_compared) +
+            " pins_compared=" + std::to_string(record.pins_compared) +
+            " mismatches=" +
+            std::to_string(record.TotalMismatches()) +
+            " single_pin_nets=" +
+            std::to_string(record.single_pin_nets) +
+            " special_nets_skipped=" +
+            std::to_string(record.special_nets_skipped);
+        for (const char* kind : {"open", "short", "floating"}) {
+          payload += "\nlvs_check kind=" + std::string(kind) +
+                     " mismatches=" +
+                     std::to_string(record.CountKind(kind));
+        }
+        for (const pv::LvsMismatch& mismatch : record.mismatches) {
+          payload += "\nlvs_mismatch kind=" + mismatch.kind +
+                     " net=" + mismatch.net;
+          if (mismatch.kind == "open") {
+            payload += " pin=" + mismatch.pin;
+          } else if (mismatch.kind == "short") {
+            payload += " other_net=" + mismatch.other_net +
+                       " layer=" + mismatch.layer;
+          } else {
+            payload += " layer=" + mismatch.layer;
+          }
+          payload += " bbox=" + std::to_string(mismatch.x1) + "," +
+                     std::to_string(mismatch.y1) + "," +
+                     std::to_string(mismatch.x2) + "," +
+                     std::to_string(mismatch.y2);
         }
         return CommandResult::Ok(payload);
       });

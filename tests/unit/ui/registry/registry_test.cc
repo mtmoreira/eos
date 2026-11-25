@@ -111,7 +111,8 @@ TEST(Registry, CoreSetIsComplete) {
   // The F6 route unit adds route_summary (one command).
   // The F7 extract unit adds extract_summary (one command).
   // The F9 ECO unit adds eco_summary (one command).
-  EXPECT_EQ(shell.registry.Names().size(), 130u);
+  // The F13 LVS unit adds lvs_run (one command).
+  EXPECT_EQ(shell.registry.Names().size(), 131u);
   EXPECT_NE(shell.registry.Find("finish"), nullptr);
   EXPECT_NE(shell.registry.Find("write_gds"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_parasitics"), nullptr);
@@ -123,6 +124,7 @@ TEST(Registry, CoreSetIsComplete) {
   EXPECT_NE(shell.registry.Find("route_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("extract_summary"), nullptr);
   EXPECT_NE(shell.registry.Find("eco_summary"), nullptr);
+  EXPECT_NE(shell.registry.Find("lvs_run"), nullptr);
   EXPECT_NE(shell.registry.Find("gui_show"), nullptr);
   EXPECT_NE(shell.registry.Find("check_timing"), nullptr);
   EXPECT_NE(shell.registry.Find("set_waiver"), nullptr);
@@ -13176,6 +13178,17 @@ TEST(CoreCommands, RestoreClearsStageRecords) {
   Shell shell;
   BuildFinishedClockedDemoSession(shell, dir);
   ASSERT_TRUE(shell.Run("write_gds", {dir.Path("clk_top.gds")}).ok);
+  // F13: the LVS record is set too, and signoff_summary reads
+  // it as the in-tree LVS source.
+  const std::string pv_file = dir.Write("pv.md", kSignoffPv);
+  const std::string lvs_file = dir.Write("lvs.md", kSignoffLvs);
+  ASSERT_TRUE(shell.Run("lvs_run").ok);
+  ASSERT_TRUE(shell.ctx.lvs.has_record);
+  const CommandResult signoff_before =
+      shell.Run("signoff_summary", {"-pv", pv_file, "-lvs", lvs_file});
+  ASSERT_TRUE(signoff_before.ok) << signoff_before.message;
+  EXPECT_NE(signoff_before.payload.find("lvs_source=intree"),
+            std::string::npos);
   // Every stage record is set, and the summaries answer.
   ASSERT_TRUE(shell.ctx.place.placed);
   ASSERT_FALSE(shell.ctx.cts.nets.empty());
@@ -13202,6 +13215,14 @@ TEST(CoreCommands, RestoreClearsStageRecords) {
   EXPECT_FALSE(shell.ctx.gds.written);
   EXPECT_FALSE(shell.ctx.signoff.has_record);
   EXPECT_FALSE(shell.ctx.drc.has_record);
+  EXPECT_FALSE(shell.ctx.lvs.has_record);
+  // With the LVS record gone, signoff_summary falls back to
+  // the external report as the LVS source.
+  const CommandResult signoff_after =
+      shell.Run("signoff_summary", {"-pv", pv_file, "-lvs", lvs_file});
+  ASSERT_TRUE(signoff_after.ok) << signoff_after.message;
+  EXPECT_NE(signoff_after.payload.find("lvs_source=report"),
+            std::string::npos);
   // The summaries that check their record first fail fast
   // with their not-run texts; place_summary returns not-ok
   // (its first gate after a restore is the top-block check,
@@ -13215,6 +13236,177 @@ TEST(CoreCommands, RestoreClearsStageRecords) {
   EXPECT_NE(route_summary.message.find("no routing: eos::route first"),
             std::string::npos);
   EXPECT_FALSE(shell.Run("place_summary").ok);
+}
+
+// F13 LVS engine: lvs_run fails fast with no technology.
+TEST(CoreCommands, LvsRunFailsFastWithNoTechnology) {
+  Shell shell;
+  const CommandResult result = shell.Run("lvs_run", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no technology data loaded"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.lvs.has_record);
+}
+
+// F13 LVS engine: lvs_run rejects an unexpected argument.
+TEST(CoreCommands, LvsRunRejectsUnexpectedArgument) {
+  Shell shell;
+  const CommandResult result = shell.Run("lvs_run", {"extra"});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidArgument);
+  EXPECT_NE(result.message.find("lvs_run: unexpected argument: extra"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.lvs.has_record);
+}
+
+// F13 LVS engine: lvs_run fails fast with no routed design.
+TEST(CoreCommands, LvsRunFailsFastWithNoRoutedDesign) {
+  TimingTempDir dir;
+  Shell shell;
+  ImportDrcDatabase(shell, dir, DrcShape::kNone);
+  const CommandResult result = shell.Run("lvs_run", {});
+  ASSERT_FALSE(result.ok);
+  EXPECT_EQ(result.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(result.message.find("no routed design"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.lvs.has_record);
+}
+
+// F13 A4 + A5 + A7 (in-suite): lvs_run on the finished
+// clocked demo stores the record; signoff_summary consumes
+// it and flags it stale after an edit; destroying one routed
+// net's wire through the raw database handle makes the
+// re-run report opens for that net's pins beyond the first;
+// a failed run then leaves the stored record untouched. This
+// test runs the full synth-to-finish chain, so it has its
+// own ctest entry (ui.registry.lvs.end_to_end).
+TEST(CoreCommands, LvsRunsClockedDemoEndToEnd) {
+  TimingTempDir dir;
+  const std::string pv_file = dir.Write("pv.md", kSignoffPv);
+  const std::string lvs_file = dir.Write("lvs.md", kSignoffLvs);
+  Shell shell;
+  BuildFinishedClockedDemoSession(shell, dir);
+  ASSERT_TRUE(shell.Run("write_gds", {dir.Path("clk_top.gds")}).ok);
+  const auto signoff = [&shell, &pv_file, &lvs_file]() {
+    return shell.Run("signoff_summary",
+                     {"-pv", pv_file, "-lvs", lvs_file});
+  };
+  // No record yet: the LVS verdict comes from the report.
+  const CommandResult before = signoff();
+  ASSERT_TRUE(before.ok) << before.message;
+  EXPECT_NE(before.payload.find("lvs_source=report"),
+            std::string::npos);
+  EXPECT_FALSE(shell.ctx.lvs.has_record);
+
+  // The run on the finished database (the demo posture of
+  // design section 6, judged here in-suite).
+  const CommandResult run = shell.Run("lvs_run");
+  ASSERT_TRUE(run.ok) << run.message;
+  EXPECT_NE(run.payload.find("lvs source=live-database"),
+            std::string::npos);
+  EXPECT_NE(run.payload.find("special_nets_skipped=0"),
+            std::string::npos);
+  ASSERT_TRUE(shell.ctx.lvs.has_record);
+  // The finished demo compares clean, and nets_compared
+  // cross-checks against the route record's routed count
+  // (design section 6's judging rule).
+  EXPECT_EQ(shell.ctx.lvs.record.TotalMismatches(), 0u);
+  EXPECT_NE(run.payload.find("mismatches=0"), std::string::npos);
+  EXPECT_NE(run.payload.find("lvs_check kind=open mismatches=0"),
+            std::string::npos);
+  EXPECT_NE(run.payload.find("lvs_check kind=short mismatches=0"),
+            std::string::npos);
+  EXPECT_NE(run.payload.find("lvs_check kind=floating mismatches=0"),
+            std::string::npos);
+  EXPECT_EQ(shell.ctx.lvs.record.nets_compared,
+            static_cast<std::size_t>(shell.ctx.route.routed_count));
+  EXPECT_GT(shell.ctx.lvs.record.pins_compared, 0u);
+
+  // A5: signoff_summary consumes the record: the in-tree
+  // counts replace the report's LVS block.
+  const CommandResult intree = signoff();
+  ASSERT_TRUE(intree.ok) << intree.message;
+  EXPECT_NE(intree.payload.find("lvs_source=intree"),
+            std::string::npos);
+  EXPECT_NE(intree.payload.find("lvs=pass"), std::string::npos);
+  EXPECT_NE(intree.payload.find("lvs_mismatches=0"),
+            std::string::npos);
+  EXPECT_NE(intree.payload.find("stale=0"), std::string::npos);
+  EXPECT_EQ(intree.payload.find("\nlvs path="), std::string::npos);
+  EXPECT_EQ(intree.payload.find("\nlvs issue="), std::string::npos);
+
+  // A5: a design edit makes the stored LVS evidence stale,
+  // by the record's fingerprint, independent of the reports.
+  shell.ctx.synth.verilog_path = dir.Path("two.v");
+  shell.ctx.synth.top_cell = "two";
+  const CommandResult stale = signoff();
+  ASSERT_TRUE(stale.ok) << stale.message;
+  EXPECT_NE(stale.payload.find("stale=1"), std::string::npos);
+  EXPECT_NE(stale.payload.find("lvs_source=intree"),
+            std::string::npos);
+
+  // A4 corruption: destroy one routed net's wire through the
+  // RawDatabase handle the context owns (the probe at the
+  // pinned headers: dbWire::destroy is public, route.cc:174
+  // uses it). The victim is the name-first wired net with at
+  // least two instance pins.
+  odb::dbDatabase* raw = shell.ctx.timing.odb->RawDatabase();
+  ASSERT_NE(raw, nullptr);
+  odb::dbBlock* block = raw->getChip()->getBlock();
+  ASSERT_NE(block, nullptr);
+  std::vector<odb::dbNet*> wired;
+  for (odb::dbNet* net : block->getNets()) {
+    if (net->getWire() != nullptr && net->getITerms().size() >= 2) {
+      wired.push_back(net);
+    }
+  }
+  ASSERT_FALSE(wired.empty());
+  std::sort(wired.begin(), wired.end(),
+            [](odb::dbNet* a, odb::dbNet* b) {
+              return std::string(a->getName()) <
+                     std::string(b->getName());
+            });
+  odb::dbNet* victim = wired.front();
+  const std::string victim_name = victim->getName();
+  std::size_t victim_pins = victim->getITerms().size();
+  for (odb::dbBTerm* bterm : block->getBTerms()) {
+    if (bterm->getNet() == victim) {
+      ++victim_pins;
+    }
+  }
+  ASSERT_GE(victim_pins, 2u);
+  odb::dbWire::destroy(victim->getWire());
+  const CommandResult severed = shell.Run("lvs_run");
+  ASSERT_TRUE(severed.ok) << severed.message;
+  ASSERT_TRUE(shell.ctx.lvs.has_record);
+  EXPECT_EQ(shell.ctx.lvs.record.CountKind("open"),
+            victim_pins - 1);
+  EXPECT_EQ(shell.ctx.lvs.record.TotalMismatches(),
+            victim_pins - 1);
+  for (const pv::LvsMismatch& mismatch :
+       shell.ctx.lvs.record.mismatches) {
+    EXPECT_EQ(mismatch.net, victim_name);
+    EXPECT_EQ(mismatch.kind, "open");
+  }
+  const std::size_t severed_total =
+      shell.ctx.lvs.record.TotalMismatches();
+
+  // A4: a failed run leaves the stored record untouched.
+  // Destroy every remaining wire, so the engine fails fast
+  // with no routed design, and the record still stands.
+  for (odb::dbNet* net : block->getNets()) {
+    if (net->getWire() != nullptr) {
+      odb::dbWire::destroy(net->getWire());
+    }
+  }
+  const CommandResult failed = shell.Run("lvs_run");
+  ASSERT_FALSE(failed.ok);
+  EXPECT_EQ(failed.diag, Diag::kInvalidConfiguration);
+  EXPECT_NE(failed.message.find("no routed design"),
+            std::string::npos);
+  ASSERT_TRUE(shell.ctx.lvs.has_record);
+  EXPECT_EQ(shell.ctx.lvs.record.TotalMismatches(), severed_total);
 }
 
 // F6 A7: on demo/synth, after the optloop flow through

@@ -537,10 +537,17 @@
       "via": {}
     },
     "lvs": {
-      "depends_on": [],
+      "depends_on": [
+        "odb"
+      ],
       "layer": "L4",
       "path": "src/pv/lvs",
-      "via": {}
+      "via": {
+        "odb": [
+          "cmake-link",
+          "include"
+        ]
+      }
     },
     "mem": {
       "depends_on": [],
@@ -709,6 +716,7 @@
         "gds",
         "ids",
         "ledger",
+        "lvs",
         "odb",
         "place",
         "reports",
@@ -783,6 +791,10 @@
           "include"
         ],
         "ledger": [
+          "cmake-link",
+          "include"
+        ],
+        "lvs": [
           "cmake-link",
           "include"
         ],
@@ -1642,6 +1654,15 @@
         "tests/unit/pv/extract/extract_test.cc"
       ]
     },
+    "pv.lvs": {
+      "modules": [
+        "lvs",
+        "odb"
+      ],
+      "sources": [
+        "tests/unit/pv/lvs/lvs_test.cc"
+      ]
+    },
     "pv.signoff": {
       "modules": [
         "signoff"
@@ -1901,6 +1922,16 @@
       ]
     },
     "ui.registry.finish.summary": {
+      "modules": [
+        "checkpoint",
+        "gds",
+        "registry"
+      ],
+      "sources": [
+        "tests/unit/ui/registry/registry_test.cc"
+      ]
+    },
+    "ui.registry.lvs.end_to_end": {
       "modules": [
         "checkpoint",
         "gds",

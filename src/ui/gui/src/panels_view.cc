@@ -604,32 +604,64 @@ std::string RenderSignoff(const SignoffModel& signoff) {
            std::to_string(violation.x2) + "," +
            std::to_string(violation.y2) + "\n";
   }
-  out += "LVS: ";
-  out += signoff.LvsPass() ? "PASS" : "NOT CLEAN";
-  out += " (" + signoff.PvReport() + ", " + signoff.LvsReport() + ")\n";
-  for (const SignoffLvsPath& path : signoff.LvsPaths()) {
-    out += "  " + path.path + ": " +
-           std::to_string(path.classes_equivalent) + " of " +
-           std::to_string(path.classes_compared) +
-           " classes equivalent";
-    if (path.has_fingers) {
-      out += ", " + std::to_string(path.fingers_extracted) +
-             " fingers vs " + std::to_string(path.fingers_reference);
+  if (signoff.LvsSource() == "intree") {
+    out += "LVS (connectivity, in-tree): ";
+    out += signoff.LvsPass() ? "PASS" : "FAIL";
+    out += ", " + std::to_string(signoff.LvsMismatches()) +
+           " mismatches, " +
+           std::to_string(signoff.LvsNetsCompared()) +
+           " nets compared, " +
+           std::to_string(signoff.LvsPinsCompared()) +
+           " pins compared (live-database)\n";
+    for (const char* kind : {"open", "short", "floating"}) {
+      out += "  " + std::string(kind) + ": " +
+             std::to_string(signoff.LvsKindCount(kind)) +
+             " mismatches\n";
     }
-    out += path.pass ? ": PASS\n" : ": NOT CLEAN\n";
-  }
-  for (const SignoffLvsIssue& issue : signoff.LvsIssues()) {
-    out += "  " + issue.issue + " (" + issue.path + "): " +
-           IssueKindText(issue.kind);
-    if (issue.cell != "none") out += ", " + issue.cell;
-    out += "\n";
-  }
-  if (signoff.HasResidual()) {
-    const SignoffLvsResidual& residual = signoff.Residual();
-    out += "  Residual (magic): " + residual.cell + ", " +
-           std::to_string(residual.transistors) + " transistors in " +
-           std::to_string(residual.instances) + " instances, cause " +
-           residual.cause + "\n";
+    for (const SignoffLvsMismatch& mismatch :
+         signoff.LvsMismatchList()) {
+      out += "  " + mismatch.kind + " net=" + mismatch.net;
+      if (mismatch.kind == "open") {
+        out += " pin=" + mismatch.pin;
+      } else if (mismatch.kind == "short") {
+        out += " other_net=" + mismatch.other_net +
+               " layer=" + mismatch.layer;
+      } else {
+        out += " layer=" + mismatch.layer;
+      }
+      out += " bbox " + std::to_string(mismatch.x1) + "," +
+             std::to_string(mismatch.y1) + "," +
+             std::to_string(mismatch.x2) + "," +
+             std::to_string(mismatch.y2) + "\n";
+    }
+  } else {
+    out += "LVS: ";
+    out += signoff.LvsPass() ? "PASS" : "NOT CLEAN";
+    out += " (" + signoff.PvReport() + ", " + signoff.LvsReport() + ")\n";
+    for (const SignoffLvsPath& path : signoff.LvsPaths()) {
+      out += "  " + path.path + ": " +
+             std::to_string(path.classes_equivalent) + " of " +
+             std::to_string(path.classes_compared) +
+             " classes equivalent";
+      if (path.has_fingers) {
+        out += ", " + std::to_string(path.fingers_extracted) +
+               " fingers vs " + std::to_string(path.fingers_reference);
+      }
+      out += path.pass ? ": PASS\n" : ": NOT CLEAN\n";
+    }
+    for (const SignoffLvsIssue& issue : signoff.LvsIssues()) {
+      out += "  " + issue.issue + " (" + issue.path + "): " +
+             IssueKindText(issue.kind);
+      if (issue.cell != "none") out += ", " + issue.cell;
+      out += "\n";
+    }
+    if (signoff.HasResidual()) {
+      const SignoffLvsResidual& residual = signoff.Residual();
+      out += "  Residual (magic): " + residual.cell + ", " +
+             std::to_string(residual.transistors) + " transistors in " +
+             std::to_string(residual.instances) + " instances, cause " +
+             residual.cause + "\n";
+    }
   }
   out += "Antenna: ";
   out += signoff.AntennaPass() ? "PASS" : "FAIL";
