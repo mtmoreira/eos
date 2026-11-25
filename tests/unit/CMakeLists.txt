@@ -386,8 +386,11 @@ add_test(NAME ui.registry.extract.comparison
     --gtest_filter=CoreCommands.ExtractedStaComparesAgainstEstimated)
 # Extract-fix (design section 7): the wire-preservation test
 # runs the full synth-to-route chain and asserts in-process
-# byte-identical wire streams plus F7's exact payload counts,
-# so it gets its own process like the other clocked entries.
+# byte-identical wire streams plus the extract payload's
+# within-session count consistencies (design section 15:
+# the segment counts follow the routed geometry and are
+# not pinned to absolute values), so it gets its own
+# process like the other clocked entries.
 add_test(NAME ui.registry.extract.wire_preservation
   COMMAND eda_ui_registry_unit_test
     --gtest_filter=CoreCommands.ExtractPreservesRoutedWiresEndToEnd)

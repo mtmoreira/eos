@@ -12525,11 +12525,23 @@ TEST(CoreCommands, ExtractRerunReplacesRecord) {
 // after route, runs the bare extract_parasitics call with the
 // mock rules file, and asserts: every stream byte-identical,
 // isWireOrdered and isDisconnected as recorded, no net gained
-// or lost a wire, the SWire census on processed (non-supply)
-// nets zero before and zero after, and the extract payload
-// exactly F7's measured counts. All comparisons are within
-// this one process (route outcomes vary slightly between
-// processes; the F6 phenomenon).
+// or lost a wire, and the SWire census on processed
+// (non-supply) nets zero before and zero after. The extract
+// payload's counts are judged within this session: nets is
+// the routed net count (185, the route record's), cap_nodes
+// equals rsegs (the extractor creates one cap node per
+// segment), both segment counts are above zero, and a second
+// extract_parasitics run in the same session reproduces the
+// first run's counts exactly, with the streams still
+// byte-identical after it. The segment counts are NOT pinned
+// to F7's absolute values: they follow the routed geometry,
+// and route outcomes vary between processes (the F6
+// phenomenon). PR 151's first CI run routed differently
+// (rsegs=2632, cap_nodes=2632, cc_segs=1946 there against
+// 2486/2486/1786 in every local run) and refuted the
+// absolute pin; design section 15 records the correction.
+// F7's absolute numbers stand where they were measured:
+// the standalone demo runs behind A3 and the demo README.
 TEST(CoreCommands, ExtractPreservesRoutedWiresEndToEnd) {
   TimingTempDir dir;
   Shell shell;
@@ -12574,54 +12586,92 @@ TEST(CoreCommands, ExtractPreservesRoutedWiresEndToEnd) {
             << " stream entries=" << total_entries
             << " swires before=" << swires_before << "\n";
   EXPECT_EQ(swires_before, 0);
+  // The post-run state check, applied after each extraction
+  // run below: every stream byte-identical to the snapshot,
+  // flags as recorded, no net gained or lost a wire. It
+  // refreshes swires_after with the SWire census on
+  // processed nets after the run.
+  int swires_after = 0;
+  auto check_preserved = [&]() {
+    swires_after = 0;
+    std::size_t seen = 0;
+    for (odb::dbNet* net : block->getNets()) {
+      const auto it = before.find(net->getName());
+      ASSERT_NE(it, before.end()) << "net appeared: " << net->getName();
+      ++seen;
+      const WireState& want = it->second;
+      EXPECT_EQ(net->isDisconnected(), want.disconnected)
+          << "net " << net->getName();
+      EXPECT_EQ(net->isWireOrdered(), want.wire_ordered)
+          << "net " << net->getName();
+      odb::dbWire* wire = net->getWire();
+      ASSERT_EQ(wire != nullptr, want.has_wire)
+          << "net " << net->getName() << " gained or lost a wire";
+      if (wire != nullptr) {
+        ASSERT_EQ(wire->length(), want.stream.size())
+            << "net " << net->getName();
+        bool identical = true;
+        for (unsigned int i = 0; i < wire->length(); ++i) {
+          if (wire->getOpcode(static_cast<int>(i)) !=
+                  want.stream[i].first ||
+              wire->getData(static_cast<int>(i)) !=
+                  want.stream[i].second) {
+            identical = false;
+            break;
+          }
+        }
+        EXPECT_TRUE(identical)
+            << "net " << net->getName() << " wire stream changed";
+      }
+      if (!net->getSigType().isSupply()) {
+        swires_after += static_cast<int>(net->getSWires().size());
+      }
+    }
+    EXPECT_EQ(seen, before.size());
+  };
   const std::string mock_dir = EOS_MOCK_PDK_DIR;
   const std::string spef_path = dir.Path("clk_top.spef");
   const CommandResult result = shell.Run(
       "extract_parasitics",
       {spef_path, "-model", mock_dir + "/eos_mock.rules"});
   ASSERT_TRUE(result.ok) << result.message;
-  // The extract payload is exactly F7's (A3's counts, judged
-  // here in the same run that judges preservation).
-  EXPECT_EQ(RouteHeaderInt(result.payload, "nets"), 185);
-  EXPECT_EQ(RouteHeaderInt(result.payload, "rsegs"), 2486);
-  EXPECT_EQ(RouteHeaderInt(result.payload, "cap_nodes"), 2486);
-  EXPECT_EQ(RouteHeaderInt(result.payload, "cc_segs"), 1786);
-  int swires_after = 0;
-  std::size_t seen = 0;
-  for (odb::dbNet* net : block->getNets()) {
-    const auto it = before.find(net->getName());
-    ASSERT_NE(it, before.end()) << "net appeared: " << net->getName();
-    ++seen;
-    const WireState& want = it->second;
-    EXPECT_EQ(net->isDisconnected(), want.disconnected)
-        << "net " << net->getName();
-    EXPECT_EQ(net->isWireOrdered(), want.wire_ordered)
-        << "net " << net->getName();
-    odb::dbWire* wire = net->getWire();
-    ASSERT_EQ(wire != nullptr, want.has_wire)
-        << "net " << net->getName() << " gained or lost a wire";
-    if (wire != nullptr) {
-      ASSERT_EQ(wire->length(), want.stream.size())
-          << "net " << net->getName();
-      bool identical = true;
-      for (unsigned int i = 0; i < wire->length(); ++i) {
-        if (wire->getOpcode(static_cast<int>(i)) !=
-                want.stream[i].first ||
-            wire->getData(static_cast<int>(i)) !=
-                want.stream[i].second) {
-          identical = false;
-          break;
-        }
-      }
-      EXPECT_TRUE(identical)
-          << "net " << net->getName() << " wire stream changed";
-    }
-    if (!net->getSigType().isSupply()) {
-      swires_after += static_cast<int>(net->getSWires().size());
-    }
-  }
-  EXPECT_EQ(seen, before.size());
+  // The payload counts, judged within this session (see the
+  // header comment): nets is the routed net count, cap_nodes
+  // equals rsegs (one cap node per segment), and both
+  // segment counts are above zero, so the extraction plainly
+  // ran on this session's routed geometry. The absolute
+  // counts follow that geometry; they are pinned only
+  // against this session's own rerun, below.
+  const long long nets = RouteHeaderInt(result.payload, "nets");
+  const long long rsegs = RouteHeaderInt(result.payload, "rsegs");
+  const long long cap_nodes =
+      RouteHeaderInt(result.payload, "cap_nodes");
+  const long long cc_segs = RouteHeaderInt(result.payload, "cc_segs");
+  std::cout << "extract counts nets=" << nets << " rsegs=" << rsegs
+            << " cap_nodes=" << cap_nodes << " cc_segs=" << cc_segs
+            << "\n";
+  EXPECT_EQ(nets, 185);
+  EXPECT_EQ(cap_nodes, rsegs);
+  EXPECT_GT(rsegs, 0);
+  EXPECT_GT(cc_segs, 0);
+  check_preserved();
   std::cout << "swires after=" << swires_after << "\n";
+  EXPECT_EQ(swires_after, 0);
+  // A second extraction in the same session reproduces the
+  // first run's counts exactly (the rerun posture, judged
+  // here on the demo session), and the routed streams
+  // survive it byte for byte as well.
+  const std::string second_path = dir.Path("clk_top_second.spef");
+  const CommandResult second = shell.Run(
+      "extract_parasitics",
+      {second_path, "-model", mock_dir + "/eos_mock.rules"});
+  ASSERT_TRUE(second.ok) << second.message;
+  EXPECT_EQ(RouteHeaderInt(second.payload, "nets"), nets);
+  EXPECT_EQ(RouteHeaderInt(second.payload, "rsegs"), rsegs);
+  EXPECT_EQ(RouteHeaderInt(second.payload, "cap_nodes"), cap_nodes);
+  EXPECT_EQ(RouteHeaderInt(second.payload, "cc_segs"), cc_segs);
+  check_preserved();
+  std::cout << "swires after rerun=" << swires_after << "\n";
   EXPECT_EQ(swires_after, 0);
 }
 
